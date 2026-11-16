@@ -1,0 +1,417 @@
+{
+  "entities": {
+    "AdminUser": {
+      "title": "AdminUser",
+      "description": "Authorized Master Admin user record",
+      "type": "object",
+      "properties": {
+        "email": { "type": "string", "maxLength": 160 },
+        "displayName": { "type": "string", "maxLength": 120 },
+        "createdAt": { "type": "string", "format": "date-time" }
+      },
+      "required": ["email", "createdAt"]
+    },
+    "StaffAccount": {
+      "title": "StaffAccount",
+      "description": "Staff operator account (supports 50+ staff logins with branch isolation and custom permissions)",
+      "type": "object",
+      "properties": {
+        "staffCode": { "type": "string", "minLength": 2, "maxLength": 32, "pattern": "^[a-zA-Z0-9_\\-]+$" },
+        "displayName": { "type": "string", "minLength": 2, "maxLength": 100 },
+        "role": { "type": "string", "enum": ["Admin", "Manager", "Billing", "Accounts", "Dispatch", "Viewer"] },
+        "branchCode": { "type": "string", "maxLength": 32 },
+        "pinHash": { "type": "string", "minLength": 4, "maxLength": 128 },
+        "active": { "type": "boolean" },
+        "permissions": { "type": "array", "maxLength": 12 },
+        "ownerUid": { "type": "string", "minLength": 6, "maxLength": 128 },
+        "createdAt": { "type": "string", "format": "date-time" },
+        "updatedAt": { "type": "string", "format": "date-time" }
+      },
+      "required": ["staffCode", "displayName", "role", "pinHash", "active", "permissions", "ownerUid", "createdAt", "updatedAt"]
+    },
+    "Party": {
+      "title": "Party",
+      "description": "Customer, Consignor, Consignee, or Truck Broker master record",
+      "type": "object",
+      "properties": {
+        "name": { "type": "string", "minLength": 1, "maxLength": 180 },
+        "partyType": { "type": "string", "enum": ["Customer", "Consignor", "Consignee", "TruckOwner", "Vendor"] },
+        "address": { "type": "string", "maxLength": 400 },
+        "gstin": { "type": "string", "maxLength": 20 },
+        "pan": { "type": "string", "maxLength": 15 },
+        "phone": { "type": "string", "maxLength": 30 },
+        "email": { "type": "string", "maxLength": 160 },
+        "openingBalance": { "type": "number" },
+        "currentBalance": { "type": "number" },
+        "balanceType": { "type": "string", "enum": ["Dr", "Cr"] },
+        "ownerUid": { "type": "string", "minLength": 6, "maxLength": 128 },
+        "createdAt": { "type": "string", "format": "date-time" },
+        "updatedAt": { "type": "string", "format": "date-time" }
+      },
+      "required": ["name", "partyType", "openingBalance", "currentBalance", "balanceType", "ownerUid", "createdAt", "updatedAt"]
+    },
+    "Vehicle": {
+      "title": "Vehicle",
+      "description": "Fleet or market lorry with compliance expiry dates",
+      "type": "object",
+      "properties": {
+        "truckNo": { "type": "string", "minLength": 4, "maxLength": 24 },
+        "vehicleType": { "type": "string", "maxLength": 80 },
+        "ownerName": { "type": "string", "maxLength": 140 },
+        "ownerPhone": { "type": "string", "maxLength": 30 },
+        "engineNo": { "type": "string", "maxLength": 40 },
+        "chassisNo": { "type": "string", "maxLength": 40 },
+        "fitnessExpiry": { "type": "string", "maxLength": 20 },
+        "insuranceExpiry": { "type": "string", "maxLength": 20 },
+        "permitExpiry": { "type": "string", "maxLength": 20 },
+        "pucExpiry": { "type": "string", "maxLength": 20 },
+        "ownerUid": { "type": "string", "minLength": 6, "maxLength": 128 },
+        "createdAt": { "type": "string", "format": "date-time" },
+        "updatedAt": { "type": "string", "format": "date-time" }
+      },
+      "required": ["truckNo", "ownerName", "ownerUid", "createdAt", "updatedAt"]
+    },
+    "Driver": {
+      "title": "Driver",
+      "description": "Driver profile and license validity tracking",
+      "type": "object",
+      "properties": {
+        "name": { "type": "string", "minLength": 1, "maxLength": 140 },
+        "dlNo": { "type": "string", "minLength": 4, "maxLength": 40 },
+        "dlExpiry": { "type": "string", "maxLength": 20 },
+        "phone": { "type": "string", "maxLength": 30 },
+        "address": { "type": "string", "maxLength": 300 },
+        "ownerUid": { "type": "string", "minLength": 6, "maxLength": 128 },
+        "createdAt": { "type": "string", "format": "date-time" },
+        "updatedAt": { "type": "string", "format": "date-time" }
+      },
+      "required": ["name", "dlNo", "dlExpiry", "ownerUid", "createdAt", "updatedAt"]
+    },
+    "ConsignmentNote": {
+      "title": "ConsignmentNote",
+      "description": "LR / Consignment Note record",
+      "type": "object",
+      "properties": {
+        "cnNo": { "type": "string", "minLength": 2, "maxLength": 40 },
+        "cnDate": { "type": "string", "minLength": 8, "maxLength": 20 },
+        "deliveryOffice": { "type": "string", "maxLength": 200 },
+        "consignorName": { "type": "string", "maxLength": 180 },
+        "consignorAddress": { "type": "string", "maxLength": 350 },
+        "consignorGstin": { "type": "string", "maxLength": 24 },
+        "consigneeName": { "type": "string", "maxLength": 180 },
+        "consigneeAddress": { "type": "string", "maxLength": 350 },
+        "consigneeGstin": { "type": "string", "maxLength": 24 },
+        "packages": { "type": "string", "maxLength": 40 },
+        "particulars": { "type": "string", "maxLength": 400 },
+        "nettWeight": { "type": "number" },
+        "grossWeight": { "type": "number" },
+        "loadingCharge": { "type": "number" },
+        "unloadingCharge": { "type": "number" },
+        "returnLorryCharge": { "type": "number" },
+        "sttCharge": { "type": "number" },
+        "totalFreight": { "type": "number" },
+        "paidAmount": { "type": "number" },
+        "toPayAmount": { "type": "number" },
+        "taxInvNo": { "type": "string", "maxLength": 80 },
+        "taxInvDate": { "type": "string", "maxLength": 20 },
+        "ewayBillNo": { "type": "string", "maxLength": 60 },
+        "ewayBillDate": { "type": "string", "maxLength": 20 },
+        "valueOfGoods": { "type": "number" },
+        "truckNo": { "type": "string", "maxLength": 30 },
+        "fromCity": { "type": "string", "maxLength": 120 },
+        "toCity": { "type": "string", "maxLength": 120 },
+        "engineNo": { "type": "string", "maxLength": 40 },
+        "chassisNo": { "type": "string", "maxLength": 40 },
+        "ownerName": { "type": "string", "maxLength": 140 },
+        "driverName": { "type": "string", "maxLength": 140 },
+        "driverDlNo": { "type": "string", "maxLength": 40 },
+        "gstPaidBy": { "type": "string", "maxLength": 40 },
+        "insuranceStatus": { "type": "string", "maxLength": 80 },
+        "billed": { "type": "boolean" },
+        "invoiceId": { "type": "string", "maxLength": 128 },
+        "branchCode": { "type": "string", "maxLength": 32 },
+        "createdByStaff": { "type": "string", "maxLength": 64 },
+        "ownerUid": { "type": "string", "minLength": 6, "maxLength": 128 },
+        "createdAt": { "type": "string", "format": "date-time" },
+        "updatedAt": { "type": "string", "format": "date-time" }
+      },
+      "required": ["cnNo", "cnDate", "consignorName", "consigneeName", "truckNo", "fromCity", "toCity", "totalFreight", "billed", "ownerUid", "createdAt", "updatedAt"]
+    },
+    "Invoice": {
+      "title": "Invoice",
+      "description": "Tax Invoice / Bill of Supply with line items",
+      "type": "object",
+      "properties": {
+        "invoiceNo": { "type": "string", "minLength": 2, "maxLength": 40 },
+        "invoiceDate": { "type": "string", "minLength": 8, "maxLength": 20 },
+        "dueDate": { "type": "string", "maxLength": 20 },
+        "partyName": { "type": "string", "minLength": 1, "maxLength": 180 },
+        "partyAddress": { "type": "string", "maxLength": 350 },
+        "partyGstin": { "type": "string", "maxLength": 24 },
+        "partyPan": { "type": "string", "maxLength": 15 },
+        "sac": { "type": "string", "maxLength": 20 },
+        "reverseCharge": { "type": "boolean" },
+        "gstRate": { "type": "number" },
+        "cgstAmt": { "type": "number" },
+        "sgstAmt": { "type": "number" },
+        "igstAmt": { "type": "number" },
+        "totalTax": { "type": "number" },
+        "freightCharges": { "type": "number" },
+        "detentionCharges": { "type": "number" },
+        "unloadingCharges": { "type": "number" },
+        "stCharges": { "type": "number" },
+        "grandTotal": { "type": "number" },
+        "paidAmount": { "type": "number" },
+        "status": { "type": "string", "enum": ["Unpaid", "Partial", "Paid"] },
+        "remarks": { "type": "string", "maxLength": 500 },
+        "consignmentRows": { "type": "array", "maxLength": 100 },
+        "annexureLorries": { "type": "array", "maxLength": 100 },
+        "branchCode": { "type": "string", "maxLength": 32 },
+        "createdByStaff": { "type": "string", "maxLength": 64 },
+        "ownerUid": { "type": "string", "minLength": 6, "maxLength": 128 },
+        "createdAt": { "type": "string", "format": "date-time" },
+        "updatedAt": { "type": "string", "format": "date-time" }
+      },
+      "required": ["invoiceNo", "invoiceDate", "partyName", "grandTotal", "paidAmount", "status", "consignmentRows", "ownerUid", "createdAt", "updatedAt"]
+    },
+    "Quotation": {
+      "title": "Quotation",
+      "description": "Proforma Invoice / Rate of Quotation",
+      "type": "object",
+      "properties": {
+        "quotationNo": { "type": "string", "minLength": 2, "maxLength": 40 },
+        "quotationDate": { "type": "string", "minLength": 8, "maxLength": 20 },
+        "partyName": { "type": "string", "minLength": 1, "maxLength": 180 },
+        "partyAddress": { "type": "string", "maxLength": 350 },
+        "partyGstin": { "type": "string", "maxLength": 24 },
+        "subject": { "type": "string", "maxLength": 200 },
+        "validityText": { "type": "string", "maxLength": 120 },
+        "vehicleType": { "type": "string", "maxLength": 120 },
+        "freight": { "type": "number" },
+        "loadingCharge": { "type": "string", "maxLength": 120 },
+        "unloadingCharge": { "type": "string", "maxLength": 120 },
+        "parkingCharge": { "type": "string", "maxLength": 120 },
+        "detentionCharge": { "type": "string", "maxLength": 120 },
+        "tonGuarantee": { "type": "string", "maxLength": 120 },
+        "destination": { "type": "string", "maxLength": 180 },
+        "advancePay": { "type": "string", "maxLength": 120 },
+        "entryPoint": { "type": "string", "maxLength": 120 },
+        "branchCode": { "type": "string", "maxLength": 32 },
+        "createdByStaff": { "type": "string", "maxLength": 64 },
+        "ownerUid": { "type": "string", "minLength": 6, "maxLength": 128 },
+        "createdAt": { "type": "string", "format": "date-time" },
+        "updatedAt": { "type": "string", "format": "date-time" }
+      },
+      "required": ["quotationNo", "quotationDate", "partyName", "vehicleType", "freight", "destination", "ownerUid", "createdAt", "updatedAt"]
+    },
+    "LorryHire": {
+      "title": "LorryHire",
+      "description": "Lorry Hire Register with strict POD Scanner & Payment Lock",
+      "type": "object",
+      "properties": {
+        "cnNo": { "type": "string", "minLength": 2, "maxLength": 40 },
+        "cnDate": { "type": "string", "maxLength": 20 },
+        "truckNo": { "type": "string", "minLength": 3, "maxLength": 30 },
+        "ownerName": { "type": "string", "maxLength": 140 },
+        "fromCity": { "type": "string", "maxLength": 120 },
+        "toCity": { "type": "string", "maxLength": 120 },
+        "hireAmount": { "type": "number" },
+        "advancePaid": { "type": "number" },
+        "balancePayable": { "type": "number" },
+        "podReceived": { "type": "boolean" },
+        "podReceiveDate": { "type": "string", "maxLength": 20 },
+        "podImageDataUrl": { "type": "string", "maxLength": 450000 },
+        "podFileName": { "type": "string", "maxLength": 160 },
+        "balancePaid": { "type": "boolean" },
+        "balancePaidDate": { "type": "string", "maxLength": 20 },
+        "paymentMode": { "type": "string", "maxLength": 40 },
+        "paymentRef": { "type": "string", "maxLength": 80 },
+        "branchCode": { "type": "string", "maxLength": 32 },
+        "createdByStaff": { "type": "string", "maxLength": 64 },
+        "ownerUid": { "type": "string", "minLength": 6, "maxLength": 128 },
+        "createdAt": { "type": "string", "format": "date-time" },
+        "updatedAt": { "type": "string", "format": "date-time" }
+      },
+      "required": ["cnNo", "truckNo", "hireAmount", "advancePaid", "balancePayable", "podReceived", "balancePaid", "ownerUid", "createdAt", "updatedAt"]
+    },
+    "Transaction": {
+      "title": "Transaction",
+      "description": "Accounting Income / Expense ledger voucher",
+      "type": "object",
+      "properties": {
+        "txCode": { "type": "string", "minLength": 2, "maxLength": 32 },
+        "txDate": { "type": "string", "minLength": 8, "maxLength": 20 },
+        "txType": { "type": "string", "enum": ["Income", "Expense"] },
+        "ledgerAccount": { "type": "string", "minLength": 1, "maxLength": 100 },
+        "partyName": { "type": "string", "minLength": 1, "maxLength": 180 },
+        "amount": { "type": "number" },
+        "narration": { "type": "string", "maxLength": 300 },
+        "paymentMode": { "type": "string", "maxLength": 60 },
+        "referenceNo": { "type": "string", "maxLength": 80 },
+        "linkedCnNo": { "type": "string", "maxLength": 40 },
+        "linkedInvoiceNo": { "type": "string", "maxLength": 40 },
+        "branchCode": { "type": "string", "maxLength": 32 },
+        "createdByStaff": { "type": "string", "maxLength": 64 },
+        "ownerUid": { "type": "string", "minLength": 6, "maxLength": 128 },
+        "createdAt": { "type": "string", "format": "date-time" },
+        "updatedAt": { "type": "string", "format": "date-time" }
+      },
+      "required": ["txCode", "txDate", "txType", "ledgerAccount", "partyName", "amount", "paymentMode", "ownerUid", "createdAt", "updatedAt"]
+    },
+    "Declaration194C": {
+      "title": "Declaration194C",
+      "description": "Section 194C Non-Deduction of Tax Declaration record",
+      "type": "object",
+      "properties": {
+        "partyName": { "type": "string", "minLength": 1, "maxLength": 180 },
+        "partyAddress": { "type": "string", "maxLength": 350 },
+        "partyGstin": { "type": "string", "maxLength": 24 },
+        "financialYear": { "type": "string", "minLength": 7, "maxLength": 12 },
+        "declarationDate": { "type": "string", "minLength": 8, "maxLength": 20 },
+        "place": { "type": "string", "maxLength": 80 },
+        "branchCode": { "type": "string", "maxLength": 32 },
+        "createdByStaff": { "type": "string", "maxLength": 64 },
+        "ownerUid": { "type": "string", "minLength": 6, "maxLength": 128 },
+        "createdAt": { "type": "string", "format": "date-time" },
+        "updatedAt": { "type": "string", "format": "date-time" }
+      },
+      "required": ["partyName", "financialYear", "declarationDate", "place", "ownerUid", "createdAt", "updatedAt"]
+    },
+    "CompanySettings": {
+      "title": "CompanySettings",
+      "description": "Company profile, bank details, and document numbering configuration",
+      "type": "object",
+      "properties": {
+        "companyName": { "type": "string", "maxLength": 160 },
+        "tagline": { "type": "string", "maxLength": 160 },
+        "address": { "type": "string", "maxLength": 350 },
+        "pan": { "type": "string", "maxLength": 20 },
+        "gstin": { "type": "string", "maxLength": 24 },
+        "msme": { "type": "string", "maxLength": 60 },
+        "hsn": { "type": "string", "maxLength": 20 },
+        "phones": { "type": "string", "maxLength": 80 },
+        "email": { "type": "string", "maxLength": 160 },
+        "bankName": { "type": "string", "maxLength": 120 },
+        "bankBranch": { "type": "string", "maxLength": 120 },
+        "accountNo": { "type": "string", "maxLength": 40 },
+        "ifsc": { "type": "string", "maxLength": 24 },
+        "swift": { "type": "string", "maxLength": 24 },
+        "currentFy": { "type": "string", "maxLength": 12 },
+        "ownerUid": { "type": "string", "minLength": 6, "maxLength": 128 },
+        "updatedAt": { "type": "string", "format": "date-time" }
+      },
+      "required": ["companyName", "pan", "gstin", "ownerUid", "updatedAt"]
+    },
+    "Counter": {
+      "title": "Counter",
+      "description": "Atomic Firestore Transaction counter for CN, Invoice, Quotation, and Tx serial numbers",
+      "type": "object",
+      "properties": {
+        "seq": { "type": "number" },
+        "prefix": { "type": "string", "maxLength": 20 },
+        "fy": { "type": "string", "maxLength": 12 },
+        "branchCode": { "type": "string", "maxLength": 32 },
+        "lastUpdatedBy": { "type": "string", "maxLength": 64 },
+        "ownerUid": { "type": "string", "minLength": 6, "maxLength": 128 },
+        "updatedAt": { "type": "string", "format": "date-time" }
+      },
+      "required": ["seq", "prefix", "fy", "ownerUid", "updatedAt"]
+    },
+    "StaffPresence": {
+      "title": "StaffPresence",
+      "description": "Real-time live presence record for 50+ concurrent staff operators across branches",
+      "type": "object",
+      "properties": {
+        "staffCode": { "type": "string", "maxLength": 32 },
+        "displayName": { "type": "string", "maxLength": 100 },
+        "role": { "type": "string", "maxLength": 32 },
+        "branchCode": { "type": "string", "maxLength": 32 },
+        "activeModule": { "type": "string", "maxLength": 64 },
+        "deviceType": { "type": "string", "maxLength": 40 },
+        "status": { "type": "string", "enum": ["online", "offline"] },
+        "ownerUid": { "type": "string", "minLength": 6, "maxLength": 128 },
+        "lastSeenAt": { "type": "string", "format": "date-time" }
+      },
+      "required": ["staffCode", "displayName", "role", "branchCode", "status", "ownerUid", "lastSeenAt"]
+    },
+    "ActivityLog": {
+      "title": "ActivityLog",
+      "description": "Live branch-wise audit activity stream visible in real time to Master Admin",
+      "type": "object",
+      "properties": {
+        "action": { "type": "string", "maxLength": 80 },
+        "module": { "type": "string", "maxLength": 40 },
+        "docRefCode": { "type": "string", "maxLength": 80 },
+        "summary": { "type": "string", "maxLength": 300 },
+        "staffCode": { "type": "string", "maxLength": 32 },
+        "staffName": { "type": "string", "maxLength": 100 },
+        "branchCode": { "type": "string", "maxLength": 32 },
+        "ownerUid": { "type": "string", "minLength": 6, "maxLength": 128 },
+        "createdAt": { "type": "string", "format": "date-time" }
+      },
+      "required": ["action", "module", "summary", "staffCode", "branchCode", "ownerUid", "createdAt"]
+    }
+  },
+  "firestore": {
+    "/admins/{adminId}": {
+      "schema": { "$ref": "#/entities/AdminUser" },
+      "description": "Master Admin registry"
+    },
+    "/staff_accounts/{staffId}": {
+      "schema": { "$ref": "#/entities/StaffAccount" },
+      "description": "50+ Staff login definitions, branch assignment, and RBAC permissions"
+    },
+    "/parties/{partyId}": {
+      "schema": { "$ref": "#/entities/Party" },
+      "description": "Master parties (Consignor, Consignee, Customers, Truck Owners)"
+    },
+    "/vehicles/{vehicleId}": {
+      "schema": { "$ref": "#/entities/Vehicle" },
+      "description": "Vehicle master with compliance expiry alerts"
+    },
+    "/drivers/{driverId}": {
+      "schema": { "$ref": "#/entities/Driver" },
+      "description": "Driver master with D/L expiry alerts"
+    },
+    "/consignments/{cnId}": {
+      "schema": { "$ref": "#/entities/ConsignmentNote" },
+      "description": "Consignment Notes (LR) database"
+    },
+    "/invoices/{invoiceId}": {
+      "schema": { "$ref": "#/entities/Invoice" },
+      "description": "Tax Invoices / Bills of Supply"
+    },
+    "/quotations/{quotationId}": {
+      "schema": { "$ref": "#/entities/Quotation" },
+      "description": "Proforma Rate Quotations"
+    },
+    "/lorry_hires/{hireId}": {
+      "schema": { "$ref": "#/entities/LorryHire" },
+      "description": "Lorry Hire Register with POD Payment Lock"
+    },
+    "/transactions/{txId}": {
+      "schema": { "$ref": "#/entities/Transaction" },
+      "description": "Accounting Income and Expense vouchers"
+    },
+    "/declarations/{declId}": {
+      "schema": { "$ref": "#/entities/Declaration194C" },
+      "description": "Section 194C Non-Deduction Declarations"
+    },
+    "/settings/{settingId}": {
+      "schema": { "$ref": "#/entities/CompanySettings" },
+      "description": "Company & billing settings"
+    },
+    "/counters/{counterId}": {
+      "schema": { "$ref": "#/entities/Counter" },
+      "description": "Atomic transactional counters for collision-free serial numbers across branches"
+    },
+    "/presence/{presenceId}": {
+      "schema": { "$ref": "#/entities/StaffPresence" },
+      "description": "Live online staff presence across 50+ branches and devices"
+    },
+    "/activity_logs/{logId}": {
+      "schema": { "$ref": "#/entities/ActivityLog" },
+      "description": "Real-time branch-wise activity feed"
+    }
+  }
+}

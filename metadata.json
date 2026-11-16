@@ -1,0 +1,6 @@
+{
+  "name": "Dolphin Road Carriers ERP",
+  "description": "Transport Billing, 3-Copy LR Print Engine, OCR Scan-to-Bill, POD Payment Lock, Accounting, MIS Reports & Google Drive Backup ERP for Dolphin Road Carrier.",
+  "requestFramePermissions": ["camera"],
+  "majorCapabilities": ["MAJOR_CAPABILITY_SERVER_SIDE_GEMINI_API"]
+}

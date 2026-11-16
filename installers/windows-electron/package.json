@@ -1,0 +1,35 @@
+{
+  "name": "dolphin-road-carriers-erp-desktop",
+  "version": "2.0.0",
+  "description": "Dolphin Road Carriers ERP — Windows Desktop Installer",
+  "main": "main.js",
+  "scripts": {
+    "start": "electron .",
+    "build-exe": "electron-builder --win nsis --x64"
+  },
+  "devDependencies": {
+    "electron": "^35.0.0",
+    "electron-builder": "^25.1.8"
+  },
+  "build": {
+    "appId": "com.dolphinroadcarriers.erp.desktop",
+    "productName": "Dolphin Road Carriers ERP",
+    "win": {
+      "target": [
+        {
+          "target": "nsis",
+          "arch": ["x64", "ia32"]
+        }
+      ],
+      "icon": "../../public/favicon.ico"
+    },
+    "nsis": {
+      "oneClick": false,
+      "perMachine": false,
+      "allowToChangeInstallationDirectory": true,
+      "createDesktopShortcut": true,
+      "createStartMenuShortcut": true,
+      "shortcutName": "Dolphin Road Carriers ERP"
+    }
+  }
+}

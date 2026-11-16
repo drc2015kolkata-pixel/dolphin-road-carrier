@@ -1,0 +1,118 @@
+/**
+ * Security Rules Adversarial Test Specification (Dirty Dozen)
+ * Verifies Identity Integrity, POD Payment Lock, RBAC, and Schema Boundaries.
+ */
+export const DIRTY_DOZEN_PAYLOADS = [
+  {
+    name: '1. Identity Spoofing on Create',
+    collection: 'transactions',
+    operation: 'create',
+    payload: {
+      txCode: 'TRN999',
+      txDate: '2026-11-16',
+      txType: 'Income',
+      ledgerAccount: 'Customer A/c',
+      partyName: 'Test Party',
+      amount: 50000,
+      paymentMode: 'NEFT',
+      ownerUid: 'victim_other_uid',
+    },
+    expected: 'PERMISSION_DENIED',
+  },
+  {
+    name: '2. Ghost / Shadow Field Injection',
+    collection: 'parties',
+    operation: 'create',
+    payload: {
+      name: 'Shadow Corp',
+      partyType: 'Customer',
+      openingBalance: 0,
+      currentBalance: 0,
+      balanceType: 'Dr',
+      isAdmin: true,
+    },
+    expected: 'PERMISSION_DENIED',
+  },
+  {
+    name: '3. POD Payment Lock Bypass on Create',
+    collection: 'lorry_hires',
+    operation: 'create',
+    payload: {
+      cnNo: 'KOL-101/26-27',
+      truckNo: 'WB23C6597',
+      hireAmount: 45000,
+      advancePaid: 15000,
+      balancePayable: 30000,
+      podReceived: false,
+      balancePaid: true,
+    },
+    expected: 'PERMISSION_DENIED',
+  },
+  {
+    name: '4. POD Payment Lock Bypass on Update (missing receive date)',
+    collection: 'lorry_hires',
+    operation: 'update',
+    payload: {
+      podReceived: true,
+      podReceiveDate: '',
+      podFileName: '',
+      balancePaid: true,
+    },
+    expected: 'PERMISSION_DENIED',
+  },
+  {
+    name: '5. Unverified Email Spoof',
+    collection: 'admins',
+    operation: 'get',
+    auth: { email: 'drc.2015kolkata@gmail.com', email_verified: false },
+    expected: 'PERMISSION_DENIED',
+  },
+  {
+    name: '6. ID Poisoning (>128 chars or invalid chars)',
+    collection: 'parties',
+    docId: 'bad/id$injection_' + 'x'.repeat(130),
+    operation: 'create',
+    expected: 'PERMISSION_DENIED',
+  },
+  {
+    name: '7. Unbounded Consignment Array DoS (>100 rows)',
+    collection: 'invoices',
+    operation: 'create',
+    consignmentRowsCount: 150,
+    expected: 'PERMISSION_DENIED',
+  },
+  {
+    name: '8. Type Poisoning on Update',
+    collection: 'invoices',
+    operation: 'update',
+    payload: { grandTotal: 'free' },
+    expected: 'PERMISSION_DENIED',
+  },
+  {
+    name: '9. Immutable Owner Tampering',
+    collection: 'consignments',
+    operation: 'update',
+    payload: { ownerUid: 'new_attacker_uid' },
+    expected: 'PERMISSION_DENIED',
+  },
+  {
+    name: '10. Client Timestamp Forgery',
+    collection: 'transactions',
+    operation: 'create',
+    payload: { createdAt: '1999-01-01T00:00:00Z' },
+    expected: 'PERMISSION_DENIED',
+  },
+  {
+    name: '11. Privilege Escalation on Staff Accounts',
+    collection: 'staff_accounts',
+    operation: 'create',
+    payload: { staffCode: 'HACK01', role: 'Admin' },
+    expected: 'PERMISSION_DENIED',
+  },
+  {
+    name: '12. Blanket List Scraping without ownerUid filter',
+    collection: 'parties',
+    operation: 'list',
+    expected: 'PERMISSION_DENIED',
+  },
+];
