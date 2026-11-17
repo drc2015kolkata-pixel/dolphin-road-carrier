@@ -6,16 +6,19 @@ import {
   CloudDownload,
   CloudUpload,
   Download,
+  Edit3,
   Eye,
   EyeOff,
   FileSpreadsheet,
   FolderOpen,
   ImagePlus,
   KeyRound,
+  ListChecks,
   Lock,
   MonitorDown,
   Plus,
   RefreshCw,
+  RotateCcw,
   Save,
   Search,
   ShieldCheck,
@@ -68,6 +71,18 @@ import {
   subscribeVersionStatus,
   VersionStatusInfo,
 } from '../lib/versionSync';
+import {
+  addDropdownItem,
+  deleteDropdownItem,
+  DropdownCategoryKey,
+  editDropdownItem,
+  getEffectiveCreditDayPresets,
+  getEffectiveDistrictsForState,
+  getEffectiveDropdownList,
+  resetDropdownCategory,
+  updateCreditDayPresets,
+  upsertDistrictItem,
+} from '../lib/dropdownMasterStore';
 import { formatINR, makeSafeDocId, normalizeFyLabel, PRECREATED_FYS, todayISO } from '../lib/formatters';
 import { useDebouncedValue } from '../hooks/useDebounce';
 import { PaginatedDataTable, TableColumn } from './PaginatedDataTable';
@@ -197,6 +212,16 @@ const BackupSettingsModuleInner: React.FC<BackupSettingsModuleProps> = ({
   // Closing-to-Opening Balance Carry Forward State
   const [carrySourceFy, setCarrySourceFy] = useState('FY 2025-26');
   const [carryTargetFy, setCarryTargetFy] = useState('FY 2026-27');
+
+  // Dropdown Master Management State
+  type MasterTabKey = DropdownCategoryKey | 'districts' | 'creditDays';
+  const [ddTab, setDdTab] = useState<MasterTabKey>('goodsTypes');
+  const [ddSearch, setDdSearch] = useState('');
+  const [ddNewItem, setDdNewItem] = useState('');
+  const [ddSelectedState, setDdSelectedState] = useState('19 - West Bengal');
+  const [ddEditingItem, setDdEditingItem] = useState<string | null>(null);
+  const [ddEditingText, setDdEditingText] = useState('');
+  const [ddNewCreditDay, setDdNewCreditDay] = useState('45');
 
   const fyChoices = useMemo(() => {
     const set = new Set<string>([...PRECREATED_FYS, ...(compState.availableFys || []), activeFy]);
@@ -414,6 +439,7 @@ const BackupSettingsModuleInner: React.FC<BackupSettingsModuleProps> = ({
         customStampDataUrl: compState.customStampDataUrl || '',
         autoLockMinutes: Number(compState.autoLockMinutes ?? 5),
         lockSourceInspection: compState.lockSourceInspection !== false,
+        ...(compState.dropdownMaster ? { dropdownMaster: compState.dropdownMaster } : {}),
         ownerUid,
       },
       hasCustomSettings
@@ -577,6 +603,94 @@ const BackupSettingsModuleInner: React.FC<BackupSettingsModuleProps> = ({
     setDriveError(null);
     const info = await checkForUpdatesNow(true);
     setDriveStatus(info.message);
+  };
+
+  const effectiveStates = useMemo(
+    () => getEffectiveDropdownList(compState, 'states'),
+    [compState]
+  );
+
+  const activeDropdownItems = useMemo(() => {
+    if (ddTab === 'creditDays') return [];
+    const raw =
+      ddTab === 'districts'
+        ? getEffectiveDistrictsForState(compState, ddSelectedState)
+        : getEffectiveDropdownList(compState, ddTab);
+    const q = ddSearch.trim().toLowerCase();
+    return q ? raw.filter((item) => item.toLowerCase().includes(q)) : raw;
+  }, [compState, ddTab, ddSelectedState, ddSearch]);
+
+  const activeCreditPresets = useMemo(
+    () => getEffectiveCreditDayPresets(compState),
+    [compState]
+  );
+
+  const handleDdAddItem = async () => {
+    const val = ddNewItem.trim();
+    if (!val) return;
+    if (ddTab === 'districts') {
+      await upsertDistrictItem(ownerUid, compState, ddSelectedState, { type: 'add', value: val });
+    } else if (ddTab !== 'creditDays') {
+      await addDropdownItem(ownerUid, compState, ddTab, val);
+    }
+    setDdNewItem('');
+    setDriveStatus(`Added "${val}" to Dropdown Master (synced live for all branches).`);
+  };
+
+  const handleDdSaveEdit = async (oldVal: string) => {
+    const clean = ddEditingText.trim();
+    if (!clean) return;
+    if (ddTab === 'districts') {
+      await upsertDistrictItem(ownerUid, compState, ddSelectedState, {
+        type: 'edit',
+        oldValue: oldVal,
+        newValue: clean,
+      });
+    } else if (ddTab !== 'creditDays') {
+      await editDropdownItem(ownerUid, compState, ddTab, oldVal, clean);
+    }
+    setDdEditingItem(null);
+    setDdEditingText('');
+    setDriveStatus(`Updated "${oldVal}" → "${clean}".`);
+  };
+
+  const handleDdDeleteItem = async (targetVal: string) => {
+    if (ddTab === 'districts') {
+      await upsertDistrictItem(ownerUid, compState, ddSelectedState, {
+        type: 'delete',
+        value: targetVal,
+      });
+    } else if (ddTab !== 'creditDays') {
+      await deleteDropdownItem(ownerUid, compState, ddTab, targetVal);
+    }
+    setDriveStatus(`Removed "${targetVal}" from Dropdown Master.`);
+  };
+
+  const handleDdResetCategory = () => {
+    if (ddTab === 'creditDays' || ddTab === 'districts') return;
+    onShowConfirm({
+      title: 'Reset Dropdown List to All-India Defaults?',
+      description: 'Restores the official built-in All-India entries for this category across all branches.',
+      confirmLabel: 'Reset Defaults',
+      onConfirm: async () => {
+        await resetDropdownCategory(ownerUid, compState, ddTab);
+        setDriveStatus('Restored built-in All-India defaults.');
+      },
+    });
+  };
+
+  const handleAddCreditPreset = async () => {
+    const num = Math.round(Number(ddNewCreditDay));
+    if (!Number.isFinite(num) || num <= 0 || num > 365) return;
+    await updateCreditDayPresets(ownerUid, compState, [...activeCreditPresets, num]);
+    setDdNewCreditDay('');
+    setDriveStatus(`Added ${num} Days Credit preset.`);
+  };
+
+  const handleRemoveCreditPreset = async (days: number) => {
+    const next = activeCreditPresets.filter((d) => d !== days);
+    await updateCreditDayPresets(ownerUid, compState, next.length > 0 ? next : [10, 15, 20, 30]);
+    setDriveStatus(`Removed ${days} Days preset.`);
   };
 
   const staffColumns: TableColumn<StaffAccount>[] = useMemo(
@@ -1465,6 +1579,238 @@ const BackupSettingsModuleInner: React.FC<BackupSettingsModuleProps> = ({
               </button>
             </div>
           </form>
+
+          {/* Dropdown Master (All-India Non-Liquid Goods, States/GST Codes, Districts, Modes & Credit Days) */}
+          <div className="bg-white rounded-xl border border-slate-200 shadow-sm overflow-hidden">
+            <div className="bg-gradient-to-r from-[#0D47A1] to-[#1976D2] text-white px-4 py-2.5 flex flex-wrap items-center justify-between gap-2">
+              <div className="flex items-center gap-2 text-sm font-bold">
+                <ListChecks className="w-4 h-4 text-amber-300" />
+                <span>Dropdown Master (All-India Non-Liquid Goods, States, Districts &amp; Modes)</span>
+              </div>
+              <span className="text-[11px] text-blue-100">
+                Live synced across all 50+ branches · Add, Edit, or Delete any option
+              </span>
+            </div>
+
+            <div className="p-4 space-y-3 text-xs">
+              <div className="flex flex-wrap gap-1.5 border-b border-slate-200 pb-2.5">
+                {[
+                  { key: 'goodsTypes', label: 'Non-Liquid Goods' },
+                  { key: 'states', label: 'States / Countries (GST)' },
+                  { key: 'districts', label: 'Districts (by State)' },
+                  { key: 'packageModes', label: 'Package Modes' },
+                  { key: 'rateModes', label: 'Rate Modes' },
+                  { key: 'deliveryPlaces', label: 'Delivery Places' },
+                  { key: 'creditDays', label: 'Credit Day Presets' },
+                ].map((tab) => (
+                  <button
+                    key={tab.key}
+                    type="button"
+                    onClick={() => {
+                      setDdTab(tab.key as MasterTabKey);
+                      setDdSearch('');
+                      setDdEditingItem(null);
+                    }}
+                    className={`px-3 py-1.5 rounded-md font-bold cursor-pointer transition-colors ${
+                      ddTab === tab.key
+                        ? 'bg-[#0D47A1] text-white shadow-sm'
+                        : 'bg-slate-100 text-slate-700 hover:bg-slate-200'
+                    }`}
+                  >
+                    {tab.label}
+                  </button>
+                ))}
+              </div>
+
+              {ddTab === 'creditDays' ? (
+                <div className="space-y-3">
+                  <div className="flex flex-wrap items-end gap-2">
+                    <div>
+                      <label className="block font-semibold text-slate-700 mb-1">
+                        Add Credit Day Preset (Days)
+                      </label>
+                      <input
+                        type="number"
+                        min={1}
+                        max={365}
+                        value={ddNewCreditDay}
+                        onChange={(e) => setDdNewCreditDay(e.target.value)}
+                        placeholder="e.g. 45"
+                        className="w-32 px-2.5 py-1.5 rounded border border-slate-300 font-mono-num"
+                      />
+                    </div>
+                    <button
+                      type="button"
+                      onClick={handleAddCreditPreset}
+                      className="inline-flex items-center gap-1 px-3 py-1.5 rounded bg-emerald-600 hover:bg-emerald-700 text-white font-bold cursor-pointer"
+                    >
+                      <Plus className="w-3.5 h-3.5" /> Add Preset
+                    </button>
+                  </div>
+                  <div className="flex flex-wrap gap-2">
+                    {activeCreditPresets.map((d) => (
+                      <div
+                        key={d}
+                        className="inline-flex items-center gap-2 px-3 py-1.5 rounded-lg border border-slate-200 bg-slate-50 font-bold text-slate-800"
+                      >
+                        <span className="font-mono-num">{d} Days</span>
+                        {activeCreditPresets.length > 1 && (
+                          <button
+                            type="button"
+                            onClick={() => handleRemoveCreditPreset(d)}
+                            className="text-slate-400 hover:text-red-600 cursor-pointer"
+                            title={`Remove ${d} Days`}
+                          >
+                            <Trash2 className="w-3.5 h-3.5" />
+                          </button>
+                        )}
+                      </div>
+                    ))}
+                  </div>
+                </div>
+              ) : (
+                <div className="space-y-3">
+                  <div className="flex flex-wrap items-end gap-2">
+                    {ddTab === 'districts' && (
+                      <div className="min-w-[210px]">
+                        <label className="block font-semibold text-slate-700 mb-1">
+                          Select State / UT / Country
+                        </label>
+                        <select
+                          value={ddSelectedState}
+                          onChange={(e) => setDdSelectedState(e.target.value)}
+                          className="w-full px-2.5 py-1.5 rounded border border-slate-300 bg-white font-semibold"
+                        >
+                          {effectiveStates.map((st) => (
+                            <option key={st} value={st}>
+                              {st}
+                            </option>
+                          ))}
+                        </select>
+                      </div>
+                    )}
+                    <div className="flex-1 min-w-[200px]">
+                      <label className="block font-semibold text-slate-700 mb-1">
+                        Add New Entry
+                      </label>
+                      <div className="flex gap-1.5">
+                        <input
+                          type="text"
+                          value={ddNewItem}
+                          onChange={(e) => setDdNewItem(e.target.value)}
+                          onKeyDown={(e) => {
+                            if (e.key === 'Enter') {
+                              e.preventDefault();
+                              handleDdAddItem();
+                            }
+                          }}
+                          placeholder="Type new option name & click Add..."
+                          className="flex-1 px-2.5 py-1.5 rounded border border-slate-300"
+                        />
+                        <button
+                          type="button"
+                          onClick={handleDdAddItem}
+                          className="inline-flex items-center gap-1 px-3 py-1.5 rounded bg-emerald-600 hover:bg-emerald-700 text-white font-bold cursor-pointer whitespace-nowrap"
+                        >
+                          <Plus className="w-3.5 h-3.5" /> Add Option
+                        </button>
+                      </div>
+                    </div>
+                    <div className="relative">
+                      <Search className="w-3.5 h-3.5 text-slate-400 absolute left-2.5 top-2" />
+                      <input
+                        type="text"
+                        value={ddSearch}
+                        onChange={(e) => setDdSearch(e.target.value)}
+                        placeholder={`Filter ${activeDropdownItems.length} items...`}
+                        className="pl-8 pr-3 py-1.5 rounded border border-slate-300 bg-white w-48"
+                      />
+                    </div>
+                    {ddTab !== 'districts' && (
+                      <button
+                        type="button"
+                        onClick={handleDdResetCategory}
+                        className="inline-flex items-center gap-1 px-3 py-1.5 rounded border border-slate-300 bg-white hover:bg-slate-100 text-slate-700 font-semibold cursor-pointer whitespace-nowrap"
+                      >
+                        <RotateCcw className="w-3.5 h-3.5" /> Reset Defaults
+                      </button>
+                    )}
+                  </div>
+
+                  <div className="max-h-60 overflow-y-auto border border-slate-200 rounded-lg divide-y divide-slate-100">
+                    {activeDropdownItems.length === 0 ? (
+                      <div className="p-4 text-center text-slate-400">
+                        No options match your search filter.
+                      </div>
+                    ) : (
+                      activeDropdownItems.map((item) => {
+                        const isEditing = ddEditingItem === item;
+                        return (
+                          <div
+                            key={item}
+                            className="flex items-center justify-between gap-2 px-3 py-1.5 hover:bg-slate-50"
+                          >
+                            {isEditing ? (
+                              <div className="flex-1 flex items-center gap-1.5">
+                                <input
+                                  type="text"
+                                  value={ddEditingText}
+                                  onChange={(e) => setDdEditingText(e.target.value)}
+                                  className="flex-1 px-2 py-1 rounded border border-blue-400 text-xs"
+                                />
+                                <button
+                                  type="button"
+                                  onClick={() => handleDdSaveEdit(item)}
+                                  className="px-2.5 py-1 rounded bg-emerald-600 text-white text-[11px] font-bold cursor-pointer"
+                                >
+                                  Save
+                                </button>
+                                <button
+                                  type="button"
+                                  onClick={() => {
+                                    setDdEditingItem(null);
+                                    setDdEditingText('');
+                                  }}
+                                  className="px-2 py-1 rounded border border-slate-300 text-[11px] font-semibold cursor-pointer"
+                                >
+                                  Cancel
+                                </button>
+                              </div>
+                            ) : (
+                              <>
+                                <span className="font-medium text-slate-800 truncate">{item}</span>
+                                <div className="flex items-center gap-1 shrink-0">
+                                  <button
+                                    type="button"
+                                    onClick={() => {
+                                      setDdEditingItem(item);
+                                      setDdEditingText(item);
+                                    }}
+                                    className="p-1 rounded text-blue-700 hover:bg-blue-50 cursor-pointer"
+                                    title="Edit option"
+                                  >
+                                    <Edit3 className="w-3.5 h-3.5" />
+                                  </button>
+                                  <button
+                                    type="button"
+                                    onClick={() => handleDdDeleteItem(item)}
+                                    className="p-1 rounded text-slate-500 hover:text-red-600 hover:bg-red-50 cursor-pointer"
+                                    title="Delete option"
+                                  >
+                                    <Trash2 className="w-3.5 h-3.5" />
+                                  </button>
+                                </div>
+                              </>
+                            )}
+                          </div>
+                        );
+                      })
+                    )}
+                  </div>
+                </div>
+              )}
+            </div>
+          </div>
 
           {/* Smart Bulk Data Import (Excel / CSV) */}
           <div className="bg-white rounded-xl border border-slate-200 shadow-sm overflow-hidden">

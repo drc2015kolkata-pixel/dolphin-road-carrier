@@ -1,4 +1,5 @@
 import {
+  BillCopyCount,
   CompanySettings,
   ConsignmentNote,
   Declaration194C,
@@ -7,6 +8,7 @@ import {
 } from '../types/erp';
 import {
   buildPdfArrayBuffer,
+  FoxproStatementSpec,
   PdfAssets,
   PdfOrientation,
   PdfTaskPayload,
@@ -151,7 +153,9 @@ export interface GeneratedPdfResult {
   sizeKB: number;
   title: string;
   orientation: PdfOrientation;
+  copyCount?: BillCopyCount;
   rebuildWithOrientation?: (nextOrientation: PdfOrientation) => Promise<GeneratedPdfResult>;
+  rebuildWithCopyCount?: (nextCopyCount: BillCopyCount) => Promise<GeneratedPdfResult>;
 }
 
 function getPdfWorker(): Worker | null {
@@ -171,10 +175,19 @@ function getPdfWorker(): Worker | null {
 async function runPdfTask(task: PdfTaskPayload): Promise<GeneratedPdfResult> {
   const worker = getPdfWorker();
   const chosenOrientation: PdfOrientation =
-    task.orientation || (task.kind === 'lr3copy' || task.kind === 'tableReport' ? 'l' : 'p');
+    task.orientation ||
+    (task.kind === 'lr3copy' ||
+    task.kind === 'tableReport' ||
+    task.kind === 'gstRegister' ||
+    task.kind === 'foxproStatement'
+      ? 'l'
+      : 'p');
+  const chosenCopyCount: BillCopyCount | undefined =
+    task.kind === 'invoice' ? task.copyCount || task.invoice.copyCount || 1 : undefined;
 
-  const attachRebuild = (base: Omit<GeneratedPdfResult, 'rebuildWithOrientation'>): GeneratedPdfResult => ({
+  const attachRebuild = (base: Omit<GeneratedPdfResult, 'rebuildWithOrientation' | 'rebuildWithCopyCount'>): GeneratedPdfResult => ({
     ...base,
+    copyCount: chosenCopyCount,
     rebuildWithOrientation: async (nextOrientation: PdfOrientation) => {
       return runPdfTask({
         ...task,
@@ -182,6 +195,17 @@ async function runPdfTask(task: PdfTaskPayload): Promise<GeneratedPdfResult> {
         assets: { ...task.assets },
       });
     },
+    ...(task.kind === 'invoice'
+      ? {
+          rebuildWithCopyCount: async (nextCopyCount: BillCopyCount) => {
+            return runPdfTask({
+              ...task,
+              copyCount: nextCopyCount,
+              assets: { ...task.assets },
+            });
+          },
+        }
+      : {}),
   });
 
   if (worker) {
@@ -261,7 +285,8 @@ export async function generateInvoicePDF(
   invoice: Invoice,
   company: CompanySettings,
   includeAnnexure = true,
-  orientation: PdfOrientation = 'p'
+  orientation: PdfOrientation = 'p',
+  copyCount?: BillCopyCount
 ): Promise<GeneratedPdfResult> {
   const assets = await getAssets(company);
   return runPdfTask({
@@ -270,6 +295,7 @@ export async function generateInvoicePDF(
     company,
     includeAnnexure,
     orientation,
+    copyCount: copyCount || invoice.copyCount || 1,
     assets: { ...assets },
   });
 }
@@ -335,4 +361,72 @@ export async function generateTableReportPDF(params: {
     orientation: params.orientation || 'l',
     assets: { ...assets },
   });
+}
+
+export async function generateGstRegisterPDF(params: {
+  invoices: Invoice[];
+  subtitle: string;
+  company: CompanySettings;
+  fileName?: string;
+  orientation?: PdfOrientation;
+}): Promise<GeneratedPdfResult> {
+  const assets = await getAssets(params.company);
+  return runPdfTask({
+    kind: 'gstRegister',
+    invoices: params.invoices,
+    subtitle: params.subtitle,
+    company: params.company,
+    fileName: params.fileName || `GST_Register_${new Date().toISOString().slice(0, 10)}.pdf`,
+    orientation: params.orientation || 'l',
+    assets: { ...assets },
+  });
+}
+
+export async function generateFoxproStatementPDF(
+  spec: FoxproStatementSpec,
+  company: CompanySettings,
+  orientation?: PdfOrientation
+): Promise<GeneratedPdfResult> {
+  const assets = await getAssets(company);
+  return runPdfTask({
+    kind: 'foxproStatement',
+    spec,
+    company,
+    orientation: orientation || spec.orientation || 'l',
+    assets: { ...assets },
+  });
+}
+
+export function downloadPdfDirect(pdf: GeneratedPdfResult): void {
+  const a = document.createElement('a');
+  a.href = pdf.blobUrl;
+  a.download = pdf.fileName;
+  document.body.appendChild(a);
+  a.click();
+  document.body.removeChild(a);
+}
+
+export function printPdfDirect(pdf: GeneratedPdfResult): void {
+  const existing = document.getElementById('drc-silent-print-iframe') as HTMLIFrameElement | null;
+  if (existing) {
+    existing.remove();
+  }
+  const iframe = document.createElement('iframe');
+  iframe.id = 'drc-silent-print-iframe';
+  iframe.style.position = 'fixed';
+  iframe.style.right = '0';
+  iframe.style.bottom = '0';
+  iframe.style.width = '0';
+  iframe.style.height = '0';
+  iframe.style.border = '0';
+  iframe.src = pdf.blobUrl;
+  iframe.onload = () => {
+    try {
+      iframe.contentWindow?.focus();
+      iframe.contentWindow?.print();
+    } catch {
+      downloadPdfDirect(pdf);
+    }
+  };
+  document.body.appendChild(iframe);
 }

@@ -2,6 +2,9 @@ import React, { useMemo, useState } from 'react';
 import {
   BrainCircuit,
   Calculator,
+  Download,
+  Eye,
+  FileSpreadsheet,
   Lock,
   Printer,
   RefreshCw,
@@ -12,6 +15,7 @@ import {
 import {
   CompanySettings,
   ConsignmentNote,
+  Driver,
   DriveFolderName,
   Invoice,
   LorryHire,
@@ -20,7 +24,15 @@ import {
 } from '../types/erp';
 import { daysSinceDate, formatDateDDMMYYYY, formatINR, normalizeFyLabel, todayISO } from '../lib/formatters';
 import { upsertDocument } from '../lib/firestoreStore';
-import { GeneratedPdfResult, generateTableReportPDF } from '../lib/pdfEngine';
+import {
+  downloadPdfDirect,
+  GeneratedPdfResult,
+  generateFoxproStatementPDF,
+  generateGstRegisterPDF,
+  generateTableReportPDF,
+  printPdfDirect,
+} from '../lib/pdfEngine';
+import { FoxproStatementSpec } from '../lib/pdfBuilders';
 import { useDebouncedValue } from '../hooks/useDebounce';
 import { PaginatedDataTable, TableColumn } from './PaginatedDataTable';
 
@@ -33,6 +45,7 @@ interface ReportsMisModuleProps {
   consignments: ConsignmentNote[];
   transactions: TransactionRecord[];
   parties: Party[];
+  drivers?: Driver[];
   company: CompanySettings;
   initialSubTab?: ReportTab;
   onPreviewPdf: (pdf: GeneratedPdfResult, folder: DriveFolderName) => void;
@@ -46,6 +59,8 @@ interface ReportsMisModuleProps {
 }
 
 export type ReportTab =
+  | 'gstRegister'
+  | 'foxproStatements'
   | 'invoiceRegister'
   | 'purchaseRegister'
   | 'cnWise'
@@ -55,6 +70,14 @@ export type ReportTab =
   | 'finalResults'
   | 'aiAdvisor';
 
+type FoxproStatementKind =
+  | 'party'
+  | 'driver'
+  | 'broker'
+  | 'owner'
+  | 'dailyTrip'
+  | 'logisticsBill';
+
 const ReportsMisModuleInner: React.FC<ReportsMisModuleProps> = ({
   activeFy,
   isMasterAdmin,
@@ -63,12 +86,16 @@ const ReportsMisModuleInner: React.FC<ReportsMisModuleProps> = ({
   consignments,
   transactions,
   parties,
+  drivers = [],
   company,
-  initialSubTab = 'invoiceRegister',
+  initialSubTab = 'gstRegister',
   onPreviewPdf,
   onShowConfirm,
 }) => {
   const [tab, setTab] = useState<ReportTab>(initialSubTab);
+  const [statementKind, setStatementKind] = useState<FoxproStatementKind>('party');
+  const [statementFilter, setStatementFilter] = useState('');
+  const [tripDateFilter, setTripDateFilter] = useState('');
   const [statusMsg, setStatusMsg] = useState<string | null>(null);
   const [search, setSearch] = useState('');
   const debouncedSearch = useDebouncedValue(search, 200);
@@ -199,17 +226,42 @@ const ReportsMisModuleInner: React.FC<ReportsMisModuleProps> = ({
     () =>
       q
         ? invoices.filter((i) =>
-            `${i.invoiceNo} ${i.partyName} ${i.status} ${i.branchCode || ''}`.toLowerCase().includes(q)
+            `${i.invoiceNo} ${i.partyName} ${i.partyGstin || ''} ${i.status} ${i.branchCode || ''}`
+              .toLowerCase()
+              .includes(q)
           )
         : invoices,
     [invoices, q]
   );
 
+  // G-S-T R-E-G-I-S-T-E-R Totals
+  const gstRegisterTotals = useMemo(() => {
+    return filteredInvoices.reduce(
+      (acc, inv) => {
+        const freight = Number(inv.freightCharges || 0);
+        const extras =
+          Number(inv.detentionCharges || 0) +
+          Number(inv.unloadingCharges || 0) +
+          Number(inv.stCharges || 0);
+        const taxable = freight + extras;
+        acc.freight += freight;
+        acc.taxable += taxable;
+        acc.sgst += Number(inv.sgstAmt || 0);
+        acc.cgst += Number(inv.cgstAmt || 0);
+        acc.igst += Number(inv.igstAmt || 0);
+        acc.totGst += Number(inv.totalTax || 0);
+        acc.grandTotal += Number(inv.grandTotal || 0);
+        return acc;
+      },
+      { freight: 0, taxable: 0, sgst: 0, cgst: 0, igst: 0, totGst: 0, grandTotal: 0 }
+    );
+  }, [filteredInvoices]);
+
   const filteredHires = useMemo(
     () =>
       q
         ? lorryHires.filter((h) =>
-            `${h.cnNo} ${h.truckNo} ${h.ownerName || ''} ${h.branchCode || ''}`
+            `${h.cnNo} ${h.truckNo} ${h.ownerName || ''} ${h.brokerName || ''} ${h.branchCode || ''}`
               .toLowerCase()
               .includes(q)
           )
@@ -246,6 +298,385 @@ const ReportsMisModuleInner: React.FC<ReportsMisModuleProps> = ({
     () => (q ? accountBookRows.filter((r) => r.party.toLowerCase().includes(q)) : accountBookRows),
     [accountBookRows, q]
   );
+
+  // Build FoxPro Statement Specification dynamically for the 6 Statements
+  const activeStatementSpec = useMemo<FoxproStatementSpec>(() => {
+    const f = (statementFilter || search).trim().toLowerCase();
+
+    if (statementKind === 'party') {
+      const list = invoices.filter((inv) =>
+        f ? `${inv.partyName} ${inv.invoiceNo} ${inv.partyGstin || ''}`.toLowerCase().includes(f) : true
+      );
+      const totBill = list.reduce((s, i) => s + Number(i.grandTotal || 0), 0);
+      const totPaid = list.reduce((s, i) => s + Number(i.paidAmount || 0), 0);
+      const totBal = Math.max(0, totBill - totPaid);
+      return {
+        title: 'P-A-R-T-Y   S-T-A-T-E-M-E-N-T   /   B-I-L-L   L-E-D-G-E-R',
+        subtitle: `FY: ${activeFy} · Filter: ${statementFilter || 'All Parties'} · Bills: ${list.length}`,
+        fileName: `Party_Statement_${todayISO()}.pdf`,
+        orientation: 'l',
+        columns: [
+          { label: 'S.NO', widthPct: 6, align: 'center' },
+          { label: 'BILL NO / DATE', widthPct: 16, align: 'left' },
+          { label: 'PARTY NAME / GSTIN', widthPct: 30, align: 'left' },
+          { label: 'BILL AMOUNT', widthPct: 16, align: 'right' },
+          { label: 'PAID AMOUNT', widthPct: 16, align: 'right' },
+          { label: 'BALANCE DUE', widthPct: 16, align: 'right' },
+        ],
+        rows: list.map((inv, idx) => {
+          const bal = Math.max(0, Number(inv.grandTotal || 0) - Number(inv.paidAmount || 0));
+          return {
+            line1: [
+              String(idx + 1),
+              inv.invoiceNo,
+              inv.partyName,
+              formatINR(inv.grandTotal),
+              formatINR(inv.paidAmount),
+              formatINR(bal),
+            ],
+            line2: [
+              '',
+              formatDateDDMMYYYY(inv.invoiceDate),
+              inv.partyGstin || (inv.billingCountry || 'India'),
+              `Tax: ${formatINR(inv.totalTax || 0)}`,
+              inv.status,
+              inv.dueDate ? `Due ${formatDateDDMMYYYY(inv.dueDate)}` : '-',
+            ],
+          };
+        }),
+        totalsLabel: 'TOTAL IN RUPEES :',
+        totalsLine1: ['', '', '', formatINR(totBill), formatINR(totPaid), formatINR(totBal)],
+        totalAmountForWords: totBal > 0 ? totBal : totBill,
+      };
+    }
+
+    if (statementKind === 'driver') {
+      const driverTrips = consignments.filter((cn) =>
+        f
+          ? `${cn.driverName || ''} ${cn.driverDlNo || ''} ${cn.truckNo} ${cn.cnNo}`.toLowerCase().includes(f)
+          : Boolean(cn.driverName || cn.driverDlNo)
+      );
+      const totFrt = driverTrips.reduce((s, c) => s + Number(c.totalFreight || 0), 0);
+      const drvFallback = drivers.filter((d) =>
+        f ? `${d.name} ${d.dlNo} ${d.phone || ''}`.toLowerCase().includes(f) : true
+      );
+      const useDriverTrips = driverTrips.length > 0;
+      return {
+        title: 'D-R-I-V-E-R   S-T-A-T-E-M-E-N-T   &   T-R-I-P   S-U-M-M-A-R-Y',
+        subtitle: `FY: ${activeFy} · Driver: ${statementFilter || 'All Drivers'}`,
+        fileName: `Driver_Statement_${todayISO()}.pdf`,
+        orientation: 'l',
+        columns: useDriverTrips
+          ? [
+              { label: 'S.NO', widthPct: 6, align: 'center' },
+              { label: 'C/N NO / DATE', widthPct: 16, align: 'left' },
+              { label: 'DRIVER NAME / D/L NO', widthPct: 26, align: 'left' },
+              { label: 'TRUCK / ROUTE', widthPct: 30, align: 'left' },
+              { label: 'WT (MT) / PKGS', widthPct: 11, align: 'right' },
+              { label: 'FREIGHT (INR)', widthPct: 11, align: 'right' },
+            ]
+          : [
+              { label: 'S.NO', widthPct: 7, align: 'center' },
+              { label: 'DRIVER NAME / PHONE', widthPct: 28, align: 'left' },
+              { label: 'D/L NO / EXPIRY', widthPct: 24, align: 'left' },
+              { label: 'AADHAAR / PAN', widthPct: 20, align: 'left' },
+              { label: 'BANK ACCOUNT / IFSC', widthPct: 21, align: 'left' },
+            ],
+        rows: useDriverTrips
+          ? driverTrips.map((cn, idx) => ({
+              line1: [
+                String(idx + 1),
+                cn.cnNo,
+                cn.driverName || '-',
+                cn.truckNo,
+                `${Number(cn.nettWeight || 0).toFixed(2)} MT`,
+                formatINR(cn.totalFreight),
+              ],
+              line2: [
+                '',
+                formatDateDDMMYYYY(cn.cnDate),
+                `D/L: ${cn.driverDlNo || '-'}`,
+                `${cn.fromCity} -> ${cn.toCity}`,
+                cn.packages || '-',
+                cn.ownerName || '',
+              ],
+            }))
+          : drvFallback.map((d, idx) => ({
+              line1: [
+                String(idx + 1),
+                d.name,
+                d.dlNo,
+                `UID: ${d.aadhaarNo || '-'}`,
+                `${d.bankName || '-'} · ${d.bankAccountNo || '-'}`,
+              ],
+              line2: [
+                '',
+                d.phone || '-',
+                `Exp: ${formatDateDDMMYYYY(d.dlExpiry)}`,
+                `PAN: ${d.panNo || '-'}`,
+                d.bankIfsc || '-',
+              ],
+            })),
+        ...(useDriverTrips
+          ? {
+              totalsLabel: 'TOTAL IN RUPEES :',
+              totalsLine1: ['', '', '', '', '', formatINR(totFrt)],
+              totalAmountForWords: totFrt,
+            }
+          : {}),
+      };
+    }
+
+    if (statementKind === 'broker') {
+      const list = lorryHires.filter((h) => {
+        const hasBroker = Boolean(h.brokerName) || (h.advances || []).some((a) => a.payeeType === 'Broker');
+        if (!f) return hasBroker || lorryHires.length > 0;
+        return `${h.brokerName || ''} ${h.cnNo} ${h.truckNo}`.toLowerCase().includes(f);
+      });
+      const sumHire = list.reduce((s, h) => s + Number(h.hireAmount || 0), 0);
+      const sumAdv = list.reduce((s, h) => s + Number(h.advancePaid || 0), 0);
+      const sumBal = list.reduce((s, h) => s + Number(h.balancePayable || 0), 0);
+      return {
+        title: 'B-R-O-K-E-R   S-T-A-T-E-M-E-N-T   &   H-I-R-E   L-E-D-G-E-R',
+        subtitle: `FY: ${activeFy} · Broker: ${statementFilter || 'All Brokers'} · Trips: ${list.length}`,
+        fileName: `Broker_Statement_${todayISO()}.pdf`,
+        orientation: 'l',
+        columns: [
+          { label: 'S.NO', widthPct: 6, align: 'center' },
+          { label: 'CN NO / DATE', widthPct: 15, align: 'left' },
+          { label: 'BROKER / TRUCK NO', widthPct: 27, align: 'left' },
+          { label: 'GROSS HIRE', widthPct: 14, align: 'right' },
+          { label: 'ADVANCE + DED.', widthPct: 19, align: 'right' },
+          { label: 'NET PAYABLE', widthPct: 19, align: 'right' },
+        ],
+        rows: list.map((h, idx) => {
+          const tripDed =
+            Number(h.loadingCharge || 0) +
+            Number(h.unloadingCharge || 0) +
+            Number(h.parkingCharge || 0) +
+            Number(h.kataCharge || 0) +
+            Number(h.shortageCharge || 0) +
+            Number(h.damageCharge || 0);
+          return {
+            line1: [
+              String(idx + 1),
+              h.cnNo,
+              h.brokerName || h.ownerName || '-',
+              formatINR(h.hireAmount),
+              formatINR(Number(h.advancePaid || 0) + tripDed),
+              formatINR(h.balancePayable),
+            ],
+            line2: [
+              '',
+              formatDateDDMMYYYY(h.cnDate),
+              `${h.truckNo} · ${h.fromCity || ''} -> ${h.toCity || ''}`,
+              h.bookedPkgs ? `${h.bookedPkgs} Pkgs` : '-',
+              `Adv:${formatINR(h.advancePaid)} | Ded:${formatINR(tripDed)}`,
+              h.balancePaid ? 'PAID' : h.podReceived ? 'POD UNLOCKED' : 'POD LOCKED',
+            ],
+          };
+        }),
+        totalsLabel: 'TOTAL IN RUPEES :',
+        totalsLine1: ['', '', '', formatINR(sumHire), formatINR(sumAdv), formatINR(sumBal)],
+        totalAmountForWords: sumBal,
+      };
+    }
+
+    if (statementKind === 'owner') {
+      const list = lorryHires.filter((h) =>
+        f ? `${h.ownerName || ''} ${h.truckNo} ${h.cnNo}`.toLowerCase().includes(f) : true
+      );
+      const sumHire = list.reduce((s, h) => s + Number(h.hireAmount || 0), 0);
+      const sumAdv = list.reduce((s, h) => s + Number(h.advancePaid || 0), 0);
+      const sumDed = list.reduce(
+        (s, h) =>
+          s +
+          Number(h.loadingCharge || 0) +
+          Number(h.unloadingCharge || 0) +
+          Number(h.parkingCharge || 0) +
+          Number(h.kataCharge || 0) +
+          Number(h.shortageCharge || 0) +
+          Number(h.damageCharge || 0),
+        0
+      );
+      const sumBal = list.reduce((s, h) => s + Number(h.balancePayable || 0), 0);
+      return {
+        title: 'L-O-R-R-Y   O-W-N-E-R   S-T-A-T-E-M-E-N-T',
+        subtitle: `FY: ${activeFy} · Owner: ${statementFilter || 'All Owners'} · Trips: ${list.length}`,
+        fileName: `Owner_Statement_${todayISO()}.pdf`,
+        orientation: 'l',
+        columns: [
+          { label: 'S.NO', widthPct: 6, align: 'center' },
+          { label: 'CN NO / DATE', widthPct: 14, align: 'left' },
+          { label: 'OWNER NAME / TRUCK', widthPct: 26, align: 'left' },
+          { label: 'GROSS HIRE', widthPct: 13, align: 'right' },
+          { label: 'ADVANCES PAID', widthPct: 13, align: 'right' },
+          { label: 'TRIP DEDUCTIONS', widthPct: 14, align: 'right' },
+          { label: 'NET PAYABLE', widthPct: 14, align: 'right' },
+        ],
+        rows: list.map((h, idx) => {
+          const tripDed =
+            Number(h.loadingCharge || 0) +
+            Number(h.unloadingCharge || 0) +
+            Number(h.parkingCharge || 0) +
+            Number(h.kataCharge || 0) +
+            Number(h.shortageCharge || 0) +
+            Number(h.damageCharge || 0);
+          return {
+            line1: [
+              String(idx + 1),
+              h.cnNo,
+              h.ownerName || '-',
+              formatINR(h.hireAmount),
+              formatINR(h.advancePaid),
+              formatINR(tripDed),
+              formatINR(h.balancePayable),
+            ],
+            line2: [
+              '',
+              formatDateDDMMYYYY(h.cnDate),
+              `${h.truckNo} · ${h.fromCity || ''} -> ${h.toCity || ''}`,
+              h.bookedPkgs ? `Bkd:${h.bookedPkgs} Del:${h.deliveredPkgs ?? h.bookedPkgs}` : '-',
+              `${(h.advances || []).length || 1} Adv`,
+              `Short/Dmg:${formatINR(Number(h.shortageCharge || 0) + Number(h.damageCharge || 0))}`,
+              h.balancePaid ? 'PAID' : 'PENDING',
+            ],
+          };
+        }),
+        totalsLabel: 'TOTAL IN RUPEES :',
+        totalsLine1: [
+          '',
+          '',
+          '',
+          formatINR(sumHire),
+          formatINR(sumAdv),
+          formatINR(sumDed),
+          formatINR(sumBal),
+        ],
+        totalAmountForWords: sumBal,
+      };
+    }
+
+    if (statementKind === 'dailyTrip') {
+      const list = consignments.filter((cn) => {
+        if (tripDateFilter && cn.cnDate !== tripDateFilter) return false;
+        if (!f) return true;
+        return `${cn.cnNo} ${cn.truckNo} ${cn.consignorName} ${cn.toCity}`.toLowerCase().includes(f);
+      });
+      const hireByCn = new Map<string, LorryHire>();
+      lorryHires.forEach((h) => hireByCn.set(h.cnNo, h));
+      const sumFreight = list.reduce((s, c) => s + Number(c.totalFreight || 0), 0);
+      const sumHire = list.reduce((s, c) => s + Number(hireByCn.get(c.cnNo)?.hireAmount || 0), 0);
+      return {
+        title: 'D-A-I-L-Y   T-R-I-P   R-E-P-O-R-T',
+        subtitle: `FY: ${activeFy} · Date: ${tripDateFilter ? formatDateDDMMYYYY(tripDateFilter) : 'All Dates'} · Trips: ${list.length}`,
+        fileName: `Daily_Trip_Report_${tripDateFilter || todayISO()}.pdf`,
+        orientation: 'l',
+        columns: [
+          { label: 'S.NO', widthPct: 6, align: 'center' },
+          { label: 'CN NO / DATE', widthPct: 15, align: 'left' },
+          { label: 'TRUCK / ROUTE', widthPct: 24, align: 'left' },
+          { label: 'CONSIGNOR / CONSIGNEE', widthPct: 25, align: 'left' },
+          { label: 'WT / PKGS', widthPct: 10, align: 'right' },
+          { label: 'FREIGHT (INR)', widthPct: 10, align: 'right' },
+          { label: 'LORRY HIRE', widthPct: 10, align: 'right' },
+        ],
+        rows: list.map((cn, idx) => {
+          const hire = hireByCn.get(cn.cnNo);
+          return {
+            line1: [
+              String(idx + 1),
+              cn.cnNo,
+              cn.truckNo,
+              cn.consignorName,
+              `${Number(cn.nettWeight || 0).toFixed(2)} MT`,
+              formatINR(cn.totalFreight),
+              formatINR(hire?.hireAmount || 0),
+            ],
+            line2: [
+              '',
+              formatDateDDMMYYYY(cn.cnDate),
+              `${cn.fromCity} -> ${cn.toCity}`,
+              `To: ${cn.consigneeName}`,
+              cn.packages || '-',
+              cn.billed ? 'BILLED' : 'UNBILLED',
+              hire ? (hire.podReceived ? 'POD OK' : 'POD LOCK') : '-',
+            ],
+          };
+        }),
+        totalsLabel: 'TOTAL IN RUPEES :',
+        totalsLine1: ['', '', '', '', '', formatINR(sumFreight), formatINR(sumHire)],
+        totalAmountForWords: sumFreight,
+      };
+    }
+
+    // logisticsBill
+    const list = invoices.filter((inv) =>
+      f ? `${inv.invoiceNo} ${inv.partyName} ${inv.partyGstin || ''}`.toLowerCase().includes(f) : true
+    );
+    const sumFreight = list.reduce((s, i) => s + Number(i.freightCharges || 0), 0);
+    const sumTax = list.reduce((s, i) => s + Number(i.totalTax || 0), 0);
+    const sumTotal = list.reduce((s, i) => s + Number(i.grandTotal || 0), 0);
+    const sumPaid = list.reduce((s, i) => s + Number(i.paidAmount || 0), 0);
+    return {
+      title: 'L-O-G-I-S-T-I-C-S   B-I-L-L   R-E-G-I-S-T-E-R',
+      subtitle: `FY: ${activeFy} · Total Bills: ${list.length}`,
+      fileName: `Logistics_Bill_Register_${todayISO()}.pdf`,
+      orientation: 'l',
+      columns: [
+        { label: 'S.NO', widthPct: 5, align: 'center' },
+        { label: 'BILL NO / DATE', widthPct: 14, align: 'left' },
+        { label: 'PARTY NAME / COUNTRY', widthPct: 27, align: 'left' },
+        { label: 'CNs / VEHICLES', widthPct: 14, align: 'left' },
+        { label: 'FREIGHT + EXT', widthPct: 13, align: 'right' },
+        { label: 'GST & PAID BY', widthPct: 13, align: 'right' },
+        { label: 'TOTAL / PAID', widthPct: 14, align: 'right' },
+      ],
+      rows: list.map((inv, idx) => {
+        const extras =
+          Number(inv.detentionCharges || 0) +
+          Number(inv.unloadingCharges || 0) +
+          Number(inv.stCharges || 0);
+        const firstVeh = inv.consignmentRows?.[0]?.vehicle || '-';
+        return {
+          line1: [
+            String(idx + 1),
+            inv.invoiceNo,
+            inv.partyName,
+            `${inv.consignmentRows?.length || 0} CN(s)`,
+            formatINR(Number(inv.freightCharges || 0) + extras),
+            formatINR(inv.totalTax || 0),
+            formatINR(inv.grandTotal),
+          ],
+          line2: [
+            '',
+            formatDateDDMMYYYY(inv.invoiceDate),
+            inv.billingCountry && inv.billingCountry !== 'India'
+              ? `${inv.billingCountry} (Export)`
+              : inv.partyGstin || '-',
+            firstVeh,
+            extras > 0 ? `Ext: ${formatINR(extras)}` : '-',
+            inv.gstPaidBy || (inv.reverseCharge ? 'Consignee' : 'Transporter'),
+            `Paid: ${formatINR(inv.paidAmount)} (${inv.status})`,
+          ],
+        };
+      }),
+      totalsLabel: 'TOTAL IN RUPEES :',
+      totalsLine1: ['', '', '', '', formatINR(sumFreight), formatINR(sumTax), formatINR(sumTotal)],
+      totalsLine2: ['', '', '', '', '', '', `Paid: ${formatINR(sumPaid)}`],
+      totalAmountForWords: sumTotal,
+    };
+  }, [
+    statementKind,
+    statementFilter,
+    tripDateFilter,
+    search,
+    invoices,
+    consignments,
+    lorryHires,
+    drivers,
+    activeFy,
+  ]);
 
   // Final Results (P&L + Balance Sheet)
   const financials = useMemo(() => {
@@ -349,9 +780,21 @@ const ReportsMisModuleInner: React.FC<ReportsMisModuleProps> = ({
     }
   };
 
-  const exportCurrentReportPdf = async () => {
+  const buildCurrentPdf = async (): Promise<GeneratedPdfResult> => {
+    if (tab === 'gstRegister') {
+      return generateGstRegisterPDF({
+        invoices: filteredInvoices,
+        subtitle: `Financial Year: ${activeFy} · As of ${formatDateDDMMYYYY(todayISO())} · Total Bills: ${filteredInvoices.length}`,
+        company,
+        fileName: `GST_Register_${activeFy.replace(/\s+/g, '_')}_${todayISO()}.pdf`,
+        orientation: 'l',
+      });
+    }
+    if (tab === 'foxproStatements') {
+      return generateFoxproStatementPDF(activeStatementSpec, company, 'l');
+    }
     if (tab === 'invoiceRegister') {
-      const pdf = await generateTableReportPDF({
+      return generateTableReportPDF({
         title: 'Invoice Register',
         subtitle: `As of ${formatDateDDMMYYYY(todayISO())}`,
         headers: ['Invoice No', 'Date', 'Party Name', 'Freight', 'Total', 'Paid', 'Status'],
@@ -367,9 +810,9 @@ const ReportsMisModuleInner: React.FC<ReportsMisModuleProps> = ({
         company,
         fileName: `Invoice_Register_${todayISO()}.pdf`,
       });
-      onPreviewPdf(pdf, 'Reports_Ledgers');
-    } else if (tab === 'purchaseRegister') {
-      const pdf = await generateTableReportPDF({
+    }
+    if (tab === 'purchaseRegister') {
+      return generateTableReportPDF({
         title: 'Purchase / Lorry Hire Register',
         subtitle: `As of ${formatDateDDMMYYYY(todayISO())}`,
         headers: ['CN No', 'Truck No', 'Owner', 'Hire (Rs)', 'Advance', 'Balance', 'POD'],
@@ -385,9 +828,9 @@ const ReportsMisModuleInner: React.FC<ReportsMisModuleProps> = ({
         company,
         fileName: `Lorry_Hire_Register_${todayISO()}.pdf`,
       });
-      onPreviewPdf(pdf, 'Reports_Ledgers');
-    } else if (tab === 'cnWise') {
-      const pdf = await generateTableReportPDF({
+    }
+    if (tab === 'cnWise') {
+      return generateTableReportPDF({
         title: 'CN-Wise Income & Expense Report',
         subtitle: `As of ${formatDateDDMMYYYY(todayISO())}`,
         headers: ['CN No', 'Party', 'Truck', 'Route', 'Income', 'Expense', 'Net Margin'],
@@ -403,9 +846,9 @@ const ReportsMisModuleInner: React.FC<ReportsMisModuleProps> = ({
         company,
         fileName: `CN_Wise_Profitability_${todayISO()}.pdf`,
       });
-      onPreviewPdf(pdf, 'Reports_Ledgers');
-    } else if (tab === 'aging') {
-      const pdf = await generateTableReportPDF({
+    }
+    if (tab === 'aging') {
+      return generateTableReportPDF({
         title: 'Party Payment Aging Report',
         subtitle: `As of ${formatDateDDMMYYYY(todayISO())}`,
         headers: ['Invoice No', 'Date', 'Party', 'Total', 'Outstanding', 'Age (Days)', 'Bucket'],
@@ -421,27 +864,31 @@ const ReportsMisModuleInner: React.FC<ReportsMisModuleProps> = ({
         company,
         fileName: `Party_Aging_Report_${todayISO()}.pdf`,
       });
-      onPreviewPdf(pdf, 'Reports_Ledgers');
-    } else {
-      const pdf = await generateTableReportPDF({
-        title: 'Account Book & Ledger Balances',
-        subtitle: `As of ${formatDateDDMMYYYY(todayISO())}`,
-        headers: ['Party / Account', 'Total Debit (Rs)', 'Total Credit (Rs)', 'Net Balance', 'Side'],
-        rows: filteredAccountBook.map((r) => [
-          r.party,
-          formatINR(r.debit),
-          formatINR(r.credit),
-          formatINR(r.netBalance),
-          r.side,
-        ]),
-        company,
-        fileName: `Account_Book_${todayISO()}.pdf`,
-      });
-      onPreviewPdf(pdf, 'Reports_Ledgers');
     }
+    return generateTableReportPDF({
+      title: 'Account Book & Ledger Balances',
+      subtitle: `As of ${formatDateDDMMYYYY(todayISO())}`,
+      headers: ['Party / Account', 'Total Debit (Rs)', 'Total Credit (Rs)', 'Net Balance', 'Side'],
+      rows: filteredAccountBook.map((r) => [
+        r.party,
+        formatINR(r.debit),
+        formatINR(r.credit),
+        formatINR(r.netBalance),
+        r.side,
+      ]),
+      company,
+      fileName: `Account_Book_${todayISO()}.pdf`,
+    });
   };
 
-  // Column definitions for the 6 PaginatedDataTables (50 rows/page)
+  const handleReportPdfAction = async (mode: 'preview' | 'print' | 'download') => {
+    const pdf = await buildCurrentPdf();
+    if (mode === 'preview') onPreviewPdf(pdf, 'Reports_Ledgers');
+    else if (mode === 'print') printPdfDirect(pdf);
+    else downloadPdfDirect(pdf);
+  };
+
+  // Column definitions
   const invCols: TableColumn<Invoice>[] = useMemo(
     () => [
       { key: 'no', header: 'Invoice No', cellClassName: 'font-mono-num font-bold text-blue-800', render: (i) => i.invoiceNo },
@@ -465,10 +912,10 @@ const ReportsMisModuleInner: React.FC<ReportsMisModuleProps> = ({
     () => [
       { key: 'cnNo', header: 'CN No', cellClassName: 'font-mono-num font-bold text-blue-800', render: (h) => h.cnNo },
       { key: 'truck', header: 'Truck No', cellClassName: 'font-mono-num', render: (h) => h.truckNo },
-      { key: 'owner', header: 'Owner', render: (h) => h.ownerName || '-' },
+      { key: 'owner', header: 'Owner / Broker', render: (h) => h.ownerName || h.brokerName || '-' },
       { key: 'hire', header: 'Hire (₹)', headerClassName: 'text-right', cellClassName: 'text-right font-mono-num', render: (h) => formatINR(h.hireAmount) },
       { key: 'adv', header: 'Advance (₹)', headerClassName: 'text-right', cellClassName: 'text-right font-mono-num', render: (h) => formatINR(h.advancePaid) },
-      { key: 'bal', header: 'Balance (₹)', headerClassName: 'text-right', cellClassName: 'text-right font-mono-num font-bold', render: (h) => formatINR(h.balancePayable) },
+      { key: 'bal', header: 'Net Payable (₹)', headerClassName: 'text-right', cellClassName: 'text-right font-mono-num font-bold', render: (h) => formatINR(h.balancePayable) },
       { key: 'pod', header: 'POD Status', render: (h) => (h.podReceived ? 'Received' : 'Locked') },
     ],
     []
@@ -537,6 +984,8 @@ const ReportsMisModuleInner: React.FC<ReportsMisModuleProps> = ({
   );
 
   const tabs: Array<{ id: ReportTab; label: string; adminOnly?: boolean }> = [
+    { id: 'gstRegister', label: 'G-S-T R-E-G-I-S-T-E-R' },
+    { id: 'foxproStatements', label: 'FoxPro Statements (6)' },
     { id: 'invoiceRegister', label: 'Invoice Register' },
     { id: 'purchaseRegister', label: 'Purchase / Lorry Hire' },
     { id: 'cnWise', label: 'CN-Wise P&L' },
@@ -549,8 +998,7 @@ const ReportsMisModuleInner: React.FC<ReportsMisModuleProps> = ({
 
   const visibleTabs = tabs.filter((t) => isMasterAdmin || !t.adminOnly);
 
-  const isTableTab =
-    tab !== 'finalResults' && tab !== 'aiAdvisor';
+  const isTableTab = tab !== 'finalResults' && tab !== 'aiAdvisor';
 
   return (
     <div className="space-y-4">
@@ -572,7 +1020,7 @@ const ReportsMisModuleInner: React.FC<ReportsMisModuleProps> = ({
           ))}
         </div>
 
-        <div className="flex flex-wrap items-center gap-2">
+        <div className="flex flex-wrap items-center gap-1.5">
           {isTableTab && (
             <div className="relative">
               <Search className="w-3.5 h-3.5 text-slate-400 absolute left-2.5 top-2" />
@@ -581,20 +1029,38 @@ const ReportsMisModuleInner: React.FC<ReportsMisModuleProps> = ({
                 value={search}
                 onChange={(e) => setSearch(e.target.value)}
                 placeholder="Filter current register..."
-                className="pl-8 pr-3 py-1.5 rounded-lg border border-slate-300 text-xs w-48 focus:outline-none focus:ring-2 focus:ring-blue-600"
+                className="pl-8 pr-3 py-1.5 rounded-lg border border-slate-300 text-xs w-44 focus:outline-none focus:ring-2 focus:ring-blue-600"
               />
             </div>
           )}
 
           {tab !== 'aiAdvisor' && (
-            <button
-              type="button"
-              onClick={exportCurrentReportPdf}
-              className="inline-flex items-center gap-1.5 px-3 py-1.5 rounded-lg bg-emerald-600 hover:bg-emerald-700 text-white text-xs font-bold cursor-pointer whitespace-nowrap"
-            >
-              <Printer className="w-3.5 h-3.5" />
-              PDF / Drive (Reports_Ledgers)
-            </button>
+            <>
+              <button
+                type="button"
+                onClick={() => void handleReportPdfAction('preview')}
+                className="inline-flex items-center gap-1 px-2.5 py-1.5 rounded-lg bg-blue-700 hover:bg-blue-800 text-white text-xs font-bold cursor-pointer whitespace-nowrap"
+              >
+                <Eye className="w-3.5 h-3.5" />
+                Print Preview
+              </button>
+              <button
+                type="button"
+                onClick={() => void handleReportPdfAction('print')}
+                className="inline-flex items-center gap-1 px-2.5 py-1.5 rounded-lg bg-amber-500 hover:bg-amber-600 text-white text-xs font-bold cursor-pointer whitespace-nowrap"
+              >
+                <Printer className="w-3.5 h-3.5" />
+                Print Out
+              </button>
+              <button
+                type="button"
+                onClick={() => void handleReportPdfAction('download')}
+                className="inline-flex items-center gap-1 px-2.5 py-1.5 rounded-lg bg-emerald-600 hover:bg-emerald-700 text-white text-xs font-bold cursor-pointer whitespace-nowrap"
+              >
+                <Download className="w-3.5 h-3.5" />
+                Download PDF
+              </button>
+            </>
           )}
         </div>
       </div>
@@ -602,6 +1068,273 @@ const ReportsMisModuleInner: React.FC<ReportsMisModuleProps> = ({
       {statusMsg && (
         <div className="px-4 py-2.5 rounded-lg bg-emerald-50 border border-emerald-200 text-emerald-800 text-xs font-semibold">
           {statusMsg}
+        </div>
+      )}
+
+      {/* TAB: FOXPRO-STYLE "G-S-T R-E-G-I-S-T-E-R" (TWO-LINE ROWS + TOTAL IN RUPEES) */}
+      {tab === 'gstRegister' && (
+        <div className="bg-white rounded-xl border border-slate-200 shadow-sm overflow-hidden">
+          <div className="bg-gradient-to-r from-[#0D47A1] to-[#1976D2] text-white px-4 py-2.5 flex flex-wrap items-center justify-between gap-2">
+            <div className="flex items-center gap-2 text-sm font-bold tracking-wider">
+              <FileSpreadsheet className="w-4 h-4" />
+              <span>G-S-T R-E-G-I-S-T-E-R ({filteredInvoices.length} Bills)</span>
+            </div>
+            <span className="text-xs text-blue-100">
+              FoxPro Two-Line Format · Use Print Preview / Download PDF for Landscape A4
+            </span>
+          </div>
+
+          <div className="overflow-x-auto">
+            <table className="w-full text-xs border-collapse font-mono-num">
+              <thead className="bg-slate-100 text-slate-800 border-b border-slate-300">
+                <tr>
+                  <th className="p-2 text-center">S.NO</th>
+                  <th className="p-2 text-left">
+                    <div>BILL NO</div>
+                    <div className="text-[10px] text-slate-500">BL. DATE</div>
+                  </th>
+                  <th className="p-2 text-left">
+                    <div>PARTY NAME</div>
+                    <div className="text-[10px] text-slate-500">GSTIN / COUNTRY</div>
+                  </th>
+                  <th className="p-2 text-right">FREIGHT CHARGES</th>
+                  <th className="p-2 text-right">TAXABLE VALUE</th>
+                  <th className="p-2 text-right">
+                    <div>SGST AMT</div>
+                    <div className="text-[10px] text-slate-500">CGST AMT</div>
+                  </th>
+                  <th className="p-2 text-right">
+                    <div>IGST AMT</div>
+                    <div className="text-[10px] text-slate-500">TOT GST</div>
+                  </th>
+                  <th className="p-2 text-right">TOTAL AMOUNT</th>
+                </tr>
+              </thead>
+              <tbody className="divide-y divide-slate-200">
+                {filteredInvoices.length === 0 ? (
+                  <tr>
+                    <td colSpan={8} className="p-8 text-center text-slate-500 font-sans">
+                      No invoices recorded in {activeFy}.
+                    </td>
+                  </tr>
+                ) : (
+                  filteredInvoices.map((inv, idx) => {
+                    const freight = Number(inv.freightCharges || 0);
+                    const extras =
+                      Number(inv.detentionCharges || 0) +
+                      Number(inv.unloadingCharges || 0) +
+                      Number(inv.stCharges || 0);
+                    const taxable = freight + extras;
+                    return (
+                      <tr key={inv.id} className="hover:bg-blue-50/40">
+                        <td className="p-2 text-center font-bold text-slate-600">{idx + 1}</td>
+                        <td className="p-2">
+                          <div className="font-bold text-blue-800">{inv.invoiceNo}</div>
+                          <div className="text-[10px] text-slate-500">{formatDateDDMMYYYY(inv.invoiceDate)}</div>
+                        </td>
+                        <td className="p-2 font-sans">
+                          <div className="font-bold text-slate-900">{inv.partyName}</div>
+                          <div className="text-[10px] font-mono-num text-slate-500">
+                            {inv.billingCountry && inv.billingCountry !== 'India'
+                              ? `${inv.billingCountry.toUpperCase()} (EXPORT 0%) · PAN: ${inv.partyPan || '-'}`
+                              : `${inv.partyGstin || 'UNREGISTERED'} · ${inv.gstPaidBy || (inv.reverseCharge ? 'Consignee' : 'Transporter')}`}
+                          </div>
+                        </td>
+                        <td className="p-2 text-right">{formatINR(freight)}</td>
+                        <td className="p-2 text-right">{formatINR(taxable)}</td>
+                        <td className="p-2 text-right">
+                          <div>{formatINR(inv.sgstAmt || 0)}</div>
+                          <div className="text-[10px] text-slate-500">{formatINR(inv.cgstAmt || 0)}</div>
+                        </td>
+                        <td className="p-2 text-right">
+                          <div>{formatINR(inv.igstAmt || 0)}</div>
+                          <div className="text-[10px] font-bold text-slate-700">{formatINR(inv.totalTax || 0)}</div>
+                        </td>
+                        <td className="p-2 text-right font-bold text-blue-900">
+                          <div>{formatINR(inv.grandTotal)}</div>
+                          <div className="text-[10px] font-normal text-slate-500">{inv.status}</div>
+                        </td>
+                      </tr>
+                    );
+                  })
+                )}
+              </tbody>
+              <tfoot className="bg-slate-100 border-t-2 border-slate-400 font-bold text-slate-900">
+                <tr>
+                  <td colSpan={3} className="p-2.5 text-right text-blue-900">
+                    TOTAL IN RUPEES :
+                  </td>
+                  <td className="p-2.5 text-right">{formatINR(gstRegisterTotals.freight)}</td>
+                  <td className="p-2.5 text-right">{formatINR(gstRegisterTotals.taxable)}</td>
+                  <td className="p-2.5 text-right">
+                    <div>S: {formatINR(gstRegisterTotals.sgst)}</div>
+                    <div className="text-[10px]">C: {formatINR(gstRegisterTotals.cgst)}</div>
+                  </td>
+                  <td className="p-2.5 text-right">
+                    <div>I: {formatINR(gstRegisterTotals.igst)}</div>
+                    <div className="text-[10px]">T: {formatINR(gstRegisterTotals.totGst)}</div>
+                  </td>
+                  <td className="p-2.5 text-right text-blue-900 text-sm">
+                    ₹ {formatINR(gstRegisterTotals.grandTotal)}
+                  </td>
+                </tr>
+              </tfoot>
+            </table>
+          </div>
+        </div>
+      )}
+
+      {/* TAB: FOXPRO STATEMENTS CENTER (PARTY, DRIVER, BROKER, OWNER, DAILY TRIP, LOGISTICS BILL) */}
+      {tab === 'foxproStatements' && (
+        <div className="space-y-3">
+          <div className="bg-white p-3 rounded-xl border border-slate-200 shadow-sm space-y-3">
+            <div className="flex flex-wrap items-center gap-2">
+              {(
+                [
+                  ['party', 'Party Statement'],
+                  ['driver', 'Driver Statement'],
+                  ['broker', 'Broker Statement'],
+                  ['owner', 'Owner Statement'],
+                  ['dailyTrip', 'Daily Trip Report'],
+                  ['logisticsBill', 'Logistics Bill Register'],
+                ] as const
+              ).map(([id, label]) => (
+                <button
+                  key={id}
+                  type="button"
+                  onClick={() => setStatementKind(id)}
+                  className={`px-3 py-1.5 rounded-lg text-xs font-bold cursor-pointer ${
+                    statementKind === id
+                      ? 'bg-[#0D47A1] text-white'
+                      : 'bg-slate-100 text-slate-700 hover:bg-slate-200'
+                  }`}
+                >
+                  {label}
+                </button>
+              ))}
+            </div>
+
+            <div className="flex flex-wrap items-center gap-3 text-xs">
+              <div className="flex-1 min-w-[200px]">
+                <input
+                  type="text"
+                  value={statementFilter}
+                  onChange={(e) => setStatementFilter(e.target.value)}
+                  placeholder={`Filter ${statementKind} statement (name, CN, truck, bill)...`}
+                  className="w-full px-3 py-1.5 rounded-lg border border-slate-300"
+                />
+              </div>
+              {statementKind === 'dailyTrip' && (
+                <div className="flex items-center gap-1.5">
+                  <label className="font-semibold text-slate-700">Trip Date:</label>
+                  <input
+                    type="date"
+                    value={tripDateFilter}
+                    onChange={(e) => setTripDateFilter(e.target.value)}
+                    className="px-2.5 py-1.5 rounded-lg border border-slate-300 font-mono-num"
+                  />
+                  {tripDateFilter && (
+                    <button
+                      type="button"
+                      onClick={() => setTripDateFilter('')}
+                      className="text-blue-700 font-semibold hover:underline cursor-pointer"
+                    >
+                      All Dates
+                    </button>
+                  )}
+                </div>
+              )}
+            </div>
+          </div>
+
+          <div className="bg-white rounded-xl border border-slate-200 shadow-sm overflow-hidden">
+            <div className="bg-slate-800 text-white px-4 py-2 flex flex-wrap items-center justify-between gap-2 text-xs font-bold">
+              <span className="font-mono-num">{activeStatementSpec.title}</span>
+              <span>{activeStatementSpec.subtitle}</span>
+            </div>
+            <div className="overflow-x-auto">
+              <table className="w-full text-xs border-collapse font-mono-num">
+                <thead className="bg-slate-100 text-slate-800 border-b border-slate-300">
+                  <tr>
+                    {activeStatementSpec.columns.map((col, idx) => (
+                      <th
+                        key={idx}
+                        className={`p-2 ${
+                          col.align === 'right'
+                            ? 'text-right'
+                            : col.align === 'center'
+                              ? 'text-center'
+                              : 'text-left'
+                        }`}
+                      >
+                        {col.label}
+                      </th>
+                    ))}
+                  </tr>
+                </thead>
+                <tbody className="divide-y divide-slate-200">
+                  {activeStatementSpec.rows.length === 0 ? (
+                    <tr>
+                      <td
+                        colSpan={activeStatementSpec.columns.length}
+                        className="p-8 text-center text-slate-500 font-sans"
+                      >
+                        No matching entries found for this statement.
+                      </td>
+                    </tr>
+                  ) : (
+                    activeStatementSpec.rows.map((row, rIdx) => (
+                      <tr key={rIdx} className="hover:bg-blue-50/40">
+                        {activeStatementSpec.columns.map((col, cIdx) => (
+                          <td
+                            key={cIdx}
+                            className={`p-2 ${
+                              col.align === 'right'
+                                ? 'text-right'
+                                : col.align === 'center'
+                                  ? 'text-center'
+                                  : 'text-left'
+                            }`}
+                          >
+                            <div className={cIdx === 0 || col.align === 'right' ? 'font-bold' : 'font-semibold'}>
+                              {row.line1[cIdx] || '-'}
+                            </div>
+                            {row.line2?.[cIdx] && (
+                              <div className="text-[10px] text-slate-500">{row.line2[cIdx]}</div>
+                            )}
+                          </td>
+                        ))}
+                      </tr>
+                    ))
+                  )}
+                </tbody>
+                {activeStatementSpec.totalsLine1 && (
+                  <tfoot className="bg-slate-100 border-t-2 border-slate-400 font-bold text-slate-900">
+                    <tr>
+                      {activeStatementSpec.columns.map((col, cIdx) => (
+                        <td
+                          key={cIdx}
+                          className={`p-2.5 ${
+                            col.align === 'right'
+                              ? 'text-right'
+                              : col.align === 'center'
+                                ? 'text-center'
+                                : 'text-left'
+                          }`}
+                        >
+                          {cIdx === 1 && !activeStatementSpec.totalsLine1?.[1] ? (
+                            <span className="text-blue-900">{activeStatementSpec.totalsLabel || 'TOTAL IN RUPEES :'}</span>
+                          ) : (
+                            activeStatementSpec.totalsLine1?.[cIdx] || ''
+                          )}
+                        </td>
+                      ))}
+                    </tr>
+                  </tfoot>
+                )}
+              </table>
+            </div>
+          </div>
         </div>
       )}
 
@@ -780,7 +1513,7 @@ const ReportsMisModuleInner: React.FC<ReportsMisModuleProps> = ({
         </div>
       )}
 
-      {/* AI MIS Advisor (Gemini 4 Hydrogen High Thinking) */}
+      {/* AI MIS Advisor */}
       {tab === 'aiAdvisor' && (
         <div className="bg-white rounded-xl border border-slate-200 shadow-sm overflow-hidden">
           <div className="bg-gradient-to-r from-[#0D47A1] to-[#6D28D9] text-white px-4 py-2.5 flex items-center gap-2 text-sm font-bold">
@@ -790,7 +1523,7 @@ const ReportsMisModuleInner: React.FC<ReportsMisModuleProps> = ({
           <form onSubmit={handleAskAI} className="p-4 space-y-3 text-xs">
             <p className="text-slate-600">
               Ask complex questions about overdue receivables, GST 5% RCM vs 12% FCM, Section 194C
-              TDS compliance, or truck-wise profitability based on your live Firestore figures.
+              TDS compliance, or truck-wise profitability based on your live workspace figures.
             </p>
             <div className="flex gap-2">
               <input

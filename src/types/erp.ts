@@ -43,10 +43,15 @@ export interface StaffAccount {
 export interface Party {
   id: string;
   name: string;
-  partyType: 'Customer' | 'Consignor' | 'Consignee' | 'TruckOwner' | 'Vendor';
+  partyType: 'Customer' | 'Consignor' | 'Consignee' | 'TruckOwner' | 'Broker' | 'Vendor';
   address?: string;
   gstin?: string;
   pan?: string;
+  aadhaarNo?: string;
+  tradeLicenseNo?: string;
+  bankName?: string;
+  bankAccountNo?: string;
+  bankIfsc?: string;
   phone?: string;
   email?: string;
   openingBalance: number;
@@ -81,6 +86,11 @@ export interface Driver {
   dlExpiry: string;
   phone?: string;
   address?: string;
+  aadhaarNo?: string;
+  panNo?: string;
+  bankName?: string;
+  bankAccountNo?: string;
+  bankIfsc?: string;
   ownerUid: string;
   createdAt?: unknown;
   updatedAt?: unknown;
@@ -103,6 +113,9 @@ export interface ConsignmentNote {
   cnDate: string;
   financialYear?: string;
   deliveryOffice?: string;
+  stockTransfer?: boolean;
+  billingPartyName?: string;
+  creditDays?: number;
   consignorName: string;
   consignorAddress?: string;
   consignorGstin?: string;
@@ -110,7 +123,10 @@ export interface ConsignmentNote {
   consigneeAddress?: string;
   consigneeGstin?: string;
   packages?: string;
+  packageMode?: string;
   particulars?: string;
+  rateMode?: string;
+  ratePerUnit?: number;
   nettWeight?: number;
   grossWeight?: number;
   loadingCharge?: number;
@@ -120,6 +136,9 @@ export interface ConsignmentNote {
   totalFreight: number;
   paidAmount?: number;
   toPayAmount?: number;
+  hasTaxInvoice?: boolean;
+  hasMultiEwayBill?: boolean;
+  hasMultiVehicle?: boolean;
   taxInvNo?: string;
   taxInvDate?: string;
   ewayBillNo?: string;
@@ -129,7 +148,11 @@ export interface ConsignmentNote {
   extraVehicles?: string[];
   valueOfGoods?: number;
   truckNo: string;
+  fromState?: string;
+  fromDistrict?: string;
   fromCity: string;
+  toState?: string;
+  toDistrict?: string;
   toCity: string;
   engineNo?: string;
   chassisNo?: string;
@@ -156,6 +179,8 @@ export interface InvoiceConsignmentRow {
   from: string;
   to: string;
   weight: number;
+  packages?: string;
+  rateType?: 'Fixed' | 'Per Ton' | string;
   ratePerMt: number;
   freight: number;
   description: string;
@@ -165,6 +190,8 @@ export interface InvoiceAnnexureLorry {
   cnNo: string;
   lorryNumbers: string;
 }
+
+export type BillCopyCount = 1 | 2 | 3 | 4;
 
 export interface Invoice {
   id: string;
@@ -176,8 +203,11 @@ export interface Invoice {
   partyAddress?: string;
   partyGstin?: string;
   partyPan?: string;
+  billingCountry?: 'India' | 'Nepal' | 'Bangladesh' | 'Bhutan' | string;
   sac?: string;
   reverseCharge?: boolean;
+  interstate?: boolean;
+  gstPaidBy?: 'Consignee' | 'Consignor' | 'Transporter' | 'Others' | string;
   gstRate?: number;
   cgstAmt?: number;
   sgstAmt?: number;
@@ -191,6 +221,7 @@ export interface Invoice {
   paidAmount: number;
   status: 'Unpaid' | 'Partial' | 'Paid';
   remarks?: string;
+  copyCount?: BillCopyCount;
   consignmentRows: InvoiceConsignmentRow[];
   annexureLorries?: InvoiceAnnexureLorry[];
   branchCode?: string;
@@ -227,6 +258,14 @@ export interface Quotation {
   updatedAt?: unknown;
 }
 
+export interface LorryAdvanceRow {
+  payeeType: 'Lorry Owner' | 'Broker' | string;
+  accountName: string;
+  advanceDate: string;
+  mode: string;
+  amount: number;
+}
+
 export interface LorryHire {
   id: string;
   cnNo: string;
@@ -234,10 +273,22 @@ export interface LorryHire {
   financialYear?: string;
   truckNo: string;
   ownerName?: string;
+  brokerName?: string;
   fromCity?: string;
   toCity?: string;
+  bookedPkgs?: number;
+  deliveredPkgs?: number;
+  shortageDamagePkgs?: number;
+  hasMultiAdvance?: boolean;
+  advances?: LorryAdvanceRow[];
   hireAmount: number;
   advancePaid: number;
+  loadingCharge?: number;
+  unloadingCharge?: number;
+  parkingCharge?: number;
+  kataCharge?: number;
+  shortageCharge?: number;
+  damageCharge?: number;
   balancePayable: number;
   podReceived: boolean;
   podReceiveDate?: string;
@@ -332,6 +383,16 @@ export interface FyOpeningBalanceEntry {
   balanceType: 'Dr' | 'Cr';
 }
 
+export interface DropdownMasterConfig {
+  goodsTypes?: string[];
+  packageModes?: string[];
+  rateModes?: string[];
+  deliveryPlaces?: string[];
+  states?: string[];
+  districtsByState?: Record<string, string[]>;
+  creditDayPresets?: number[];
+}
+
 export interface CompanySettings {
   id?: string;
   companyName: string;
@@ -351,6 +412,7 @@ export interface CompanySettings {
   currentFy: string;
   availableFys?: string[];
   fyOpeningBalances?: Record<string, Record<string, FyOpeningBalanceEntry>>;
+  dropdownMaster?: DropdownMasterConfig;
   customStampDataUrl?: string;
   autoLockMinutes?: number;
   lockSourceInspection?: boolean;
@@ -402,8 +464,8 @@ export const DEFAULT_COMPANY_SETTINGS: Omit<CompanySettings, 'ownerUid' | 'updat
 };
 
 export const SCHEMA_LIMITS = {
-  maxConsignmentRows: 100,
-  maxAnnexureLorries: 100,
+  maxConsignmentRows: 5000,
+  maxAnnexureLorries: 5000,
   maxPodImageChars: 440000,
   maxStaffName: 100,
   maxPartyName: 180,

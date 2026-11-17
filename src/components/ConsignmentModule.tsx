@@ -11,6 +11,7 @@ import {
   Save,
   ScanLine,
   Search,
+  ShieldAlert,
   Trash2,
   Upload,
 } from 'lucide-react';
@@ -35,6 +36,15 @@ import {
 } from '../lib/formatters';
 import { scanPhysicalLR } from '../lib/ocrEngine';
 import {
+  addDropdownItem,
+  deleteDropdownItem,
+  editDropdownItem,
+  getEffectiveCreditDayPresets,
+  getEffectiveDistrictsForState,
+  getEffectiveDropdownList,
+  upsertDistrictItem,
+} from '../lib/dropdownMasterStore';
+import {
   logBranchActivity,
   removeDocument,
   reserveNextSerialNumber,
@@ -43,6 +53,7 @@ import {
 import { GeneratedPdfResult, generateLR3CopyPDF } from '../lib/pdfEngine';
 import { useDebouncedValue } from '../hooks/useDebounce';
 import { PaginatedDataTable, TableColumn } from './PaginatedDataTable';
+import { EditableSearchSelect, YesNoSelect } from './EditableSearchSelect';
 
 interface ConsignmentModuleProps {
   ownerUid: string;
@@ -104,6 +115,14 @@ const ConsignmentModuleInner: React.FC<ConsignmentModuleProps> = ({
   const [cnNo, setCnNo] = useState(`${branchPrefix}-${147 + consignments.length}/${fyShort}`);
   const [cnDate, setCnDate] = useState(todayISO());
   const [deliveryOffice, setDeliveryOffice] = useState('');
+  const [stockTransfer, setStockTransfer] = useState(false);
+
+  // Mandatory Billing Party & Credit Days Lock
+  const [billingPartyName, setBillingPartyName] = useState('');
+  const [creditDaysOption, setCreditDaysOption] = useState<string>('');
+  const [customCreditDays, setCustomCreditDays] = useState<string>('');
+  const [validationError, setValidationError] = useState<string | null>(null);
+
   const [consignorName, setConsignorName] = useState('');
   const [consignorAddress, setConsignorAddress] = useState('');
   const [consignorGstin, setConsignorGstin] = useState('');
@@ -111,7 +130,10 @@ const ConsignmentModuleInner: React.FC<ConsignmentModuleProps> = ({
   const [consigneeAddress, setConsigneeAddress] = useState('');
   const [consigneeGstin, setConsigneeGstin] = useState('');
   const [packages, setPackages] = useState('');
+  const [packageMode, setPackageMode] = useState('Bags / Sacks');
   const [particulars, setParticulars] = useState('');
+  const [rateMode, setRateMode] = useState('Fixed Lorry Freight (Lump Sum)');
+  const [ratePerUnit, setRatePerUnit] = useState('');
   const [nettWeight, setNettWeight] = useState('0');
   const [grossWeight, setGrossWeight] = useState('0');
   const [loadingCharge, setLoadingCharge] = useState('0');
@@ -121,6 +143,12 @@ const ConsignmentModuleInner: React.FC<ConsignmentModuleProps> = ({
   const [totalFreight, setTotalFreight] = useState('0');
   const [paidAmount, setPaidAmount] = useState('0');
   const [toPayAmount, setToPayAmount] = useState('0');
+
+  // Yes/No Toggles for Tax Invoice, Multi E-Way Bill & Multi Vehicle
+  const [hasTaxInvoice, setHasTaxInvoice] = useState(true);
+  const [hasMultiEwayBill, setHasMultiEwayBill] = useState(false);
+  const [hasMultiVehicle, setHasMultiVehicle] = useState(false);
+
   const [taxInvNo, setTaxInvNo] = useState('');
   const [taxInvDate, setTaxInvDate] = useState('');
   const [ewayBillNo, setEwayBillNo] = useState('');
@@ -130,14 +158,21 @@ const ConsignmentModuleInner: React.FC<ConsignmentModuleProps> = ({
   const [extraVehicles, setExtraVehicles] = useState<string[]>([]);
   const [valueOfGoods, setValueOfGoods] = useState('0');
   const [truckNo, setTruckNo] = useState('');
+
+  // All-India Geo Cascade (State with GST code -> District -> Place/City)
+  const [fromState, setFromState] = useState('19 - West Bengal');
+  const [fromDistrict, setFromDistrict] = useState('Kolkata');
   const [fromCity, setFromCity] = useState('KOLKATA');
+  const [toState, setToState] = useState('');
+  const [toDistrict, setToDistrict] = useState('');
   const [toCity, setToCity] = useState('');
+
   const [engineNo, setEngineNo] = useState('');
   const [chassisNo, setChassisNo] = useState('');
   const [ownerName, setOwnerName] = useState('');
   const [driverName, setDriverName] = useState('');
   const [driverDlNo, setDriverDlNo] = useState('');
-  const [gstPaidBy] = useState('Consignee (RCM)');
+  const [gstPaidBy, setGstPaidBy] = useState('Consignee');
   const [insuranceStatus] = useState('The Customer has not insured the consignment');
   const [remarks, setRemarks] = useState('');
   const [scannedLrDataUrl, setScannedLrDataUrl] = useState('');
@@ -151,6 +186,38 @@ const ConsignmentModuleInner: React.FC<ConsignmentModuleProps> = ({
   const [saving, setSaving] = useState(false);
   const [search, setSearch] = useState('');
   const debouncedSearch = useDebouncedValue(search, 200);
+
+  // Live Dropdown Master Lists (Firestore synced)
+  const goodsOptions = useMemo(() => getEffectiveDropdownList(company, 'goodsTypes'), [company]);
+  const packageModeOptions = useMemo(() => getEffectiveDropdownList(company, 'packageModes'), [company]);
+  const rateModeOptions = useMemo(() => getEffectiveDropdownList(company, 'rateModes'), [company]);
+  const deliveryPlaceOptions = useMemo(() => getEffectiveDropdownList(company, 'deliveryPlaces'), [company]);
+  const stateOptions = useMemo(() => getEffectiveDropdownList(company, 'states'), [company]);
+  const fromDistrictOptions = useMemo(
+    () => getEffectiveDistrictsForState(company, fromState),
+    [company, fromState]
+  );
+  const toDistrictOptions = useMemo(
+    () => getEffectiveDistrictsForState(company, toState),
+    [company, toState]
+  );
+  const creditDayPresets = useMemo(() => getEffectiveCreditDayPresets(company), [company]);
+  const partyNameOptions = useMemo(() => {
+    const set = new Set<string>(parties.map((p) => p.name).filter(Boolean));
+    if (consignorName.trim()) set.add(consignorName.trim());
+    if (consigneeName.trim()) set.add(consigneeName.trim());
+    return Array.from(set);
+  }, [parties, consignorName, consigneeName]);
+
+  const resolvedCreditDays = useMemo(() => {
+    if (!creditDaysOption) return 0;
+    if (creditDaysOption === 'custom') {
+      const n = Math.round(Number(customCreditDays));
+      return Number.isFinite(n) && n > 0 ? n : 0;
+    }
+    const n = Math.round(Number(creditDaysOption));
+    return Number.isFinite(n) && n > 0 ? n : 0;
+  }, [creditDaysOption, customCreditDays]);
 
   useEffect(() => {
     if (!editingId) {
@@ -215,7 +282,10 @@ const ConsignmentModuleInner: React.FC<ConsignmentModuleProps> = ({
         if (result.toCity) setToCity(result.toCity);
         if (result.ewayBillNo) setEwayBillNo(result.ewayBillNo);
         if (result.ewayBillDate) setEwayBillDate(result.ewayBillDate);
-        if (result.taxInvNo) setTaxInvNo(result.taxInvNo);
+        if (result.taxInvNo) {
+          setHasTaxInvoice(true);
+          setTaxInvNo(result.taxInvNo);
+        }
         if (result.taxInvDate) setTaxInvDate(result.taxInvDate);
         if (result.valueOfGoods) setValueOfGoods(String(result.valueOfGoods));
         if (result.ownerName) setOwnerName(result.ownerName);
@@ -298,6 +368,31 @@ const ConsignmentModuleInner: React.FC<ConsignmentModuleProps> = ({
     }
   };
 
+  const handleAddBillingPartyOption = async (partyName: string) => {
+    const clean = partyName.trim();
+    if (!clean) return;
+    const exists = parties.some((p) => p.name.toLowerCase() === clean.toLowerCase());
+    if (exists) return;
+    await upsertDocument(
+      'parties',
+      makeSafeDocId('party'),
+      {
+        name: clean,
+        partyType: 'Customer',
+        address: '',
+        gstin: '',
+        pan: '',
+        phone: '',
+        email: '',
+        openingBalance: 0,
+        currentBalance: 0,
+        balanceType: 'Dr',
+        ownerUid,
+      },
+      true
+    );
+  };
+
   const resetForm = () => {
     setEditingId(null);
     setEditingBilled(false);
@@ -305,6 +400,11 @@ const ConsignmentModuleInner: React.FC<ConsignmentModuleProps> = ({
     setCnNo(`${branchPrefix}-${147 + consignments.length}/${fyShort}`);
     setCnDate(todayISO());
     setDeliveryOffice('');
+    setStockTransfer(false);
+    setBillingPartyName('');
+    setCreditDaysOption('');
+    setCustomCreditDays('');
+    setValidationError(null);
     setConsignorName('');
     setConsignorAddress('');
     setConsignorGstin('');
@@ -312,7 +412,10 @@ const ConsignmentModuleInner: React.FC<ConsignmentModuleProps> = ({
     setConsigneeAddress('');
     setConsigneeGstin('');
     setPackages('');
+    setPackageMode('Bags / Sacks');
     setParticulars('');
+    setRateMode('Fixed Lorry Freight (Lump Sum)');
+    setRatePerUnit('');
     setNettWeight('0');
     setGrossWeight('0');
     setLoadingCharge('0');
@@ -322,6 +425,9 @@ const ConsignmentModuleInner: React.FC<ConsignmentModuleProps> = ({
     setTotalFreight('0');
     setPaidAmount('0');
     setToPayAmount('0');
+    setHasTaxInvoice(true);
+    setHasMultiEwayBill(false);
+    setHasMultiVehicle(false);
     setTaxInvNo('');
     setTaxInvDate('');
     setEwayBillNo('');
@@ -331,13 +437,18 @@ const ConsignmentModuleInner: React.FC<ConsignmentModuleProps> = ({
     setExtraVehicles([]);
     setValueOfGoods('0');
     setTruckNo('');
+    setFromState('19 - West Bengal');
+    setFromDistrict('Kolkata');
     setFromCity('KOLKATA');
+    setToState('');
+    setToDistrict('');
     setToCity('');
     setEngineNo('');
     setChassisNo('');
     setOwnerName('');
     setDriverName('');
     setDriverDlNo('');
+    setGstPaidBy('Consignee');
     setRemarks('');
     setScannedLrDataUrl('');
     setOcrFyMismatch(null);
@@ -351,6 +462,21 @@ const ConsignmentModuleInner: React.FC<ConsignmentModuleProps> = ({
     setCnNo(cn.cnNo);
     setCnDate(cn.cnDate || todayISO());
     setDeliveryOffice(cn.deliveryOffice || '');
+    setStockTransfer(Boolean(cn.stockTransfer));
+    setBillingPartyName(cn.billingPartyName || cn.consignorName || '');
+    if (cn.creditDays && cn.creditDays > 0) {
+      if (creditDayPresets.includes(cn.creditDays)) {
+        setCreditDaysOption(String(cn.creditDays));
+        setCustomCreditDays('');
+      } else {
+        setCreditDaysOption('custom');
+        setCustomCreditDays(String(cn.creditDays));
+      }
+    } else {
+      setCreditDaysOption('');
+      setCustomCreditDays('');
+    }
+    setValidationError(null);
     setConsignorName(cn.consignorName || '');
     setConsignorAddress(cn.consignorAddress || '');
     setConsignorGstin(cn.consignorGstin || '');
@@ -358,7 +484,10 @@ const ConsignmentModuleInner: React.FC<ConsignmentModuleProps> = ({
     setConsigneeAddress(cn.consigneeAddress || '');
     setConsigneeGstin(cn.consigneeGstin || '');
     setPackages(cn.packages || '');
+    setPackageMode(cn.packageMode || 'Bags / Sacks');
     setParticulars(cn.particulars || '');
+    setRateMode(cn.rateMode || 'Fixed Lorry Freight (Lump Sum)');
+    setRatePerUnit(cn.ratePerUnit ? String(cn.ratePerUnit) : '');
     setNettWeight(String(cn.nettWeight ?? 0));
     setGrossWeight(String(cn.grossWeight ?? 0));
     setLoadingCharge(String(cn.loadingCharge ?? 0));
@@ -368,6 +497,9 @@ const ConsignmentModuleInner: React.FC<ConsignmentModuleProps> = ({
     setTotalFreight(String(cn.totalFreight ?? 0));
     setPaidAmount(String(cn.paidAmount ?? 0));
     setToPayAmount(String(cn.toPayAmount ?? 0));
+    setHasTaxInvoice(cn.hasTaxInvoice !== false);
+    setHasMultiEwayBill(Boolean(cn.hasMultiEwayBill || (cn.extraEwayBills && cn.extraEwayBills.length > 0)));
+    setHasMultiVehicle(Boolean(cn.hasMultiVehicle || (cn.extraVehicles && cn.extraVehicles.length > 0)));
     setTaxInvNo(cn.taxInvNo || '');
     setTaxInvDate(cn.taxInvDate || '');
     setEwayBillNo(cn.ewayBillNo || '');
@@ -377,16 +509,39 @@ const ConsignmentModuleInner: React.FC<ConsignmentModuleProps> = ({
     setExtraVehicles(cn.extraVehicles || []);
     setValueOfGoods(String(cn.valueOfGoods ?? 0));
     setTruckNo(cn.truckNo || '');
+    setFromState(cn.fromState || '19 - West Bengal');
+    setFromDistrict(cn.fromDistrict || 'Kolkata');
     setFromCity(cn.fromCity || 'KOLKATA');
+    setToState(cn.toState || '');
+    setToDistrict(cn.toDistrict || '');
     setToCity(cn.toCity || '');
     setEngineNo(cn.engineNo || '');
     setChassisNo(cn.chassisNo || '');
     setOwnerName(cn.ownerName || '');
     setDriverName(cn.driverName || '');
     setDriverDlNo(cn.driverDlNo || '');
+    const rawGst = String(cn.gstPaidBy || 'Consignee').trim();
+    setGstPaidBy(rawGst.startsWith('Consignee') ? 'Consignee' : rawGst);
     setRemarks(cn.remarks || '');
     setScannedLrDataUrl(cn.scannedLrDataUrl || '');
     window.scrollTo({ top: 0, behavior: 'smooth' });
+  };
+
+  const validateMandatoryFields = (): boolean => {
+    if (!billingPartyName.trim()) {
+      setValidationError(
+        'LOCKED: Select a Mandatory "Billing Party" before saving, previewing, or billing this Consignment Note.'
+      );
+      return false;
+    }
+    if (!resolvedCreditDays || resolvedCreditDays <= 0) {
+      setValidationError(
+        'LOCKED: Select Mandatory "Payment Credit Days" (10, 15, 20, 30, or custom days) before proceeding.'
+      );
+      return false;
+    }
+    setValidationError(null);
+    return true;
   };
 
   const buildPayload = (resolvedCnNo?: string): Omit<ConsignmentNote, 'id' | 'createdAt' | 'updatedAt'> => ({
@@ -394,6 +549,9 @@ const ConsignmentModuleInner: React.FC<ConsignmentModuleProps> = ({
     cnDate,
     financialYear: normalizeFyLabel(activeFy),
     deliveryOffice: deliveryOffice.trim().slice(0, 200),
+    stockTransfer,
+    billingPartyName: billingPartyName.trim().slice(0, 180),
+    creditDays: resolvedCreditDays,
     consignorName: consignorName.trim().slice(0, 180),
     consignorAddress: consignorAddress.trim().slice(0, 350),
     consignorGstin: consignorGstin.trim().slice(0, 24),
@@ -401,7 +559,10 @@ const ConsignmentModuleInner: React.FC<ConsignmentModuleProps> = ({
     consigneeAddress: consigneeAddress.trim().slice(0, 350),
     consigneeGstin: consigneeGstin.trim().slice(0, 24),
     packages: packages.trim().slice(0, 40),
+    packageMode: packageMode.trim().slice(0, 60),
     particulars: particulars.trim().slice(0, 400),
+    rateMode: rateMode.trim().slice(0, 80),
+    ratePerUnit: Number(ratePerUnit) || 0,
     nettWeight: Number(nettWeight) || 0,
     grossWeight: Number(grossWeight) || 0,
     loadingCharge: Number(loadingCharge) || 0,
@@ -411,21 +572,34 @@ const ConsignmentModuleInner: React.FC<ConsignmentModuleProps> = ({
     totalFreight: Number(totalFreight) || 0,
     paidAmount: Number(paidAmount) || 0,
     toPayAmount: Number(toPayAmount) || 0,
-    taxInvNo: taxInvNo.trim().slice(0, 80),
-    taxInvDate: taxInvDate.trim().slice(0, 20),
+    hasTaxInvoice,
+    hasMultiEwayBill,
+    hasMultiVehicle,
+    taxInvNo: hasTaxInvoice ? taxInvNo.trim().slice(0, 80) : '',
+    taxInvDate: hasTaxInvoice ? taxInvDate.trim().slice(0, 20) : '',
     ewayBillNo: ewayBillNo.trim().slice(0, 60),
     ewayBillDate: ewayBillDate.trim().slice(0, 20),
-    extraTaxInvoices: extraTaxInvoices
-      .filter((x) => x.no.trim())
-      .map((x) => ({ no: x.no.trim(), date: x.date.trim(), value: Number(x.value) || 0 })),
-    extraEwayBills: extraEwayBills
-      .filter((x) => x.no.trim())
-      .map((x) => ({ no: x.no.trim(), date: x.date.trim() })),
-    extraVehicles: extraVehicles.map((v) => v.trim().toUpperCase()).filter(Boolean),
+    extraTaxInvoices: hasTaxInvoice
+      ? extraTaxInvoices
+          .filter((x) => x.no.trim())
+          .map((x) => ({ no: x.no.trim(), date: x.date.trim(), value: Number(x.value) || 0 }))
+      : [],
+    extraEwayBills: hasMultiEwayBill
+      ? extraEwayBills
+          .filter((x) => x.no.trim())
+          .map((x) => ({ no: x.no.trim(), date: x.date.trim() }))
+      : [],
+    extraVehicles: hasMultiVehicle
+      ? extraVehicles.map((v) => v.trim().toUpperCase()).filter(Boolean)
+      : [],
     valueOfGoods: Number(valueOfGoods) || 0,
     truckNo: truckNo.trim().toUpperCase().slice(0, 30),
-    fromCity: fromCity.trim().slice(0, 120),
-    toCity: toCity.trim().slice(0, 120),
+    fromState: fromState.trim().slice(0, 80),
+    fromDistrict: fromDistrict.trim().slice(0, 80),
+    fromCity: (fromCity || fromDistrict).trim().slice(0, 120),
+    toState: toState.trim().slice(0, 80),
+    toDistrict: toDistrict.trim().slice(0, 80),
+    toCity: (toCity || toDistrict).trim().slice(0, 120),
     engineNo: engineNo.trim().slice(0, 40),
     chassisNo: chassisNo.trim().slice(0, 40),
     ownerName: ownerName.trim().slice(0, 140),
@@ -442,9 +616,13 @@ const ConsignmentModuleInner: React.FC<ConsignmentModuleProps> = ({
     ownerUid,
   });
 
-  const handleSave = async (e: React.FormEvent) => {
+  const handleSave = async (e: React.FormEvent, andSendToBilling = false) => {
     e.preventDefault();
-    if ((!autoAtomicCn && !cnNo.trim()) || !consignorName.trim() || !consigneeName.trim() || !truckNo.trim()) return;
+    if (!validateMandatoryFields()) return;
+    if ((!autoAtomicCn && !cnNo.trim()) || !consignorName.trim() || !consigneeName.trim() || !truckNo.trim()) {
+      setValidationError('Please fill mandatory C/N, Consignor, Consignee, and Primary Truck fields.');
+      return;
+    }
     setSaving(true);
     try {
       let finalCnNo = cnNo.trim();
@@ -460,13 +638,14 @@ const ConsignmentModuleInner: React.FC<ConsignmentModuleProps> = ({
       }
 
       const id = editingId || makeSafeDocId('cn');
-      await upsertDocument('consignments', id, buildPayload(finalCnNo), !editingId);
+      const payload = buildPayload(finalCnNo);
+      await upsertDocument('consignments', id, payload, !editingId);
 
       await logBranchActivity({
         action: editingId ? 'Updated LR / CN' : 'Created LR / CN',
         module: 'Consignment',
         docRefCode: finalCnNo,
-        summary: `${consignorName.trim()} → ${toCity.trim()} (${truckNo.trim().toUpperCase()}) · ₹${formatINR(Number(totalFreight) || 0)}`,
+        summary: `${consignorName.trim()} → ${(toCity || toDistrict).trim()} (Bill To: ${billingPartyName.trim()} · ${resolvedCreditDays}d) · ₹${formatINR(Number(totalFreight) || 0)}`,
         staffCode: activeStaffCode,
         staffName: activeStaffName,
         branchCode: activeBranchCode,
@@ -474,12 +653,16 @@ const ConsignmentModuleInner: React.FC<ConsignmentModuleProps> = ({
       });
 
       resetForm();
+      if (andSendToBilling) {
+        onSendCnToInvoice({ id, ...payload });
+      }
     } finally {
       setSaving(false);
     }
   };
 
-  const handlePrint3CopyCurrent = async () => {
+  const handlePrint4CopyCurrent = async () => {
+    if (!validateMandatoryFields()) return;
     const tempCn: ConsignmentNote = {
       id: editingId || 'preview',
       ...buildPayload(),
@@ -571,10 +754,10 @@ const ConsignmentModuleInner: React.FC<ConsignmentModuleProps> = ({
                   onPreviewPdf(pdf, 'LR Copy');
                 }}
                 className="inline-flex items-center gap-1 px-2 py-1 rounded bg-blue-50 hover:bg-blue-100 text-blue-800 font-semibold cursor-pointer"
-                title="Print Combined 3-Copy LR"
+                title="Print Combined 4-Copy LR (Consignor, Consignee, Driver/Lorry, Office)"
               >
                 <Printer className="w-3 h-3" />
-                3-Copy
+                4-Copy
               </button>
               <button
                 type="button"
@@ -752,12 +935,110 @@ const ConsignmentModuleInner: React.FC<ConsignmentModuleProps> = ({
             </button>
             <button
               type="button"
-              onClick={handlePrint3CopyCurrent}
+              onClick={handlePrint4CopyCurrent}
               className="inline-flex items-center gap-1.5 px-3 py-1 rounded bg-white/15 hover:bg-white/25 text-white text-xs font-semibold cursor-pointer whitespace-nowrap"
             >
               <Printer className="w-3.5 h-3.5" />
-              Preview 3-Copy LR
+              Preview 4-Copy LR
             </button>
+          </div>
+        </div>
+
+        {/* Mandatory Billing Party & Payment Credit Days Validation Lock Bar */}
+        {validationError && (
+          <div className="mx-4 mt-3 p-2.5 rounded-lg bg-red-50 border border-red-300 text-red-800 text-xs font-bold flex items-center gap-2">
+            <ShieldAlert className="w-4 h-4 text-red-600 shrink-0" />
+            <span>{validationError}</span>
+          </div>
+        )}
+
+        <div className="mx-4 mt-3 p-3 rounded-lg bg-amber-50/70 border border-amber-200 grid grid-cols-1 md:grid-cols-3 gap-3 text-xs">
+          <div className="md:col-span-2">
+            <div className="flex flex-wrap items-center justify-between gap-2 mb-1">
+              <label className="font-bold text-slate-900">
+                Mandatory Billing Party * <span className="text-[10px] text-amber-800">(Required before Save / Billing)</span>
+              </label>
+              <div className="flex gap-1.5">
+                {consignorName.trim() && (
+                  <button
+                    type="button"
+                    onClick={() => {
+                      setBillingPartyName(consignorName.trim());
+                      setValidationError(null);
+                    }}
+                    className="px-2 py-0.5 rounded bg-white border border-amber-300 hover:bg-amber-100 text-[10px] font-bold text-amber-900 cursor-pointer"
+                  >
+                    Use Consignor
+                  </button>
+                )}
+                {consigneeName.trim() && (
+                  <button
+                    type="button"
+                    onClick={() => {
+                      setBillingPartyName(consigneeName.trim());
+                      setValidationError(null);
+                    }}
+                    className="px-2 py-0.5 rounded bg-white border border-amber-300 hover:bg-amber-100 text-[10px] font-bold text-amber-900 cursor-pointer"
+                  >
+                    Use Consignee
+                  </button>
+                )}
+              </div>
+            </div>
+            <EditableSearchSelect
+              ariaLabel="Mandatory Billing Party"
+              value={billingPartyName}
+              onChange={(val) => {
+                setBillingPartyName(val);
+                if (val.trim()) setValidationError(null);
+              }}
+              options={partyNameOptions}
+              placeholder="Select or search Billing Party (or click + Edit to add new)..."
+              allowFreeInput
+              inputClassName={!billingPartyName.trim() ? 'border-amber-400' : 'border-emerald-400'}
+              onAddOption={handleAddBillingPartyOption}
+            />
+          </div>
+
+          <div>
+            <label className="block font-bold text-slate-900 mb-1">
+              Mandatory Payment Credit Days *
+            </label>
+            <div className="flex items-center gap-1.5">
+              <select
+                aria-label="Mandatory Payment Credit Days"
+                value={creditDaysOption}
+                onChange={(e) => {
+                  setCreditDaysOption(e.target.value);
+                  if (e.target.value) setValidationError(null);
+                }}
+                className={`flex-1 px-2.5 py-1.5 rounded border bg-white font-bold text-xs focus:outline-none focus:ring-2 focus:ring-blue-500 ${
+                  !resolvedCreditDays ? 'border-amber-400 text-amber-900' : 'border-emerald-400 text-emerald-900'
+                }`}
+              >
+                <option value="">-- Select Credit Days --</option>
+                {creditDayPresets.map((days) => (
+                  <option key={days} value={String(days)}>
+                    {days} Days Credit
+                  </option>
+                ))}
+                <option value="custom">Custom Days...</option>
+              </select>
+              {creditDaysOption === 'custom' && (
+                <input
+                  type="number"
+                  min={1}
+                  max={365}
+                  value={customCreditDays}
+                  onChange={(e) => {
+                    setCustomCreditDays(e.target.value);
+                    if (Number(e.target.value) > 0) setValidationError(null);
+                  }}
+                  placeholder="Days"
+                  className="w-20 px-2 py-1.5 rounded border border-blue-400 font-mono-num text-xs"
+                />
+              )}
+            </div>
           </div>
         </div>
 
@@ -786,13 +1067,26 @@ const ConsignmentModuleInner: React.FC<ConsignmentModuleProps> = ({
             />
           </div>
           <div>
-            <label className="block font-semibold text-slate-700 mb-1">Delivery Office</label>
-            <input
-              type="text"
+            <div className="flex items-center justify-between gap-2 mb-1">
+              <label className="font-semibold text-slate-700">Delivery Office</label>
+              <div className="inline-flex items-center gap-1">
+                <span className="text-[10px] font-bold text-slate-600">Stock Transfer:</span>
+                <YesNoSelect
+                  ariaLabel="Stock Transfer (Yes/No)"
+                  value={stockTransfer}
+                  onChange={(next) => setStockTransfer(next)}
+                />
+              </div>
+            </div>
+            <EditableSearchSelect
+              ariaLabel="Delivery Office"
               value={deliveryOffice}
-              onChange={(e) => setDeliveryOffice(e.target.value)}
-              placeholder="SILIGURI / DHAKA BORDER"
-              className="w-full px-2.5 py-1.5 rounded border border-slate-300"
+              onChange={setDeliveryOffice}
+              options={deliveryPlaceOptions}
+              placeholder="Search Delivery Office / Border Hub..."
+              onAddOption={(val) => addDropdownItem(ownerUid, company, 'deliveryPlaces', val)}
+              onEditOption={(oldV, newV) => editDropdownItem(ownerUid, company, 'deliveryPlaces', oldV, newV)}
+              onDeleteOption={(val) => deleteDropdownItem(ownerUid, company, 'deliveryPlaces', val)}
             />
           </div>
 
@@ -862,8 +1156,118 @@ const ConsignmentModuleInner: React.FC<ConsignmentModuleProps> = ({
             ))}
           </datalist>
 
+          {/* All-India + Cross-Border Route Cascade (Origin & Destination States / Districts) */}
+          <div className="md:col-span-3 p-3 rounded-lg bg-blue-50/50 border border-blue-200 grid grid-cols-1 md:grid-cols-6 gap-2.5">
+            <div>
+              <label className="block font-semibold text-slate-700 mb-1">From State / Country</label>
+              <EditableSearchSelect
+                ariaLabel="From State or Country"
+                value={fromState}
+                onChange={(val) => {
+                  setFromState(val);
+                  setFromDistrict('');
+                }}
+                options={stateOptions}
+                placeholder="19 - West Bengal"
+                onAddOption={(val) => addDropdownItem(ownerUid, company, 'states', val)}
+                onEditOption={(oldV, newV) => editDropdownItem(ownerUid, company, 'states', oldV, newV)}
+                onDeleteOption={(val) => deleteDropdownItem(ownerUid, company, 'states', val)}
+              />
+            </div>
+            <div>
+              <label className="block font-semibold text-slate-700 mb-1">From District</label>
+              <EditableSearchSelect
+                ariaLabel="From District"
+                value={fromDistrict}
+                onChange={(val) => {
+                  setFromDistrict(val);
+                  if (val && (!fromCity || fromCity === 'KOLKATA')) {
+                    setFromCity(val.split('(')[0].trim().toUpperCase());
+                  }
+                }}
+                options={fromDistrictOptions}
+                placeholder="Select Origin District..."
+                onAddOption={(val) => upsertDistrictItem(ownerUid, company, fromState, { type: 'add', value: val })}
+                onEditOption={(oldV, newV) => upsertDistrictItem(ownerUid, company, fromState, { type: 'edit', oldValue: oldV, newValue: newV })}
+                onDeleteOption={(val) => upsertDistrictItem(ownerUid, company, fromState, { type: 'delete', value: val })}
+              />
+            </div>
+            <div>
+              <label className="block font-semibold text-slate-700 mb-1">From City / Town *</label>
+              <input
+                type="text"
+                required
+                value={fromCity}
+                onChange={(e) => setFromCity(e.target.value)}
+                className="w-full px-2.5 py-1.5 rounded border border-slate-300 bg-white"
+              />
+            </div>
+
+            <div>
+              <label className="block font-semibold text-slate-700 mb-1">To State / Country</label>
+              <EditableSearchSelect
+                ariaLabel="To State or Country"
+                value={toState}
+                onChange={(val) => {
+                  setToState(val);
+                  setToDistrict('');
+                }}
+                options={stateOptions}
+                placeholder="Select State / Nepal / BD / Bhutan"
+                onAddOption={(val) => addDropdownItem(ownerUid, company, 'states', val)}
+                onEditOption={(oldV, newV) => editDropdownItem(ownerUid, company, 'states', oldV, newV)}
+                onDeleteOption={(val) => deleteDropdownItem(ownerUid, company, 'states', val)}
+              />
+            </div>
+            <div>
+              <label className="block font-semibold text-slate-700 mb-1">To District / ICP</label>
+              <EditableSearchSelect
+                ariaLabel="To District"
+                value={toDistrict}
+                onChange={(val) => {
+                  setToDistrict(val);
+                  if (val) {
+                    setToCity(val.split('(')[0].trim().toUpperCase());
+                  }
+                }}
+                options={toDistrictOptions}
+                placeholder="Select Destination District..."
+                onAddOption={(val) => upsertDistrictItem(ownerUid, company, toState, { type: 'add', value: val })}
+                onEditOption={(oldV, newV) => upsertDistrictItem(ownerUid, company, toState, { type: 'edit', oldValue: oldV, newValue: newV })}
+                onDeleteOption={(val) => upsertDistrictItem(ownerUid, company, toState, { type: 'delete', value: val })}
+              />
+            </div>
+            <div>
+              <label className="block font-semibold text-slate-700 mb-1">To City / Destination *</label>
+              <input
+                type="text"
+                required
+                value={toCity}
+                onChange={(e) => setToCity(e.target.value)}
+                placeholder="SILIGURI / BIRGUNJ / DHAKA"
+                className="w-full px-2.5 py-1.5 rounded border border-slate-300 bg-white"
+              />
+            </div>
+          </div>
+
+          {/* Vehicles Row with Multi Vehicle (Yes/No) Toggle Right Beside Truck Field */}
           <div>
-            <label className="block font-semibold text-slate-700 mb-1">Primary Truck / Lorry No *</label>
+            <div className="flex items-center justify-between gap-2 mb-1">
+              <label className="font-semibold text-slate-700">Primary Truck No *</label>
+              <div className="inline-flex items-center gap-1">
+                <span className="text-[10px] font-bold text-slate-600">Multi Vehicle:</span>
+                <YesNoSelect
+                  ariaLabel="Multi Vehicle (Yes/No)"
+                  value={hasMultiVehicle}
+                  onChange={(next) => {
+                    setHasMultiVehicle(next);
+                    if (next && extraVehicles.length === 0) {
+                      setExtraVehicles(['']);
+                    }
+                  }}
+                />
+              </div>
+            </div>
             <input
               type="text"
               required
@@ -879,68 +1283,114 @@ const ConsignmentModuleInner: React.FC<ConsignmentModuleProps> = ({
               ))}
             </datalist>
           </div>
+
           <div>
-            <label className="block font-semibold text-slate-700 mb-1">From *</label>
-            <input
-              type="text"
-              required
-              value={fromCity}
-              onChange={(e) => setFromCity(e.target.value)}
-              className="w-full px-2.5 py-1.5 rounded border border-slate-300"
-            />
-          </div>
-          <div>
-            <label className="block font-semibold text-slate-700 mb-1">To *</label>
-            <input
-              type="text"
-              required
-              value={toCity}
-              onChange={(e) => setToCity(e.target.value)}
-              className="w-full px-2.5 py-1.5 rounded border border-slate-300"
-            />
+            <label className="block font-semibold text-slate-700 mb-1">No. of Packages &amp; Mode</label>
+            <div className="grid grid-cols-2 gap-1.5">
+              <input
+                type="text"
+                value={packages}
+                onChange={(e) => setPackages(e.target.value)}
+                placeholder="400"
+                className="w-full px-2.5 py-1.5 rounded border border-slate-300"
+              />
+              <EditableSearchSelect
+                ariaLabel="Package Mode"
+                value={packageMode}
+                onChange={setPackageMode}
+                options={packageModeOptions}
+                placeholder="Package Mode"
+                onAddOption={(val) => addDropdownItem(ownerUid, company, 'packageModes', val)}
+                onEditOption={(oldV, newV) => editDropdownItem(ownerUid, company, 'packageModes', oldV, newV)}
+                onDeleteOption={(val) => deleteDropdownItem(ownerUid, company, 'packageModes', val)}
+              />
+            </div>
           </div>
 
           <div>
-            <label className="block font-semibold text-slate-700 mb-1">No. of Packages</label>
-            <input
-              type="text"
-              value={packages}
-              onChange={(e) => setPackages(e.target.value)}
-              placeholder="400 Nos"
-              className="w-full px-2.5 py-1.5 rounded border border-slate-300"
-            />
-          </div>
-          <div className="md:col-span-2">
-            <label className="block font-semibold text-slate-700 mb-1">Particulars / Description</label>
-            <input
-              type="text"
+            <label className="block font-semibold text-slate-700 mb-1">
+              Non-Liquid Goods / Particulars (All-India)
+            </label>
+            <EditableSearchSelect
+              ariaLabel="Non-Liquid Goods Description"
               value={particulars}
-              onChange={(e) => setParticulars(e.target.value)}
-              placeholder="Compost 50 Kg Bags / Tea Machinery / As per challan"
-              className="w-full px-2.5 py-1.5 rounded border border-slate-300"
+              onChange={setParticulars}
+              options={goodsOptions}
+              placeholder="Search Tea, Steel, Pipes, Machinery..."
+              onAddOption={(val) => addDropdownItem(ownerUid, company, 'goodsTypes', val)}
+              onEditOption={(oldV, newV) => editDropdownItem(ownerUid, company, 'goodsTypes', oldV, newV)}
+              onDeleteOption={(val) => deleteDropdownItem(ownerUid, company, 'goodsTypes', val)}
             />
           </div>
 
           <div>
-            <label className="block font-semibold text-slate-700 mb-1">Nett Weight (MT)</label>
-            <input
-              type="number"
-              step="0.001"
-              value={nettWeight}
-              onChange={(e) => setNettWeight(e.target.value)}
-              className="w-full px-2.5 py-1.5 rounded border border-slate-300 font-mono-num"
-            />
+            <label className="block font-semibold text-slate-700 mb-1">Rate Mode &amp; Rate (₹)</label>
+            <div className="grid grid-cols-3 gap-1.5">
+              <div className="col-span-2">
+                <EditableSearchSelect
+                  ariaLabel="Rate Mode"
+                  value={rateMode}
+                  onChange={setRateMode}
+                  options={rateModeOptions}
+                  placeholder="Fixed / Per MT"
+                  onAddOption={(val) => addDropdownItem(ownerUid, company, 'rateModes', val)}
+                  onEditOption={(oldV, newV) => editDropdownItem(ownerUid, company, 'rateModes', oldV, newV)}
+                  onDeleteOption={(val) => deleteDropdownItem(ownerUid, company, 'rateModes', val)}
+                />
+              </div>
+              <input
+                type="number"
+                step="0.01"
+                value={ratePerUnit}
+                onChange={(e) => {
+                  const r = e.target.value;
+                  setRatePerUnit(r);
+                  const rateNum = Number(r);
+                  const wt = Number(nettWeight) || Number(grossWeight) || 0;
+                  if (Number.isFinite(rateNum) && rateNum > 0 && /ton|mt/i.test(rateMode) && wt > 0) {
+                    const calc = Math.round(rateNum * wt * 100) / 100;
+                    setTotalFreight(String(calc));
+                    setToPayAmount(String(Math.max(0, calc - (Number(paidAmount) || 0))));
+                  }
+                }}
+                placeholder="Rate ₹"
+                className="w-full px-2 py-1.5 rounded border border-slate-300 font-mono-num"
+              />
+            </div>
           </div>
+
           <div>
-            <label className="block font-semibold text-slate-700 mb-1">Gross Weight (MT)</label>
-            <input
-              type="number"
-              step="0.001"
-              value={grossWeight}
-              onChange={(e) => setGrossWeight(e.target.value)}
-              className="w-full px-2.5 py-1.5 rounded border border-slate-300 font-mono-num"
-            />
+            <label className="block font-semibold text-slate-700 mb-1">Nett / Gross Weight (MT)</label>
+            <div className="grid grid-cols-2 gap-1.5">
+              <input
+                type="number"
+                step="0.001"
+                value={nettWeight}
+                onChange={(e) => {
+                  const nextWt = e.target.value;
+                  setNettWeight(nextWt);
+                  const rateNum = Number(ratePerUnit);
+                  const wtNum = Number(nextWt);
+                  if (Number.isFinite(rateNum) && rateNum > 0 && /ton|mt/i.test(rateMode) && wtNum > 0) {
+                    const calc = Math.round(rateNum * wtNum * 100) / 100;
+                    setTotalFreight(String(calc));
+                    setToPayAmount(String(Math.max(0, calc - (Number(paidAmount) || 0))));
+                  }
+                }}
+                placeholder="Nett MT"
+                className="w-full px-2.5 py-1.5 rounded border border-slate-300 font-mono-num"
+              />
+              <input
+                type="number"
+                step="0.001"
+                value={grossWeight}
+                onChange={(e) => setGrossWeight(e.target.value)}
+                placeholder="Gross MT"
+                className="w-full px-2.5 py-1.5 rounded border border-slate-300 font-mono-num"
+              />
+            </div>
           </div>
+
           <div>
             <label className="block font-semibold text-slate-700 mb-1">Total Freight (₹) *</label>
             <input
@@ -948,29 +1398,69 @@ const ConsignmentModuleInner: React.FC<ConsignmentModuleProps> = ({
               step="0.01"
               required
               value={totalFreight}
-              onChange={(e) => setTotalFreight(e.target.value)}
+              onChange={(e) => {
+                setTotalFreight(e.target.value);
+                const f = Number(e.target.value) || 0;
+                const p = Number(paidAmount) || 0;
+                setToPayAmount(String(Math.max(0, f - p)));
+              }}
               className="w-full px-2.5 py-1.5 rounded border border-slate-300 font-mono-num font-bold text-blue-800"
             />
           </div>
 
+          {/* Attached Tax Invoice (Yes/No) + Multi E-Way Bill (Yes/No) + Value of Goods */}
           <div>
-            <label className="block font-semibold text-slate-700 mb-1">Party Tax Inv. / Challan No</label>
+            <div className="flex items-center justify-between gap-2 mb-1">
+              <label className="font-semibold text-slate-700">Attached Tax Inv. / Challan</label>
+              <YesNoSelect
+                ariaLabel="Attached Tax Invoice / Challan (Yes/No)"
+                value={hasTaxInvoice}
+                onChange={(next) => {
+                  setHasTaxInvoice(next);
+                  if (!next) {
+                    setTaxInvNo('');
+                    setTaxInvDate('');
+                    setExtraTaxInvoices([]);
+                  }
+                }}
+              />
+            </div>
             <input
               type="text"
-              value={taxInvNo}
+              disabled={!hasTaxInvoice}
+              value={hasTaxInvoice ? taxInvNo : 'NO TAX INVOICE ATTACHED'}
               onChange={(e) => setTaxInvNo(e.target.value)}
-              className="w-full px-2.5 py-1.5 rounded border border-slate-300 font-mono-num"
+              placeholder="Tax Invoice / Challan No"
+              className="w-full px-2.5 py-1.5 rounded border border-slate-300 font-mono-num disabled:bg-slate-100 disabled:text-slate-500"
             />
           </div>
+
           <div>
-            <label className="block font-semibold text-slate-700 mb-1">E-Way Bill No</label>
+            <div className="flex items-center justify-between gap-2 mb-1">
+              <label className="font-semibold text-slate-700">E-Way Bill No</label>
+              <div className="inline-flex items-center gap-1">
+                <span className="text-[10px] font-bold text-slate-600">Multi EWB:</span>
+                <YesNoSelect
+                  ariaLabel="Multi E-Way Bill (Yes/No)"
+                  value={hasMultiEwayBill}
+                  onChange={(next) => {
+                    setHasMultiEwayBill(next);
+                    if (next && extraEwayBills.length === 0) {
+                      setExtraEwayBills([{ no: '', date: ewayBillDate || todayISO() }]);
+                    }
+                  }}
+                />
+              </div>
+            </div>
             <input
               type="text"
               value={ewayBillNo}
               onChange={(e) => setEwayBillNo(e.target.value)}
+              placeholder="12-Digit E-Way Bill No"
               className="w-full px-2.5 py-1.5 rounded border border-slate-300 font-mono-num"
             />
           </div>
+
           <div>
             <label className="block font-semibold text-slate-700 mb-1">Value of Goods (₹)</label>
             <input
@@ -1015,145 +1505,168 @@ const ConsignmentModuleInner: React.FC<ConsignmentModuleProps> = ({
               className="w-full px-2.5 py-1.5 rounded border border-slate-300 font-mono-num"
             />
           </div>
+          <div>
+            <label className="block font-semibold text-slate-700 mb-1">GST Paid By</label>
+            <select
+              aria-label="GST Paid By"
+              value={gstPaidBy}
+              onChange={(e) => setGstPaidBy(e.target.value)}
+              className="w-full px-2.5 py-1.5 rounded border border-slate-300 bg-white font-semibold"
+            >
+              <option value="Consignee">Consignee</option>
+              <option value="Consignor">Consignor</option>
+              <option value="Transporter">Transporter</option>
+              <option value="Others">Others</option>
+            </select>
+          </div>
 
-          {/* Multi-Vehicle, Multi-Invoice & Multi-EWB Schedule Builders */}
-          <div className="md:col-span-3 p-3 rounded-lg bg-slate-50 border border-slate-200 space-y-2.5">
-            <div className="flex flex-wrap items-center justify-between gap-2">
-              <span className="font-bold text-slate-800">
-                Additional Vehicles, Invoices / Challans &amp; E-Way Bills (Auto-Spills to Page 2 in PDF)
-              </span>
-              <div className="flex flex-wrap gap-1.5">
-                <button
-                  type="button"
-                  onClick={() => setExtraVehicles((prev) => [...prev, ''])}
-                  className="inline-flex items-center gap-1 px-2.5 py-1 rounded bg-white border border-slate-300 hover:bg-blue-50 text-blue-800 font-semibold cursor-pointer"
-                >
-                  <Plus className="w-3 h-3" /> Add Vehicle
-                </button>
-                <button
-                  type="button"
-                  onClick={() =>
-                    setExtraTaxInvoices((prev) => [...prev, { no: '', date: taxInvDate || todayISO() }])
-                  }
-                  className="inline-flex items-center gap-1 px-2.5 py-1 rounded bg-white border border-slate-300 hover:bg-blue-50 text-blue-800 font-semibold cursor-pointer"
-                >
-                  <Plus className="w-3 h-3" /> Add Tax Inv
-                </button>
-                <button
-                  type="button"
-                  onClick={() =>
-                    setExtraEwayBills((prev) => [...prev, { no: '', date: ewayBillDate || todayISO() }])
-                  }
-                  className="inline-flex items-center gap-1 px-2.5 py-1 rounded bg-white border border-slate-300 hover:bg-blue-50 text-blue-800 font-semibold cursor-pointer"
-                >
-                  <Plus className="w-3 h-3" /> Add E-Way Bill
-                </button>
-              </div>
-            </div>
-
-            {extraVehicles.length > 0 && (
-              <div className="flex flex-wrap gap-2">
-                {extraVehicles.map((veh, idx) => (
-                  <div key={idx} className="inline-flex items-center gap-1 bg-white border border-slate-300 rounded px-2 py-1">
-                    <input
-                      type="text"
-                      value={veh}
-                      onChange={(e) =>
-                        setExtraVehicles((prev) =>
-                          prev.map((v, i) => (i === idx ? e.target.value.toUpperCase() : v))
-                        )
-                      }
-                      placeholder={`Truck #${idx + 2}`}
-                      className="w-28 font-mono-num uppercase focus:outline-none"
-                    />
+          {/* Conditional Multi-Vehicle, Extra Tax Invoices & Multi-EWB Rows */}
+          {(hasMultiVehicle || hasMultiEwayBill || hasTaxInvoice) && (
+            <div className="md:col-span-3 p-3 rounded-lg bg-slate-50 border border-slate-200 space-y-2.5">
+              <div className="flex flex-wrap items-center justify-between gap-2">
+                <span className="font-bold text-slate-800">
+                  Expanded Multi-Items (Controlled by Yes/No Toggles Above)
+                </span>
+                <div className="flex flex-wrap gap-1.5">
+                  {hasMultiVehicle && (
                     <button
                       type="button"
-                      onClick={() => setExtraVehicles((prev) => prev.filter((_, i) => i !== idx))}
-                      className="text-red-600 cursor-pointer"
+                      onClick={() => setExtraVehicles((prev) => [...prev, ''])}
+                      className="inline-flex items-center gap-1 px-2.5 py-1 rounded bg-white border border-slate-300 hover:bg-blue-50 text-blue-800 font-semibold cursor-pointer"
                     >
-                      ×
+                      <Plus className="w-3 h-3" /> Add Vehicle
                     </button>
-                  </div>
-                ))}
-              </div>
-            )}
-
-            {extraTaxInvoices.length > 0 && (
-              <div className="grid grid-cols-1 sm:grid-cols-2 md:grid-cols-3 gap-2">
-                {extraTaxInvoices.map((inv, idx) => (
-                  <div key={idx} className="flex items-center gap-1 bg-white border border-slate-300 rounded px-2 py-1">
-                    <input
-                      type="text"
-                      value={inv.no}
-                      onChange={(e) =>
-                        setExtraTaxInvoices((prev) =>
-                          prev.map((x, i) => (i === idx ? { ...x, no: e.target.value } : x))
-                        )
-                      }
-                      placeholder={`Inv/Challan #${idx + 2}`}
-                      className="flex-1 min-w-0 font-mono-num focus:outline-none"
-                    />
-                    <input
-                      type="date"
-                      value={inv.date}
-                      onChange={(e) =>
-                        setExtraTaxInvoices((prev) =>
-                          prev.map((x, i) => (i === idx ? { ...x, date: e.target.value } : x))
-                        )
-                      }
-                      className="w-28 font-mono-num text-[11px] focus:outline-none"
-                    />
+                  )}
+                  {hasTaxInvoice && (
                     <button
                       type="button"
                       onClick={() =>
-                        setExtraTaxInvoices((prev) => prev.filter((_, i) => i !== idx))
+                        setExtraTaxInvoices((prev) => [...prev, { no: '', date: taxInvDate || todayISO() }])
                       }
-                      className="text-red-600 cursor-pointer"
+                      className="inline-flex items-center gap-1 px-2.5 py-1 rounded bg-white border border-slate-300 hover:bg-blue-50 text-blue-800 font-semibold cursor-pointer"
                     >
-                      ×
+                      <Plus className="w-3 h-3" /> Add Extra Tax Inv
                     </button>
-                  </div>
-                ))}
-              </div>
-            )}
-
-            {extraEwayBills.length > 0 && (
-              <div className="grid grid-cols-1 sm:grid-cols-2 md:grid-cols-3 gap-2">
-                {extraEwayBills.map((ewb, idx) => (
-                  <div key={idx} className="flex items-center gap-1 bg-white border border-slate-300 rounded px-2 py-1">
-                    <input
-                      type="text"
-                      value={ewb.no}
-                      onChange={(e) =>
-                        setExtraEwayBills((prev) =>
-                          prev.map((x, i) => (i === idx ? { ...x, no: e.target.value } : x))
-                        )
-                      }
-                      placeholder={`EWB #${idx + 2}`}
-                      className="flex-1 min-w-0 font-mono-num focus:outline-none"
-                    />
-                    <input
-                      type="date"
-                      value={ewb.date}
-                      onChange={(e) =>
-                        setExtraEwayBills((prev) =>
-                          prev.map((x, i) => (i === idx ? { ...x, date: e.target.value } : x))
-                        )
-                      }
-                      className="w-28 font-mono-num text-[11px] focus:outline-none"
-                    />
+                  )}
+                  {hasMultiEwayBill && (
                     <button
                       type="button"
-                      onClick={() => setExtraEwayBills((prev) => prev.filter((_, i) => i !== idx))}
-                      className="text-red-600 cursor-pointer"
+                      onClick={() =>
+                        setExtraEwayBills((prev) => [...prev, { no: '', date: ewayBillDate || todayISO() }])
+                      }
+                      className="inline-flex items-center gap-1 px-2.5 py-1 rounded bg-white border border-slate-300 hover:bg-blue-50 text-blue-800 font-semibold cursor-pointer"
                     >
-                      ×
+                      <Plus className="w-3 h-3" /> Add E-Way Bill
                     </button>
-                  </div>
-                ))}
+                  )}
+                </div>
               </div>
-            )}
-          </div>
+
+              {hasMultiVehicle && extraVehicles.length > 0 && (
+                <div className="flex flex-wrap gap-2">
+                  {extraVehicles.map((veh, idx) => (
+                    <div key={idx} className="inline-flex items-center gap-1 bg-white border border-slate-300 rounded px-2 py-1">
+                      <input
+                        type="text"
+                        list="cn-vehicle-list"
+                        value={veh}
+                        onChange={(e) =>
+                          setExtraVehicles((prev) =>
+                            prev.map((v, i) => (i === idx ? e.target.value.toUpperCase() : v))
+                          )
+                        }
+                        placeholder={`Truck #${idx + 2}`}
+                        className="w-28 font-mono-num uppercase focus:outline-none"
+                      />
+                      <button
+                        type="button"
+                        onClick={() => setExtraVehicles((prev) => prev.filter((_, i) => i !== idx))}
+                        className="text-red-600 cursor-pointer"
+                      >
+                        ×
+                      </button>
+                    </div>
+                  ))}
+                </div>
+              )}
+
+              {hasTaxInvoice && extraTaxInvoices.length > 0 && (
+                <div className="grid grid-cols-1 sm:grid-cols-2 md:grid-cols-3 gap-2">
+                  {extraTaxInvoices.map((inv, idx) => (
+                    <div key={idx} className="flex items-center gap-1 bg-white border border-slate-300 rounded px-2 py-1">
+                      <input
+                        type="text"
+                        value={inv.no}
+                        onChange={(e) =>
+                          setExtraTaxInvoices((prev) =>
+                            prev.map((x, i) => (i === idx ? { ...x, no: e.target.value } : x))
+                          )
+                        }
+                        placeholder={`Inv/Challan #${idx + 2}`}
+                        className="flex-1 min-w-0 font-mono-num focus:outline-none"
+                      />
+                      <input
+                        type="date"
+                        value={inv.date}
+                        onChange={(e) =>
+                          setExtraTaxInvoices((prev) =>
+                            prev.map((x, i) => (i === idx ? { ...x, date: e.target.value } : x))
+                          )
+                        }
+                        className="w-28 font-mono-num text-[11px] focus:outline-none"
+                      />
+                      <button
+                        type="button"
+                        onClick={() =>
+                          setExtraTaxInvoices((prev) => prev.filter((_, i) => i !== idx))
+                        }
+                        className="text-red-600 cursor-pointer"
+                      >
+                        ×
+                      </button>
+                    </div>
+                  ))}
+                </div>
+              )}
+
+              {hasMultiEwayBill && extraEwayBills.length > 0 && (
+                <div className="grid grid-cols-1 sm:grid-cols-2 md:grid-cols-3 gap-2">
+                  {extraEwayBills.map((ewb, idx) => (
+                    <div key={idx} className="flex items-center gap-1 bg-white border border-slate-300 rounded px-2 py-1">
+                      <input
+                        type="text"
+                        value={ewb.no}
+                        onChange={(e) =>
+                          setExtraEwayBills((prev) =>
+                            prev.map((x, i) => (i === idx ? { ...x, no: e.target.value } : x))
+                          )
+                        }
+                        placeholder={`EWB #${idx + 2}`}
+                        className="flex-1 min-w-0 font-mono-num focus:outline-none"
+                      />
+                      <input
+                        type="date"
+                        value={ewb.date}
+                        onChange={(e) =>
+                          setExtraEwayBills((prev) =>
+                            prev.map((x, i) => (i === idx ? { ...x, date: e.target.value } : x))
+                          )
+                        }
+                        className="w-28 font-mono-num text-[11px] focus:outline-none"
+                      />
+                      <button
+                        type="button"
+                        onClick={() => setExtraEwayBills((prev) => prev.filter((_, i) => i !== idx))}
+                        className="text-red-600 cursor-pointer"
+                      >
+                        ×
+                      </button>
+                    </div>
+                  ))}
+                </div>
+              )}
+            </div>
+          )}
 
           {/* Extra-Large Wide Remarks Box */}
           <div className="md:col-span-3">
@@ -1170,24 +1683,40 @@ const ConsignmentModuleInner: React.FC<ConsignmentModuleProps> = ({
           </div>
         </div>
 
-        <div className="px-4 py-3 bg-slate-50 border-t border-slate-200 flex items-center justify-end gap-2.5">
-          {editingId && (
+        <div className="px-4 py-3 bg-slate-50 border-t border-slate-200 flex flex-wrap items-center justify-between gap-2.5">
+          <span className="text-[11px] font-semibold text-slate-600">
+            {!billingPartyName.trim() || !resolvedCreditDays
+              ? 'Select Billing Party & Payment Credit Days above to unlock Save & Billing.'
+              : `Ready: Bill To "${billingPartyName}" (${resolvedCreditDays} Days Credit)`}
+          </span>
+          <div className="flex flex-wrap items-center gap-2">
+            {editingId && (
+              <button
+                type="button"
+                onClick={resetForm}
+                className="px-4 py-1.5 rounded-md border border-slate-300 bg-white text-xs font-semibold text-slate-700 hover:bg-slate-100 cursor-pointer"
+              >
+                Cancel Edit
+              </button>
+            )}
             <button
               type="button"
-              onClick={resetForm}
-              className="px-4 py-1.5 rounded-md border border-slate-300 bg-white text-xs font-semibold text-slate-700 hover:bg-slate-100 cursor-pointer"
+              disabled={saving}
+              onClick={(e) => void handleSave(e, true)}
+              className="inline-flex items-center gap-1.5 px-3.5 py-1.5 rounded-md bg-emerald-600 hover:bg-emerald-700 text-white text-xs font-bold cursor-pointer disabled:opacity-60"
             >
-              Cancel Edit
+              <FilePlus2 className="w-3.5 h-3.5" />
+              <span>Save &amp; Send to Bill</span>
             </button>
-          )}
-          <button
-            type="submit"
-            disabled={saving}
-            className="inline-flex items-center gap-1.5 px-4 py-1.5 rounded-md bg-blue-700 hover:bg-blue-800 text-white text-xs font-bold cursor-pointer disabled:opacity-60"
-          >
-            <Save className="w-3.5 h-3.5" />
-            <span>{saving ? 'Assigning Serial & Saving...' : editingId ? 'Update LR' : 'Save Consignment Note'}</span>
-          </button>
+            <button
+              type="submit"
+              disabled={saving}
+              className="inline-flex items-center gap-1.5 px-4 py-1.5 rounded-md bg-blue-700 hover:bg-blue-800 text-white text-xs font-bold cursor-pointer disabled:opacity-60"
+            >
+              <Save className="w-3.5 h-3.5" />
+              <span>{saving ? 'Assigning Serial & Saving...' : editingId ? 'Update LR' : 'Save Consignment Note'}</span>
+            </button>
+          </div>
         </div>
       </form>
 

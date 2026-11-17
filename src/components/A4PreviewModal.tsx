@@ -10,7 +10,7 @@ import {
 } from 'lucide-react';
 import { GeneratedPdfResult } from '../lib/pdfEngine';
 import { PdfOrientation } from '../lib/pdfBuilders';
-import { DriveFolderName } from '../types/erp';
+import { BillCopyCount, DriveFolderName } from '../types/erp';
 
 interface A4PreviewModalProps {
   pdf: GeneratedPdfResult | null;
@@ -33,6 +33,7 @@ export const A4PreviewModal: React.FC<A4PreviewModalProps> = ({
 }) => {
   const [uploading, setUploading] = useState(false);
   const [switchingOrientation, setSwitchingOrientation] = useState(false);
+  const [switchingCopies, setSwitchingCopies] = useState(false);
   const [uploadMsg, setUploadMsg] = useState<string | null>(null);
 
   if (!pdf) return null;
@@ -67,6 +68,17 @@ export const A4PreviewModal: React.FC<A4PreviewModalProps> = ({
     }
   };
 
+  const handleCopyCountChange = async (nextCopies: BillCopyCount) => {
+    if (!pdf.rebuildWithCopyCount || !onReplacePdf || pdf.copyCount === nextCopies) return;
+    setSwitchingCopies(true);
+    try {
+      const rebuilt = await pdf.rebuildWithCopyCount(nextCopies);
+      onReplacePdf(rebuilt);
+    } finally {
+      setSwitchingCopies(false);
+    }
+  };
+
   const handleDriveUpload = async () => {
     setUploading(true);
     setUploadMsg(null);
@@ -81,17 +93,33 @@ export const A4PreviewModal: React.FC<A4PreviewModalProps> = ({
   };
 
   return (
-    <div className="fixed inset-0 z-50 flex items-center justify-center bg-slate-900/65 p-3 md:p-6">
-      <div className="w-full max-w-5xl h-[92vh] bg-white rounded-xl border border-slate-200 shadow-2xl flex flex-col overflow-hidden">
-        <div className="flex flex-wrap items-center justify-between gap-3 px-5 py-3.5 bg-gradient-to-r from-[#0D47A1] to-[#1565C0] text-white">
+    <div className="fixed inset-0 z-50 flex items-center justify-center bg-slate-900/65 p-1.5 sm:p-3 md:p-6">
+      <div className="w-full max-w-5xl h-[94vh] sm:h-[92vh] bg-white rounded-xl border border-slate-200 shadow-2xl flex flex-col overflow-hidden">
+        <div className="flex flex-wrap items-center justify-between gap-2.5 px-3.5 sm:px-5 py-3 bg-gradient-to-r from-[#0D47A1] to-[#1565C0] text-white">
           <div className="min-w-0">
-            <h3 className="text-base font-bold truncate">{pdf.title}</h3>
-            <p className="text-xs text-blue-100 truncate">
+            <h3 className="text-sm sm:text-base font-bold truncate">{pdf.title}</h3>
+            <p className="text-[11px] sm:text-xs text-blue-100 truncate">
               {pdf.fileName} · {pdf.sizeKB} KB · A4{' '}
               {pdf.orientation === 'l' ? 'Landscape (297×210mm)' : 'Portrait (210×297mm)'} · Single Combined PDF
             </p>
           </div>
-          <div className="flex flex-wrap items-center gap-2 shrink-0">
+          <div className="flex flex-wrap items-center gap-1.5 sm:gap-2 shrink-0">
+            {/* Bill Copy Selector (1 to 4 Copies Combined PDF) */}
+            {pdf.rebuildWithCopyCount && onReplacePdf && (
+              <select
+                aria-label="Bill Copy Selector"
+                disabled={switchingCopies}
+                value={pdf.copyCount || 1}
+                onChange={(e) => void handleCopyCountChange(Number(e.target.value) as BillCopyCount)}
+                className="px-2.5 py-1.5 rounded-lg bg-white text-[#0D47A1] text-[11px] font-bold border border-blue-200 focus:outline-none cursor-pointer"
+              >
+                <option value={1}>1 Copy (Original)</option>
+                <option value={2}>2 Copies (Original + Office)</option>
+                <option value={3}>3 Copies (Orig + Transp + Office)</option>
+                <option value={4}>4 Copies (All)</option>
+              </select>
+            )}
+
             {/* Dynamic Portrait / Landscape Switcher */}
             {pdf.rebuildWithOrientation && onReplacePdf && (
               <div className="inline-flex items-center rounded-lg bg-white/15 p-0.5 text-[11px] font-bold">

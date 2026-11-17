@@ -13,6 +13,7 @@ import {
   Trash2,
 } from 'lucide-react';
 import {
+  BillCopyCount,
   CompanySettings,
   ConsignmentNote,
   Declaration194C,
@@ -21,7 +22,6 @@ import {
   InvoiceConsignmentRow,
   Party,
   Quotation,
-  SCHEMA_LIMITS,
 } from '../types/erp';
 import {
   amountToIndianWords,
@@ -110,10 +110,14 @@ const BillingQuotesModuleInner: React.FC<BillingQuotesModuleProps> = ({
   const [partyAddress, setPartyAddress] = useState('');
   const [partyGstin, setPartyGstin] = useState('');
   const [partyPan, setPartyPan] = useState('');
+  const [billingCountry, setBillingCountry] = useState<'India' | 'Nepal' | 'Bangladesh' | 'Bhutan'>('India');
   const [sac, setSac] = useState(company.hsn || '996791');
   const [reverseCharge, setReverseCharge] = useState(true);
+  const [gstPaidBy, setGstPaidBy] = useState<'Consignee' | 'Consignor' | 'Transporter' | 'Others'>('Consignee');
   const [gstRate, setGstRate] = useState(5);
   const [interstate, setInterstate] = useState(false);
+  const [copyCount, setCopyCount] = useState<BillCopyCount>(1);
+  const [invValidationError, setInvValidationError] = useState<string | null>(null);
   const [detentionCharges, setDetentionCharges] = useState('0');
   const [unloadingCharges, setUnloadingCharges] = useState('0');
   const [stCharges, setStCharges] = useState('0');
@@ -127,6 +131,8 @@ const BillingQuotesModuleInner: React.FC<BillingQuotesModuleProps> = ({
       from: 'KOLKATA',
       to: '',
       weight: 0,
+      packages: '',
+      rateType: 'Fixed',
       ratePerMt: 0,
       freight: 0,
       description: '',
@@ -141,15 +147,117 @@ const BillingQuotesModuleInner: React.FC<BillingQuotesModuleProps> = ({
   const [invSearch, setInvSearch] = useState('');
   const debouncedInvSearch = useDebouncedValue(invSearch, 200);
 
+  const isExportCountry = billingCountry !== 'India';
+
+  const detectCountryFromText = (
+    text: string
+  ): 'Nepal' | 'Bangladesh' | 'Bhutan' | null => {
+    const t = String(text || '');
+    if (/\b(nepal|birgunj|kathmandu|kakarvitta|biratnagar|bhairahawa|pokhara|nepalgunj)\b/i.test(t)) {
+      return 'Nepal';
+    }
+    if (/\b(bangladesh|dhaka|benapole|chattogram|chittagong|burimari|hili|sylhet|bhomra)\b/i.test(t)) {
+      return 'Bangladesh';
+    }
+    if (/\b(bhutan|phuentsholing|thimphu|pasakha|paro|gelephu|samtse)\b/i.test(t)) {
+      return 'Bhutan';
+    }
+    return null;
+  };
+
+  const applyAutoGstRules = (
+    nextCountry: 'India' | 'Nepal' | 'Bangladesh' | 'Bhutan',
+    nextGstin: string,
+    nextPaidBy = gstPaidBy
+  ) => {
+    if (nextCountry !== 'India') {
+      setInterstate(false);
+      setGstRate(0);
+      setReverseCharge(false);
+      return;
+    }
+    const cleanGst = nextGstin.trim().toUpperCase();
+    if (/^19/.test(cleanGst)) {
+      setInterstate(false);
+      setGstRate(5);
+    } else if (/^(0[1-9]|[1-3][0-9])/.test(cleanGst)) {
+      setInterstate(true);
+      setGstRate(5);
+    } else {
+      setGstRate((prev) => (prev === 0 ? 5 : prev));
+    }
+    if (nextPaidBy === 'Transporter') {
+      setReverseCharge(false);
+    } else if (nextPaidBy === 'Consignee' || nextPaidBy === 'Consignor') {
+      setReverseCharge(true);
+    }
+  };
+
   // Auto-paste CN sent from ConsignmentModule
   useEffect(() => {
     if (!pendingCnForInvoice) return;
     setSubTab('invoice');
-    if (!partyName) {
-      setPartyName(pendingCnForInvoice.consignorName);
-      setPartyAddress(pendingCnForInvoice.consignorAddress || '');
-      setPartyGstin(pendingCnForInvoice.consignorGstin || '');
+    const targetBillingName =
+      pendingCnForInvoice.billingPartyName?.trim() || pendingCnForInvoice.consignorName;
+
+    let resolvedCountry = billingCountry;
+    let resolvedGstin = partyGstin;
+
+    if (!partyName && targetBillingName) {
+      const matched = parties.find(
+        (p) => p.name.trim().toLowerCase() === targetBillingName.trim().toLowerCase()
+      );
+      const isConsignor =
+        targetBillingName.trim().toLowerCase() ===
+        pendingCnForInvoice.consignorName.trim().toLowerCase();
+      const isConsignee =
+        targetBillingName.trim().toLowerCase() ===
+        pendingCnForInvoice.consigneeName.trim().toLowerCase();
+      const nextAddr =
+        matched?.address ||
+        (isConsignor
+          ? pendingCnForInvoice.consignorAddress || ''
+          : isConsignee
+            ? pendingCnForInvoice.consigneeAddress || ''
+            : '');
+      const nextGstin =
+        matched?.gstin || (isConsignor ? pendingCnForInvoice.consignorGstin || '' : '');
+      const detectedCountry =
+        detectCountryFromText(`${pendingCnForInvoice.toState || ''} ${nextAddr}`) || 'India';
+      resolvedCountry = detectedCountry;
+      resolvedGstin = nextGstin;
+
+      setPartyName(matched?.name || targetBillingName);
+      setPartyAddress(nextAddr);
+      setPartyGstin(nextGstin);
+      setBillingCountry(detectedCountry);
+      if (matched?.pan) setPartyPan(matched.pan);
     }
+
+    const rawGstPaid = String(pendingCnForInvoice.gstPaidBy || 'Consignee').trim();
+    const normPaidBy: 'Consignee' | 'Consignor' | 'Transporter' | 'Others' = rawGstPaid.startsWith('Consignor')
+      ? 'Consignor'
+      : rawGstPaid.startsWith('Transporter')
+        ? 'Transporter'
+        : rawGstPaid.startsWith('Others')
+          ? 'Others'
+          : 'Consignee';
+    setGstPaidBy(normPaidBy);
+    applyAutoGstRules(resolvedCountry, resolvedGstin, normPaidBy);
+
+    if (pendingCnForInvoice.creditDays && pendingCnForInvoice.creditDays > 0) {
+      const baseDate = new Date(invoiceDate || todayISO());
+      if (!Number.isNaN(baseDate.getTime())) {
+        baseDate.setDate(baseDate.getDate() + pendingCnForInvoice.creditDays);
+        setDueDate(baseDate.toISOString().slice(0, 10));
+      }
+    }
+
+    const isPerTon = /ton|mt/i.test(pendingCnForInvoice.rateMode || '');
+    const pkgText = [pendingCnForInvoice.packages, pendingCnForInvoice.packageMode?.split(' ')[0]]
+      .filter(Boolean)
+      .join(' ');
+
     const newRow: InvoiceConsignmentRow = {
       cnNo: pendingCnForInvoice.cnNo,
       cnDate: pendingCnForInvoice.cnDate,
@@ -157,17 +265,21 @@ const BillingQuotesModuleInner: React.FC<BillingQuotesModuleProps> = ({
       from: pendingCnForInvoice.fromCity,
       to: pendingCnForInvoice.toCity,
       weight: Number(pendingCnForInvoice.nettWeight || 0),
-      ratePerMt: Number(pendingCnForInvoice.totalFreight || 0),
+      packages: pkgText,
+      rateType: isPerTon ? 'Per Ton' : 'Fixed',
+      ratePerMt: Number(pendingCnForInvoice.ratePerUnit || pendingCnForInvoice.totalFreight || 0),
       freight: Number(pendingCnForInvoice.totalFreight || 0),
       description: pendingCnForInvoice.particulars || 'GOODS TRANSPORT',
     };
     setRows((prev) => {
       const cleaned = prev.filter((r) => r.cnNo || r.freight > 0);
-      return [...cleaned, newRow].slice(0, SCHEMA_LIMITS.maxConsignmentRows);
+      return [...cleaned, newRow];
     });
-    setScanMsg(`Auto-pasted CN ${pendingCnForInvoice.cnNo} into Tax Invoice.`);
+    setScanMsg(
+      `Auto-pasted CN ${pendingCnForInvoice.cnNo} (${targetBillingName}${pendingCnForInvoice.creditDays ? ` · ${pendingCnForInvoice.creditDays} Days Credit` : ''}) into Tax Invoice.`
+    );
     onClearPendingCn();
-  }, [pendingCnForInvoice, onClearPendingCn, partyName]);
+  }, [pendingCnForInvoice, onClearPendingCn, partyName, parties, invoiceDate, billingCountry, partyGstin]);
 
   const freightSum = useMemo(
     () => rows.reduce((s, r) => s + Number(r.freight || 0), 0),
@@ -178,11 +290,12 @@ const BillingQuotesModuleInner: React.FC<BillingQuotesModuleProps> = ({
   const unlNum = Number(unloadingCharges) || 0;
   const stNum = Number(stCharges) || 0;
   const taxableSubtotal = freightSum + detNum + unlNum + stNum;
-  const totalTax = Number(((taxableSubtotal * gstRate) / 100).toFixed(2));
-  const cgstAmt = interstate ? 0 : Number((totalTax / 2).toFixed(2));
-  const sgstAmt = interstate ? 0 : Number((totalTax / 2).toFixed(2));
-  const igstAmt = interstate ? totalTax : 0;
-  const grandTotal = reverseCharge ? taxableSubtotal : taxableSubtotal + totalTax;
+  const effectiveGstRate = isExportCountry ? 0 : gstRate;
+  const totalTax = Number(((taxableSubtotal * effectiveGstRate) / 100).toFixed(2));
+  const cgstAmt = isExportCountry || interstate ? 0 : Number((totalTax / 2).toFixed(2));
+  const sgstAmt = isExportCountry || interstate ? 0 : Number((totalTax / 2).toFixed(2));
+  const igstAmt = !isExportCountry && interstate ? totalTax : 0;
+  const grandTotal = isExportCountry || reverseCharge ? taxableSubtotal : taxableSubtotal + totalTax;
 
   const pickerConsignments = useMemo(() => {
     const q = debouncedCnPickerSearch.trim().toLowerCase();
@@ -203,6 +316,9 @@ const BillingQuotesModuleInner: React.FC<BillingQuotesModuleProps> = ({
       setPartyAddress(p.address || '');
       setPartyGstin(p.gstin || '');
       setPartyPan(p.pan || '');
+      const detected = detectCountryFromText(p.address || '') || 'India';
+      setBillingCountry(detected);
+      applyAutoGstRules(detected, p.gstin || '', gstPaidBy);
     }
   };
 
@@ -218,6 +334,8 @@ const BillingQuotesModuleInner: React.FC<BillingQuotesModuleProps> = ({
         from: result.fromCity || 'KOLKATA',
         to: result.toCity || '',
         weight: Number(result.nettWeight || result.grossWeight || 0),
+        packages: result.packages || '',
+        rateType: 'Fixed',
         ratePerMt: Number(result.totalFreight || 0),
         freight: Number(result.totalFreight || 0),
         description: result.particulars || 'GOODS TRANSPORT',
@@ -225,11 +343,14 @@ const BillingQuotesModuleInner: React.FC<BillingQuotesModuleProps> = ({
       if (!partyName && result.consignorName) {
         handlePartySelect(result.consignorName);
         if (result.consignorAddress) setPartyAddress(result.consignorAddress);
-        if (result.consignorGstin) setPartyGstin(result.consignorGstin);
+        if (result.consignorGstin) {
+          setPartyGstin(result.consignorGstin);
+          applyAutoGstRules(billingCountry, result.consignorGstin, gstPaidBy);
+        }
       }
       setRows((prev) => {
         const cleaned = prev.filter((r) => r.cnNo || r.freight > 0);
-        return [...cleaned, newRow].slice(0, SCHEMA_LIMITS.maxConsignmentRows);
+        return [...cleaned, newRow];
       });
       setScanMsg(`Auto-pasted scanned LR ${newRow.cnNo || newRow.vehicle} into invoice table!`);
     } catch (err) {
@@ -239,8 +360,10 @@ const BillingQuotesModuleInner: React.FC<BillingQuotesModuleProps> = ({
 
   const handlePasteSavedCN = (cn: ConsignmentNote) => {
     if (!partyName) {
-      handlePartySelect(cn.consignorName);
+      handlePartySelect(cn.billingPartyName || cn.consignorName);
     }
+    const isPerTon = /ton|mt/i.test(cn.rateMode || '');
+    const pkgText = [cn.packages, cn.packageMode?.split(' ')[0]].filter(Boolean).join(' ');
     const newRow: InvoiceConsignmentRow = {
       cnNo: cn.cnNo,
       cnDate: cn.cnDate,
@@ -248,13 +371,15 @@ const BillingQuotesModuleInner: React.FC<BillingQuotesModuleProps> = ({
       from: cn.fromCity,
       to: cn.toCity,
       weight: Number(cn.nettWeight || 0),
-      ratePerMt: Number(cn.totalFreight || 0),
+      packages: pkgText,
+      rateType: isPerTon ? 'Per Ton' : 'Fixed',
+      ratePerMt: Number(cn.ratePerUnit || cn.totalFreight || 0),
       freight: Number(cn.totalFreight || 0),
       description: cn.particulars || 'FREIGHT',
     };
     setRows((prev) => {
       const cleaned = prev.filter((r) => r.cnNo || r.freight > 0);
-      return [...cleaned, newRow].slice(0, SCHEMA_LIMITS.maxConsignmentRows);
+      return [...cleaned, newRow];
     });
     setShowCnPicker(false);
   };
@@ -268,10 +393,13 @@ const BillingQuotesModuleInner: React.FC<BillingQuotesModuleProps> = ({
     partyName: partyName.trim(),
     partyAddress: partyAddress.trim(),
     partyGstin: partyGstin.trim(),
-    partyPan: partyPan.trim(),
+    partyPan: partyPan.trim().toUpperCase(),
+    billingCountry,
     sac,
-    reverseCharge,
-    gstRate,
+    reverseCharge: isExportCountry ? false : reverseCharge,
+    interstate: isExportCountry ? false : interstate,
+    gstPaidBy,
+    gstRate: effectiveGstRate,
     cgstAmt,
     sgstAmt,
     igstAmt,
@@ -284,6 +412,7 @@ const BillingQuotesModuleInner: React.FC<BillingQuotesModuleProps> = ({
     paidAmount: 0,
     status: 'Unpaid',
     remarks,
+    copyCount,
     consignmentRows: rows.filter((r) => r.cnNo || r.vehicle || r.freight > 0),
     annexureLorries: rows
       .filter((r) => r.cnNo || r.vehicle)
@@ -295,8 +424,16 @@ const BillingQuotesModuleInner: React.FC<BillingQuotesModuleProps> = ({
 
   const handleSaveInvoice = async (e: React.FormEvent) => {
     e.preventDefault();
+    setInvValidationError(null);
     const validRows = rows.filter((r) => r.cnNo || r.vehicle || r.freight > 0);
     if (!partyName.trim() || validRows.length === 0) return;
+
+    if (isExportCountry && !partyPan.trim()) {
+      setInvValidationError(
+        `PAN Number is mandatory for ${billingCountry} export billing (GST Exempt 0%, GSTIN optional).`
+      );
+      return;
+    }
 
     setSavingInv(true);
     try {
@@ -331,8 +468,11 @@ const BillingQuotesModuleInner: React.FC<BillingQuotesModuleProps> = ({
           partyAddress: invObj.partyAddress,
           partyGstin: invObj.partyGstin,
           partyPan: invObj.partyPan,
+          billingCountry: invObj.billingCountry,
           sac: invObj.sac,
           reverseCharge: invObj.reverseCharge,
+          interstate: invObj.interstate,
+          gstPaidBy: invObj.gstPaidBy,
           gstRate: invObj.gstRate,
           cgstAmt: invObj.cgstAmt,
           sgstAmt: invObj.sgstAmt,
@@ -346,8 +486,9 @@ const BillingQuotesModuleInner: React.FC<BillingQuotesModuleProps> = ({
           paidAmount: 0,
           status: 'Unpaid',
           remarks: invObj.remarks,
-          consignmentRows: validRows.slice(0, SCHEMA_LIMITS.maxConsignmentRows),
-          annexureLorries: (invObj.annexureLorries || []).slice(0, SCHEMA_LIMITS.maxAnnexureLorries),
+          copyCount: invObj.copyCount,
+          consignmentRows: validRows,
+          annexureLorries: invObj.annexureLorries || [],
           branchCode: activeBranchCode,
           createdByStaff: activeStaffCode,
           ownerUid,
@@ -358,14 +499,14 @@ const BillingQuotesModuleInner: React.FC<BillingQuotesModuleProps> = ({
         action: 'Created Tax Invoice',
         module: 'Billing',
         docRefCode: finalInvoiceNo,
-        summary: `Billed ${invObj.partyName} · ₹${formatINR(invObj.grandTotal)} (${validRows.length} CNs)`,
+        summary: `Billed ${invObj.partyName} (${billingCountry}) · ₹${formatINR(invObj.grandTotal)} (${validRows.length} CNs)`,
         staffCode: activeStaffCode,
         staffName: activeStaffName,
         branchCode: activeBranchCode,
         ownerUid,
       });
 
-      const pdf = await generateInvoicePDF(invObj, company, includeAnnexure);
+      const pdf = await generateInvoicePDF(invObj, company, includeAnnexure, 'p', copyCount);
       onPreviewPdf(pdf, 'Bills_Invoices');
       setInvoiceNo(`${branchTag}/${106 + invoices.length}/${fyShort}`);
     } finally {
@@ -642,7 +783,7 @@ const BillingQuotesModuleInner: React.FC<BillingQuotesModuleProps> = ({
             <button
               type="button"
               onClick={async () => {
-                const pdf = await generateInvoicePDF(inv, company, true);
+                const pdf = await generateInvoicePDF(inv, company, true, 'p', inv.copyCount || 1);
                 onPreviewPdf(pdf, 'Bills_Invoices');
               }}
               className="inline-flex items-center gap-1 px-2 py-1 rounded bg-blue-50 hover:bg-blue-100 text-blue-800 font-semibold cursor-pointer"
@@ -931,8 +1072,14 @@ const BillingQuotesModuleInner: React.FC<BillingQuotesModuleProps> = ({
               </div>
             )}
 
+            {invValidationError && (
+              <div className="mx-4 mt-3 px-4 py-2.5 rounded-lg bg-red-50 border border-red-300 text-xs font-bold text-red-800">
+                {invValidationError}
+              </div>
+            )}
+
             <div className="p-4 space-y-4 text-xs">
-              {/* Party & Invoice Header Fields */}
+              {/* Party, Country & Invoice Header Fields */}
               <div className="grid grid-cols-1 md:grid-cols-4 gap-3">
                 <div>
                   <label className="block font-semibold text-slate-700 mb-1">Bill To Party *</label>
@@ -942,7 +1089,7 @@ const BillingQuotesModuleInner: React.FC<BillingQuotesModuleProps> = ({
                     list="inv-party-list"
                     value={partyName}
                     onChange={(e) => handlePartySelect(e.target.value)}
-                    placeholder="PARUCCO FUNDRY P LTD"
+                    placeholder="PARUCCO FOUNDRY P LTD"
                     className="w-full px-2.5 py-1.5 rounded border border-slate-300"
                   />
                   <datalist id="inv-party-list">
@@ -961,15 +1108,59 @@ const BillingQuotesModuleInner: React.FC<BillingQuotesModuleProps> = ({
                   />
                 </div>
                 <div>
-                  <label className="block font-semibold text-slate-700 mb-1">Party GSTIN</label>
+                  <label className="block font-semibold text-slate-700 mb-1">Billing Country *</label>
+                  <select
+                    aria-label="Billing Country"
+                    value={billingCountry}
+                    onChange={(e) => {
+                      const nextC = e.target.value as 'India' | 'Nepal' | 'Bangladesh' | 'Bhutan';
+                      setBillingCountry(nextC);
+                      setInvValidationError(null);
+                      applyAutoGstRules(nextC, partyGstin, gstPaidBy);
+                    }}
+                    className="w-full px-2.5 py-1.5 rounded border border-slate-300 bg-white font-bold"
+                  >
+                    <option value="India">India (Auto GST by State Code)</option>
+                    <option value="Nepal">Nepal (GST Exempt 0% · PAN Only)</option>
+                    <option value="Bangladesh">Bangladesh (GST Exempt 0% · PAN Only)</option>
+                    <option value="Bhutan">Bhutan (GST Exempt 0% · PAN Only)</option>
+                  </select>
+                </div>
+
+                <div>
+                  <label className="block font-semibold text-slate-700 mb-1">
+                    Party GSTIN {isExportCountry ? <span className="text-slate-500">(Optional)</span> : ''}
+                  </label>
                   <input
                     type="text"
                     value={partyGstin}
-                    onChange={(e) => setPartyGstin(e.target.value.toUpperCase())}
+                    onChange={(e) => {
+                      const val = e.target.value.toUpperCase();
+                      setPartyGstin(val);
+                      applyAutoGstRules(billingCountry, val, gstPaidBy);
+                    }}
+                    placeholder={isExportCountry ? 'Not required for Export' : '19XXXXX... (WB) or other'}
                     className="w-full px-2.5 py-1.5 rounded border border-slate-300 font-mono-num"
                   />
                 </div>
-
+                <div>
+                  <label className="block font-semibold text-slate-700 mb-1">
+                    Party PAN {isExportCountry ? <span className="text-red-600">* (Required)</span> : ''}
+                  </label>
+                  <input
+                    type="text"
+                    required={isExportCountry}
+                    value={partyPan}
+                    onChange={(e) => {
+                      setPartyPan(e.target.value.toUpperCase());
+                      if (e.target.value.trim()) setInvValidationError(null);
+                    }}
+                    placeholder="ABCDE1234F"
+                    className={`w-full px-2.5 py-1.5 rounded border font-mono-num uppercase ${
+                      isExportCountry && !partyPan.trim() ? 'border-red-400 bg-red-50/40' : 'border-slate-300'
+                    }`}
+                  />
+                </div>
                 <div>
                   <label className="block font-semibold text-slate-700 mb-1">
                     Invoice No * {autoAtomicInvoice && <span className="text-emerald-700">(Atomic)</span>}
@@ -982,24 +1173,26 @@ const BillingQuotesModuleInner: React.FC<BillingQuotesModuleProps> = ({
                     className="w-full px-2.5 py-1.5 rounded border border-slate-300 font-mono-num font-bold"
                   />
                 </div>
-                <div>
-                  <label className="block font-semibold text-slate-700 mb-1">Invoice Date *</label>
-                  <input
-                    type="date"
-                    required
-                    value={invoiceDate}
-                    onChange={(e) => setInvoiceDate(e.target.value)}
-                    className="w-full px-2.5 py-1.5 rounded border border-slate-300 font-mono-num"
-                  />
-                </div>
-                <div>
-                  <label className="block font-semibold text-slate-700 mb-1">Due Date (7 Days)</label>
-                  <input
-                    type="date"
-                    value={dueDate}
-                    onChange={(e) => setDueDate(e.target.value)}
-                    className="w-full px-2.5 py-1.5 rounded border border-slate-300 font-mono-num"
-                  />
+                <div className="grid grid-cols-2 gap-1.5">
+                  <div>
+                    <label className="block font-semibold text-slate-700 mb-1">Inv Date *</label>
+                    <input
+                      type="date"
+                      required
+                      value={invoiceDate}
+                      onChange={(e) => setInvoiceDate(e.target.value)}
+                      className="w-full px-2 py-1.5 rounded border border-slate-300 font-mono-num"
+                    />
+                  </div>
+                  <div>
+                    <label className="block font-semibold text-slate-700 mb-1">Due Date</label>
+                    <input
+                      type="date"
+                      value={dueDate}
+                      onChange={(e) => setDueDate(e.target.value)}
+                      className="w-full px-2 py-1.5 rounded border border-slate-300 font-mono-num"
+                    />
+                  </div>
                 </div>
                 <div>
                   <label className="block font-semibold text-slate-700 mb-1">SAC / HSN</label>
@@ -1012,32 +1205,31 @@ const BillingQuotesModuleInner: React.FC<BillingQuotesModuleProps> = ({
                 </div>
               </div>
 
-              {/* Consignment Details Rows */}
+              {/* Unlimited Consignment & Vehicle Rows */}
               <div>
                 <div className="flex items-center justify-between mb-2">
                   <span className="font-bold text-slate-800">
-                    Consignment Details ({rows.length} row{rows.length > 1 ? 's' : ''}{' '}
-                    {rows.length >= 10 ? '— Auto Page 2+ Pagination Active' : ''})
+                    Consignment / Vehicle Rows ({rows.length} row{rows.length > 1 ? 's' : ''} — Unlimited Multi-Page A4)
                   </span>
                   <button
                     type="button"
                     onClick={() =>
-                      setRows((prev) =>
-                        [
-                          ...prev,
-                          {
-                            cnNo: '',
-                            cnDate: todayISO(),
-                            vehicle: '',
-                            from: 'KOLKATA',
-                            to: '',
-                            weight: 0,
-                            ratePerMt: 0,
-                            freight: 0,
-                            description: '',
-                          },
-                        ].slice(0, SCHEMA_LIMITS.maxConsignmentRows)
-                      )
+                      setRows((prev) => [
+                        ...prev,
+                        {
+                          cnNo: '',
+                          cnDate: todayISO(),
+                          vehicle: '',
+                          from: 'KOLKATA',
+                          to: '',
+                          weight: 0,
+                          packages: '',
+                          rateType: 'Fixed',
+                          ratePerMt: 0,
+                          freight: 0,
+                          description: '',
+                        },
+                      ])
                     }
                     className="inline-flex items-center gap-1 px-2.5 py-1 rounded bg-blue-50 hover:bg-blue-100 text-blue-800 font-bold cursor-pointer"
                   >
@@ -1051,13 +1243,15 @@ const BillingQuotesModuleInner: React.FC<BillingQuotesModuleProps> = ({
                     <thead className="bg-slate-100 text-slate-700">
                       <tr>
                         <th className="p-2 text-left">#</th>
-                        <th className="p-2 text-left">CN. NO</th>
-                        <th className="p-2 text-left">C.N. DATE</th>
-                        <th className="p-2 text-left">VEHICLE</th>
+                        <th className="p-2 text-left">CN/LR NO</th>
+                        <th className="p-2 text-left">DATE</th>
+                        <th className="p-2 text-left">VEHICLE NO.</th>
                         <th className="p-2 text-left">FROM</th>
                         <th className="p-2 text-left">TO</th>
-                        <th className="p-2 text-right">Weight</th>
-                        <th className="p-2 text-right">Rate/MT</th>
+                        <th className="p-2 text-right">WT (MT)</th>
+                        <th className="p-2 text-left">PKGS</th>
+                        <th className="p-2 text-left">RATE TYPE</th>
+                        <th className="p-2 text-right">RATE (₹)</th>
                         <th className="p-2 text-right">FREIGHT (₹)</th>
                         <th className="p-2 text-left">DESCRIPTION</th>
                         <th className="p-2"></th>
@@ -1077,7 +1271,7 @@ const BillingQuotesModuleInner: React.FC<BillingQuotesModuleProps> = ({
                                 )
                               }
                               placeholder="KOL/118/26-27"
-                              className="w-28 px-2 py-1 rounded border border-slate-300 font-mono-num"
+                              className="w-24 px-2 py-1 rounded border border-slate-300 font-mono-num"
                             />
                           </td>
                           <td className="p-1.5">
@@ -1104,7 +1298,7 @@ const BillingQuotesModuleInner: React.FC<BillingQuotesModuleProps> = ({
                                 )
                               }
                               placeholder="WB23C6597"
-                              className="w-28 px-2 py-1 rounded border border-slate-300 font-mono-num uppercase"
+                              className="w-24 px-2 py-1 rounded border border-slate-300 font-mono-num uppercase"
                             />
                           </td>
                           <td className="p-1.5">
@@ -1116,7 +1310,7 @@ const BillingQuotesModuleInner: React.FC<BillingQuotesModuleProps> = ({
                                   prev.map((r, i) => (i === idx ? { ...r, from: e.target.value } : r))
                                 )
                               }
-                              className="w-24 px-2 py-1 rounded border border-slate-300"
+                              className="w-20 px-2 py-1 rounded border border-slate-300"
                             />
                           </td>
                           <td className="p-1.5">
@@ -1128,7 +1322,7 @@ const BillingQuotesModuleInner: React.FC<BillingQuotesModuleProps> = ({
                                   prev.map((r, i) => (i === idx ? { ...r, to: e.target.value } : r))
                                 )
                               }
-                              className="w-28 px-2 py-1 rounded border border-slate-300"
+                              className="w-24 px-2 py-1 rounded border border-slate-300"
                             />
                           </td>
                           <td className="p-1.5">
@@ -1136,29 +1330,76 @@ const BillingQuotesModuleInner: React.FC<BillingQuotesModuleProps> = ({
                               type="number"
                               step="0.001"
                               value={row.weight}
+                              onChange={(e) => {
+                                const w = Number(e.target.value) || 0;
+                                setRows((prev) =>
+                                  prev.map((r, i) => {
+                                    if (i !== idx) return r;
+                                    const autoFreight =
+                                      r.rateType === 'Per Ton' && w > 0 && (r.ratePerMt || 0) > 0
+                                        ? Math.round(w * r.ratePerMt * 100) / 100
+                                        : r.freight;
+                                    return { ...r, weight: w, freight: autoFreight };
+                                  })
+                                );
+                              }}
+                              className="w-16 px-2 py-1 rounded border border-slate-300 text-right font-mono-num"
+                            />
+                          </td>
+                          <td className="p-1.5">
+                            <input
+                              type="text"
+                              value={row.packages || ''}
                               onChange={(e) =>
                                 setRows((prev) =>
-                                  prev.map((r, i) =>
-                                    i === idx ? { ...r, weight: Number(e.target.value) || 0 } : r
-                                  )
+                                  prev.map((r, i) => (i === idx ? { ...r, packages: e.target.value } : r))
                                 )
                               }
-                              className="w-20 px-2 py-1 rounded border border-slate-300 text-right font-mono-num"
+                              placeholder="120 Box"
+                              className="w-16 px-2 py-1 rounded border border-slate-300"
                             />
+                          </td>
+                          <td className="p-1.5">
+                            <select
+                              value={row.rateType || 'Fixed'}
+                              onChange={(e) => {
+                                const rt = e.target.value as 'Fixed' | 'Per Ton';
+                                setRows((prev) =>
+                                  prev.map((r, i) => {
+                                    if (i !== idx) return r;
+                                    const autoFreight =
+                                      rt === 'Per Ton' && (r.weight || 0) > 0 && (r.ratePerMt || 0) > 0
+                                        ? Math.round(r.weight * r.ratePerMt * 100) / 100
+                                        : r.freight;
+                                    return { ...r, rateType: rt, freight: autoFreight };
+                                  })
+                                );
+                              }}
+                              className="px-1.5 py-1 rounded border border-slate-300 bg-white font-semibold"
+                            >
+                              <option value="Fixed">Fixed</option>
+                              <option value="Per Ton">Per Ton</option>
+                            </select>
                           </td>
                           <td className="p-1.5">
                             <input
                               type="number"
                               step="0.01"
                               value={row.ratePerMt}
-                              onChange={(e) =>
+                              onChange={(e) => {
+                                const rate = Number(e.target.value) || 0;
                                 setRows((prev) =>
-                                  prev.map((r, i) =>
-                                    i === idx ? { ...r, ratePerMt: Number(e.target.value) || 0 } : r
-                                  )
-                                )
-                              }
-                              className="w-24 px-2 py-1 rounded border border-slate-300 text-right font-mono-num"
+                                  prev.map((r, i) => {
+                                    if (i !== idx) return r;
+                                    const autoFreight =
+                                      r.rateType === 'Per Ton' && (r.weight || 0) > 0 && rate > 0
+                                        ? Math.round(r.weight * rate * 100) / 100
+                                        : r.freight;
+                                    return { ...r, ratePerMt: rate, freight: autoFreight };
+                                  })
+                                );
+                              }}
+                              className="w-20 px-2 py-1 rounded border border-slate-300 text-right font-mono-num"
                             />
                           </td>
                           <td className="p-1.5">
@@ -1187,7 +1428,7 @@ const BillingQuotesModuleInner: React.FC<BillingQuotesModuleProps> = ({
                                   )
                                 )
                               }
-                              className="w-32 px-2 py-1 rounded border border-slate-300"
+                              className="w-28 px-2 py-1 rounded border border-slate-300"
                             />
                           </td>
                           <td className="p-1.5 text-center">
@@ -1210,13 +1451,36 @@ const BillingQuotesModuleInner: React.FC<BillingQuotesModuleProps> = ({
 
               {/* Split Tax Calculation & Extra Freight Boxes */}
               <div className="grid grid-cols-1 md:grid-cols-2 gap-4 bg-slate-50 p-4 rounded-lg border border-slate-200">
-                <div className="space-y-2">
-                  <p className="font-bold text-slate-900">TAX CALCULATION DETAILS</p>
-                  <div className="flex flex-wrap items-center gap-4">
+                <div className="space-y-2.5">
+                  <div className="flex flex-wrap items-center justify-between gap-2">
+                    <p className="font-bold text-slate-900">TAX CALCULATION &amp; AUTO-GST</p>
+                    <span
+                      className={`px-2 py-0.5 rounded text-[10px] font-bold ${
+                        isExportCountry
+                          ? 'bg-red-100 text-red-800'
+                          : /^19/.test(partyGstin.trim())
+                            ? 'bg-emerald-100 text-emerald-800'
+                            : interstate
+                              ? 'bg-blue-100 text-blue-800'
+                              : 'bg-slate-200 text-slate-700'
+                      }`}
+                    >
+                      {isExportCountry
+                        ? `${billingCountry}: GST Exempt (0%)`
+                        : /^19/.test(partyGstin.trim())
+                          ? 'WB (19): CGST 2.5% + SGST 2.5%'
+                          : interstate
+                            ? 'Interstate: IGST 5%'
+                            : 'Intra-State: CGST 2.5% + SGST 2.5%'}
+                    </span>
+                  </div>
+
+                  <div className="flex flex-wrap items-center gap-3">
                     <label className="inline-flex items-center gap-1.5 font-medium">
                       <input
                         type="checkbox"
-                        checked={reverseCharge}
+                        disabled={isExportCountry}
+                        checked={!isExportCountry && reverseCharge}
                         onChange={(e) => setReverseCharge(e.target.checked)}
                       />
                       Reverse Charge (RCM)
@@ -1224,36 +1488,55 @@ const BillingQuotesModuleInner: React.FC<BillingQuotesModuleProps> = ({
                     <label className="inline-flex items-center gap-1.5 font-medium">
                       <input
                         type="checkbox"
-                        checked={interstate}
+                        disabled={isExportCountry}
+                        checked={!isExportCountry && interstate}
                         onChange={(e) => setInterstate(e.target.checked)}
                       />
-                      IGST (Interstate)
+                      IGST (Outside WB)
                     </label>
                     <div className="flex items-center gap-1.5">
                       <span>GST %:</span>
                       <select
-                        value={gstRate}
+                        disabled={isExportCountry}
+                        value={effectiveGstRate}
                         onChange={(e) => setGstRate(Number(e.target.value))}
                         className="px-2 py-1 rounded border border-slate-300 bg-white font-mono-num"
                       >
                         <option value={5}>5%</option>
                         <option value={12}>12%</option>
-                        <option value={0}>0%</option>
+                        <option value={0}>0% (Exempt)</option>
                       </select>
                     </div>
                   </div>
+
+                  <div className="flex flex-wrap items-center gap-2">
+                    <label className="font-bold text-slate-800">GST Paid By:</label>
+                    <select
+                      aria-label="GST Paid By"
+                      value={gstPaidBy}
+                      onChange={(e) => {
+                        const next = e.target.value as 'Consignee' | 'Consignor' | 'Transporter' | 'Others';
+                        setGstPaidBy(next);
+                        if (!isExportCountry) {
+                          if (next === 'Transporter') setReverseCharge(false);
+                          else if (next === 'Consignee' || next === 'Consignor') setReverseCharge(true);
+                        }
+                      }}
+                      className="px-2.5 py-1 rounded border border-slate-300 bg-white font-bold text-blue-900"
+                    >
+                      <option value="Consignee">Consignee</option>
+                      <option value="Consignor">Consignor</option>
+                      <option value="Transporter">Transporter</option>
+                      <option value="Others">Others</option>
+                    </select>
+                  </div>
+
                   <div className="grid grid-cols-2 gap-1 text-slate-700 font-mono-num pt-1">
-                    <span>CGST Amt: ₹{formatINR(cgstAmt)}</span>
-                    <span>SGST Amt: ₹{formatINR(sgstAmt)}</span>
-                    <span>IGST Amt: ₹{formatINR(igstAmt)}</span>
+                    <span>CGST (2.5%): ₹{formatINR(cgstAmt)}</span>
+                    <span>SGST (2.5%): ₹{formatINR(sgstAmt)}</span>
+                    <span>IGST (5.0%): ₹{formatINR(igstAmt)}</span>
                     <span className="font-bold">Total Tax: ₹{formatINR(totalTax)}</span>
                   </div>
-                  <p className="text-[11px] text-slate-600">
-                    Tax Paid By:{' '}
-                    <span className="font-bold">
-                      {reverseCharge ? partyName || 'Consignee' : company.companyName}
-                    </span>
-                  </p>
                 </div>
 
                 <div className="space-y-2">
@@ -1319,26 +1602,56 @@ const BillingQuotesModuleInner: React.FC<BillingQuotesModuleProps> = ({
               </div>
             </div>
 
-            <div className="px-4 py-3 bg-slate-50 border-t border-slate-200 flex items-center justify-end gap-2.5">
-              <button
-                type="button"
-                onClick={async () => {
-                  const pdf = await generateInvoicePDF(buildInvoiceObject(), company, includeAnnexure);
-                  onPreviewPdf(pdf, 'Bills_Invoices');
-                }}
-                className="inline-flex items-center gap-1.5 px-4 py-1.5 rounded-md border border-slate-300 bg-white hover:bg-slate-100 text-xs font-semibold text-slate-800 cursor-pointer"
-              >
-                <Printer className="w-3.5 h-3.5" />
-                Live A4 Preview
-              </button>
-              <button
-                type="submit"
-                disabled={savingInv}
-                className="inline-flex items-center gap-1.5 px-4 py-1.5 rounded-md bg-blue-700 hover:bg-blue-800 text-white text-xs font-bold cursor-pointer disabled:opacity-60"
-              >
-                <Save className="w-3.5 h-3.5" />
-                {savingInv ? 'Saving...' : 'Save & Preview Invoice PDF'}
-              </button>
+            <div className="px-4 py-3 bg-slate-50 border-t border-slate-200 flex flex-wrap items-center justify-between gap-2.5">
+              <div className="flex items-center gap-2 text-xs">
+                <label className="font-bold text-slate-700">Print Copies:</label>
+                <select
+                  aria-label="Bill Copy Selector"
+                  value={copyCount}
+                  onChange={(e) => setCopyCount(Number(e.target.value) as BillCopyCount)}
+                  className="px-2.5 py-1.5 rounded border border-slate-300 bg-white font-bold text-blue-900"
+                >
+                  <option value={1}>1 Copy (Original)</option>
+                  <option value={2}>2 Copies (Original + Office)</option>
+                  <option value={3}>3 Copies (Original + Transporter + Office)</option>
+                  <option value={4}>4 Copies (All)</option>
+                </select>
+              </div>
+
+              <div className="flex flex-wrap items-center gap-2.5">
+                <button
+                  type="button"
+                  onClick={async () => {
+                    setInvValidationError(null);
+                    if (isExportCountry && !partyPan.trim()) {
+                      setInvValidationError(
+                        `PAN Number is mandatory for ${billingCountry} export billing.`
+                      );
+                      return;
+                    }
+                    const pdf = await generateInvoicePDF(
+                      buildInvoiceObject(),
+                      company,
+                      includeAnnexure,
+                      'p',
+                      copyCount
+                    );
+                    onPreviewPdf(pdf, 'Bills_Invoices');
+                  }}
+                  className="inline-flex items-center gap-1.5 px-4 py-1.5 rounded-md border border-slate-300 bg-white hover:bg-slate-100 text-xs font-semibold text-slate-800 cursor-pointer"
+                >
+                  <Printer className="w-3.5 h-3.5" />
+                  Live A4 Preview
+                </button>
+                <button
+                  type="submit"
+                  disabled={savingInv}
+                  className="inline-flex items-center gap-1.5 px-4 py-1.5 rounded-md bg-blue-700 hover:bg-blue-800 text-white text-xs font-bold cursor-pointer disabled:opacity-60"
+                >
+                  <Save className="w-3.5 h-3.5" />
+                  {savingInv ? 'Saving...' : 'Save & Preview Invoice PDF'}
+                </button>
+              </div>
             </div>
           </form>
 

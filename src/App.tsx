@@ -88,7 +88,7 @@ import { SignInScreen } from './components/SignInScreen';
 import { ConfirmModal } from './components/ConfirmModal';
 import { A4PreviewModal } from './components/A4PreviewModal';
 import { DashboardHome } from './components/DashboardHome';
-import { MasterModule } from './components/MasterModule';
+import { MasterModule, MasterTabId } from './components/MasterModule';
 import { ConsignmentModule } from './components/ConsignmentModule';
 import { BillingQuotesModule } from './components/BillingQuotesModule';
 import { LorryHirePodModule } from './components/LorryHirePodModule';
@@ -195,7 +195,7 @@ export default function App() {
   const [iosGuideOpen, setIosGuideOpen] = useState(false);
 
   // Deep-link sub-tabs for Master Alerts and Reports
-  const [masterInitialTab, setMasterInitialTab] = useState<'parties' | 'vehicles' | 'drivers'>('parties');
+  const [masterInitialTab, setMasterInitialTab] = useState<MasterTabId>('parties');
   const [masterFocusNonce, setMasterFocusNonce] = useState(0);
   const [reportInitialTab, setReportInitialTab] = useState<ReportTab>('invoiceRegister');
   const [reportFocusNonce, setReportFocusNonce] = useState(0);
@@ -1312,7 +1312,9 @@ export default function App() {
                 parties={parties}
                 vehicles={vehicles}
                 drivers={drivers}
+                company={companySettings}
                 initialTab={masterInitialTab}
+                onPreviewPdf={handlePreviewPdf}
                 onShowConfirm={handleShowConfirm}
               />
             )}
@@ -1371,8 +1373,11 @@ export default function App() {
                 isMasterAdmin={isEffectiveMasterAdmin}
                 lorryHires={visibleLorryHires}
                 consignments={visibleConsignments}
+                parties={parties}
+                company={companySettings}
                 driveAccessToken={driveAccessToken}
                 onConnectDrive={() => handleGoogleDriveConnect(true)}
+                onPreviewPdf={handlePreviewPdf}
                 onShowConfirm={handleShowConfirm}
               />
             )}
@@ -1388,6 +1393,7 @@ export default function App() {
                 consignments={visibleConsignments}
                 transactions={visibleTransactions}
                 parties={parties}
+                drivers={drivers}
                 company={companySettings}
                 initialSubTab={
                   activeTab === 'accounts'
