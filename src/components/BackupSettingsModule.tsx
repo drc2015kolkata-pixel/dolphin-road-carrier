@@ -1,20 +1,27 @@
-import React, { useEffect, useMemo, useState } from 'react';
+import React, { useEffect, useMemo, useRef, useState } from 'react';
 import {
   AlertTriangle,
+  ArrowRightLeft,
   CheckCircle2,
   CloudDownload,
   CloudUpload,
+  Download,
   Eye,
   EyeOff,
+  FileSpreadsheet,
   FolderOpen,
+  ImagePlus,
   KeyRound,
+  Lock,
   MonitorDown,
+  Plus,
   RefreshCw,
   Save,
   Search,
   ShieldCheck,
   Smartphone,
   Trash2,
+  Upload,
   UserPlus,
   Users,
 } from 'lucide-react';
@@ -41,6 +48,7 @@ import {
   uploadMasterBackupToDrive,
 } from '../lib/driveBackup';
 import {
+  bulkUpsertDocuments,
   CustomAuthSession,
   removeDocument,
   restoreErpBackupBundle,
@@ -49,12 +57,18 @@ import {
   upsertDocument,
 } from '../lib/firestoreStore';
 import {
+  computeFyClosingBalances,
+  downloadSampleImportTemplate,
+  ImportEntityType,
+  parseExcelOrCsvFile,
+} from '../lib/excelImport';
+import {
   checkForUpdatesNow,
   getVersionStatus,
   subscribeVersionStatus,
   VersionStatusInfo,
 } from '../lib/versionSync';
-import { makeSafeDocId, todayISO } from '../lib/formatters';
+import { formatINR, makeSafeDocId, normalizeFyLabel, PRECREATED_FYS, todayISO } from '../lib/formatters';
 import { useDebouncedValue } from '../hooks/useDebounce';
 import { PaginatedDataTable, TableColumn } from './PaginatedDataTable';
 
@@ -63,6 +77,7 @@ interface BackupSettingsModuleProps {
   ownerUid: string;
   isMasterAdmin: boolean;
   adminUserId: string;
+  activeFy: string;
   connectedEmail: string | null;
   driveAccessToken: string | null;
   company: CompanySettings;
@@ -83,6 +98,7 @@ interface BackupSettingsModuleProps {
   onSwitchGmail: () => Promise<void>;
   onSwitchStaffSession: (staff: StaffAccount | null) => void;
   onUpdateAdminSession: (session: CustomAuthSession) => void;
+  onSelectFy: (fy: string) => void;
   onShowConfirm: (opts: {
     title: string;
     description: string;
@@ -110,6 +126,7 @@ const BackupSettingsModuleInner: React.FC<BackupSettingsModuleProps> = ({
   ownerUid,
   isMasterAdmin,
   adminUserId,
+  activeFy,
   connectedEmail,
   driveAccessToken,
   company,
@@ -120,8 +137,12 @@ const BackupSettingsModuleInner: React.FC<BackupSettingsModuleProps> = ({
   onSwitchGmail,
   onSwitchStaffSession,
   onUpdateAdminSession,
+  onSelectFy,
   onShowConfirm,
 }) => {
+  const stampInputRef = useRef<HTMLInputElement | null>(null);
+  const excelInputRef = useRef<HTMLInputElement | null>(null);
+
   const [driveStatus, setDriveStatus] = useState<string | null>(null);
   const [driveError, setDriveError] = useState<string | null>(null);
   const [driveFiles, setDriveFiles] = useState<DriveFileSummary[]>([]);
@@ -160,6 +181,27 @@ const BackupSettingsModuleInner: React.FC<BackupSettingsModuleProps> = ({
 
   // Company Settings Form
   const [compState, setCompState] = useState<CompanySettings>(company);
+  const [newFyInput, setNewFyInput] = useState('FY 2027-28');
+
+  // Smart Bulk Data Import State (Excel / CSV)
+  const [importEntity, setImportEntity] = useState<ImportEntityType>('consignments');
+  const [importTargetFy, setImportTargetFy] = useState<string>(activeFy || 'FY 2025-26');
+  const [parsedImport, setParsedImport] = useState<{
+    records: Array<Record<string, unknown>>;
+    previewHeaders: string[];
+    previewRows: string[][];
+    fileName: string;
+  } | null>(null);
+  const [importing, setImporting] = useState(false);
+
+  // Closing-to-Opening Balance Carry Forward State
+  const [carrySourceFy, setCarrySourceFy] = useState('FY 2025-26');
+  const [carryTargetFy, setCarryTargetFy] = useState('FY 2026-27');
+
+  const fyChoices = useMemo(() => {
+    const set = new Set<string>([...PRECREATED_FYS, ...(compState.availableFys || []), activeFy]);
+    return Array.from(set).sort();
+  }, [compState.availableFys, activeFy]);
 
   useEffect(() => {
     setCompState(company);
@@ -345,6 +387,10 @@ const BackupSettingsModuleInner: React.FC<BackupSettingsModuleProps> = ({
 
   const handleSaveCompanySettings = async (e: React.FormEvent) => {
     e.preventDefault();
+    setDriveError(null);
+    const mergedFys = Array.from(
+      new Set([...PRECREATED_FYS, ...(compState.availableFys || []), normalizeFyLabel(compState.currentFy)])
+    );
     await saveSettingsDocument(
       'company',
       {
@@ -362,12 +408,143 @@ const BackupSettingsModuleInner: React.FC<BackupSettingsModuleProps> = ({
         accountNo: compState.accountNo,
         ifsc: compState.ifsc,
         swift: compState.swift,
-        currentFy: compState.currentFy,
+        currentFy: normalizeFyLabel(compState.currentFy),
+        availableFys: mergedFys,
+        fyOpeningBalances: compState.fyOpeningBalances || {},
+        customStampDataUrl: compState.customStampDataUrl || '',
+        autoLockMinutes: Number(compState.autoLockMinutes ?? 5),
+        lockSourceInspection: compState.lockSourceInspection !== false,
         ownerUid,
       },
       hasCustomSettings
     );
-    setDriveStatus('Company & Bank Settings saved to Firestore.');
+    setDriveStatus('Company, Custom Stamp, Security Timer & Bank Settings saved cleanly.');
+  };
+
+  const handleUploadStamp = (file: File | undefined) => {
+    if (!file) return;
+    setDriveError(null);
+    const reader = new FileReader();
+    reader.onload = () => {
+      const img = new Image();
+      img.onload = () => {
+        const maxSide = 320;
+        const scale = Math.min(1, maxSide / Math.max(img.width, img.height));
+        const w = Math.max(40, Math.round(img.width * scale));
+        const h = Math.max(40, Math.round(img.height * scale));
+        const canvas = document.createElement('canvas');
+        canvas.width = w;
+        canvas.height = h;
+        const ctx = canvas.getContext('2d');
+        if (!ctx) return;
+        ctx.clearRect(0, 0, w, h);
+        ctx.drawImage(img, 0, 0, w, h);
+        const pngDataUrl = canvas.toDataURL('image/png');
+        setCompState((prev) => ({ ...prev, customStampDataUrl: pngDataUrl }));
+        setDriveStatus('Company Stamp & Digital Signature loaded — click "Save Company Settings" to apply across all Bills, Bilty (LR) & Quotations.');
+      };
+      img.onerror = () => setDriveError('Could not read the selected Stamp image file.');
+      img.src = String(reader.result || '');
+    };
+    reader.readAsDataURL(file);
+  };
+
+  const handleAddFutureFy = async () => {
+    const clean = normalizeFyLabel(newFyInput);
+    if (!clean) return;
+    const nextFys = Array.from(new Set([...fyChoices, clean]));
+    setCompState((prev) => ({ ...prev, availableFys: nextFys }));
+    await saveSettingsDocument(
+      'company',
+      {
+        ...compState,
+        availableFys: nextFys,
+        ownerUid,
+      },
+      hasCustomSettings
+    );
+    onSelectFy(clean);
+    setDriveStatus(`Created and switched to ${clean}.`);
+  };
+
+  const handleExcelFileSelected = async (file: File | undefined) => {
+    if (!file) return;
+    setDriveError(null);
+    setDriveStatus(null);
+    try {
+      const res = await parseExcelOrCsvFile({
+        file,
+        entityType: importEntity,
+        targetFy: importTargetFy,
+        ownerUid,
+        branchCode: 'KOL-HQ',
+        staffCode: adminUserId || 'ADMIN',
+      });
+      setParsedImport({ ...res, fileName: file.name });
+    } catch (err) {
+      setParsedImport(null);
+      setDriveError(err instanceof Error ? err.message : 'Failed to parse Excel / CSV file.');
+    }
+  };
+
+  const handleConfirmBulkImport = async () => {
+    if (!parsedImport || parsedImport.records.length === 0) return;
+    setImporting(true);
+    setDriveError(null);
+    try {
+      const count = await bulkUpsertDocuments(importEntity, parsedImport.records);
+      setDriveStatus(
+        `Successfully imported ${count} ${importEntity} records into ${importTargetFy} from "${parsedImport.fileName}".`
+      );
+      setParsedImport(null);
+    } catch (err) {
+      setDriveError(err instanceof Error ? err.message : 'Bulk import failed.');
+    } finally {
+      setImporting(false);
+    }
+  };
+
+  const closingPreview = useMemo(
+    () =>
+      computeFyClosingBalances({
+        sourceFy: carrySourceFy,
+        parties: allData.parties,
+        invoices: allData.invoices,
+        lorryHires: allData.lorryHires,
+        transactions: allData.transactions,
+        consignments: allData.consignments,
+        company: compState,
+      }),
+    [carrySourceFy, allData, compState]
+  );
+
+  const handleCarryForwardBalances = () => {
+    const normTarget = normalizeFyLabel(carryTargetFy);
+    onShowConfirm({
+      title: `Carry Forward ${carrySourceFy} → ${normTarget}?`,
+      description: `Copies computed closing balances for ${closingPreview.rows.length} parties, Cash (₹${formatINR(closingPreview.cashClosing)}), and PNB Bank (₹${formatINR(closingPreview.bankClosing)}) from ${carrySourceFy} into ${normTarget} Opening Balances.`,
+      confirmLabel: `Carry Forward to ${normTarget}`,
+      onConfirm: async () => {
+        const nextOpenings = {
+          ...(compState.fyOpeningBalances || {}),
+          [normTarget]: closingPreview.carryForwardMap,
+        };
+        setCompState((prev) => ({ ...prev, fyOpeningBalances: nextOpenings }));
+        await saveSettingsDocument(
+          'company',
+          {
+            ...compState,
+            fyOpeningBalances: nextOpenings,
+            availableFys: fyChoices,
+            ownerUid,
+          },
+          hasCustomSettings
+        );
+        setDriveStatus(
+          `Carried forward ${closingPreview.rows.length} party, Cash & Bank closing balances from ${carrySourceFy} into ${normTarget} Opening Balances.`
+        );
+      },
+    });
   };
 
   const handleUpdateMasterAdmin = async (e: React.FormEvent) => {
@@ -690,7 +867,20 @@ const BackupSettingsModuleInner: React.FC<BackupSettingsModuleProps> = ({
         </div>
       )}
 
-      {mode === 'settings' && (
+      {mode === 'settings' && !isMasterAdmin && (
+        <div className="bg-white rounded-xl border border-red-200 shadow-sm p-8 text-center space-y-2">
+          <div className="w-12 h-12 rounded-full bg-red-50 text-red-600 flex items-center justify-center mx-auto">
+            <Lock className="w-6 h-6" />
+          </div>
+          <h3 className="text-sm font-extrabold text-slate-900">Master Admin Access Only</h3>
+          <p className="text-xs text-slate-600 max-w-md mx-auto">
+            System Settings, User Management, Stamp Upload, Security Auto-Lock, Bulk Import, and
+            Bank Details are strictly restricted to Master Admin.
+          </p>
+        </div>
+      )}
+
+      {mode === 'settings' && isMasterAdmin && (
         <div className="space-y-4">
           {/* App Updates & 25-Year Durability Version Sync Engine */}
           <div className="bg-white rounded-xl border border-slate-200 shadow-sm overflow-hidden">
@@ -1117,13 +1307,18 @@ const BackupSettingsModuleInner: React.FC<BackupSettingsModuleProps> = ({
                 />
               </div>
               <div>
-                <label className="block font-semibold text-slate-700 mb-1">Current Financial Year</label>
-                <input
-                  type="text"
+                <label className="block font-semibold text-slate-700 mb-1">Active Default FY</label>
+                <select
                   value={compState.currentFy}
                   onChange={(e) => setCompState({ ...compState, currentFy: e.target.value })}
-                  className="w-full px-2.5 py-1.5 rounded border border-slate-300 font-mono-num"
-                />
+                  className="w-full px-2.5 py-1.5 rounded border border-slate-300 font-mono-num bg-white"
+                >
+                  {fyChoices.map((fy) => (
+                    <option key={fy} value={fy}>
+                      {fy}
+                    </option>
+                  ))}
+                </select>
               </div>
               <div>
                 <label className="block font-semibold text-slate-700 mb-1">Bank Name</label>
@@ -1155,6 +1350,110 @@ const BackupSettingsModuleInner: React.FC<BackupSettingsModuleProps> = ({
                   className="w-full px-2.5 py-1.5 rounded border border-slate-300 font-mono-num"
                 />
               </div>
+
+              {/* Security & Idle Auto-Lock Timer + Future FY */}
+              <div>
+                <label className="block font-semibold text-slate-700 mb-1">
+                  Auto-Lock Screen Timer (Idle Timeout)
+                </label>
+                <select
+                  value={String(compState.autoLockMinutes ?? 5)}
+                  onChange={(e) =>
+                    setCompState({ ...compState, autoLockMinutes: Number(e.target.value) })
+                  }
+                  className="w-full px-2.5 py-1.5 rounded border border-slate-300 bg-white font-semibold"
+                >
+                  <option value="1">1 Minute</option>
+                  <option value="2">2 Minutes</option>
+                  <option value="5">5 Minutes (Recommended Default)</option>
+                  <option value="10">10 Minutes</option>
+                  <option value="15">15 Minutes</option>
+                  <option value="0">Off (Disable Auto-Lock)</option>
+                </select>
+              </div>
+              <div>
+                <label className="block font-semibold text-slate-700 mb-1">Add Future Financial Year</label>
+                <div className="flex gap-1.5">
+                  <input
+                    type="text"
+                    value={newFyInput}
+                    onChange={(e) => setNewFyInput(e.target.value)}
+                    placeholder="FY 2027-28"
+                    className="flex-1 px-2.5 py-1.5 rounded border border-slate-300 font-mono-num"
+                  />
+                  <button
+                    type="button"
+                    onClick={handleAddFutureFy}
+                    className="inline-flex items-center gap-1 px-3 py-1.5 rounded bg-emerald-600 hover:bg-emerald-700 text-white font-bold cursor-pointer whitespace-nowrap"
+                  >
+                    <Plus className="w-3.5 h-3.5" /> Add FY
+                  </button>
+                </div>
+              </div>
+              <div className="flex items-end">
+                <label className="inline-flex items-center gap-2 font-semibold text-slate-700 py-1.5 cursor-pointer">
+                  <input
+                    type="checkbox"
+                    checked={compState.lockSourceInspection !== false}
+                    onChange={(e) =>
+                      setCompState({ ...compState, lockSourceInspection: e.target.checked })
+                    }
+                  />
+                  Protect Production Screen (Block Inspect / Right-Click outside inputs)
+                </label>
+              </div>
+
+              {/* Company Stamp & Digital Signature Upload */}
+              <div className="md:col-span-3 p-3.5 rounded-lg bg-slate-50 border border-slate-200 flex flex-wrap items-center justify-between gap-4">
+                <div className="space-y-1">
+                  <p className="font-bold text-slate-900 flex items-center gap-1.5">
+                    <ImagePlus className="w-4 h-4 text-blue-700" />
+                    <span>Company Stamp &amp; Digital Signature (Bottom-Right of Bill, LR &amp; Quotation)</span>
+                  </p>
+                  <p className="text-[11px] text-slate-600">
+                    Section 194C Declarations strictly display only the Top-Left Triangular DRC Logo with NO stamp/signature at bottom.
+                  </p>
+                  <input
+                    ref={stampInputRef}
+                    type="file"
+                    accept="image/*"
+                    className="hidden"
+                    onChange={(e) => {
+                      handleUploadStamp(e.target.files?.[0]);
+                      e.target.value = '';
+                    }}
+                  />
+                  <div className="flex flex-wrap gap-2 pt-1">
+                    <button
+                      type="button"
+                      onClick={() => stampInputRef.current?.click()}
+                      className="inline-flex items-center gap-1.5 px-3 py-1.5 rounded bg-blue-700 hover:bg-blue-800 text-white font-bold cursor-pointer"
+                    >
+                      <Upload className="w-3.5 h-3.5" />
+                      Upload Custom Stamp / Signature
+                    </button>
+                    {compState.customStampDataUrl && (
+                      <button
+                        type="button"
+                        onClick={() => setCompState({ ...compState, customStampDataUrl: '' })}
+                        className="px-3 py-1.5 rounded border border-slate-300 bg-white hover:bg-slate-100 text-slate-700 font-semibold cursor-pointer"
+                      >
+                        Reset to Official Stamp
+                      </button>
+                    )}
+                  </div>
+                </div>
+                <div className="flex items-center gap-3">
+                  <img
+                    src={
+                      compState.customStampDataUrl ||
+                      '/assets/aistudio/WhatsApp_Image_2026-11-16_at_11.55.22_PM__2__3293db0a.jpeg'
+                    }
+                    alt="Active Stamp Preview"
+                    className="h-20 w-24 object-contain rounded border border-slate-300 bg-white p-1"
+                  />
+                </div>
+              </div>
             </div>
             <div className="px-4 py-3 bg-slate-50 border-t border-slate-200 flex justify-end">
               <button
@@ -1162,10 +1461,222 @@ const BackupSettingsModuleInner: React.FC<BackupSettingsModuleProps> = ({
                 className="inline-flex items-center gap-1.5 px-4 py-1.5 rounded-md bg-blue-700 hover:bg-blue-800 text-white text-xs font-bold cursor-pointer"
               >
                 <Save className="w-3.5 h-3.5" />
-                Save Company Settings
+                Save Company, Security &amp; Stamp Settings
               </button>
             </div>
           </form>
+
+          {/* Smart Bulk Data Import (Excel / CSV) */}
+          <div className="bg-white rounded-xl border border-slate-200 shadow-sm overflow-hidden">
+            <div className="bg-gradient-to-r from-emerald-700 to-emerald-800 text-white px-4 py-2.5 flex flex-wrap items-center justify-between gap-2">
+              <div className="flex items-center gap-2 text-sm font-bold">
+                <FileSpreadsheet className="w-4 h-4" />
+                <span>Smart Bulk Historical Data Import (.xlsx / .xls / .csv)</span>
+              </div>
+              <span className="text-[11px] text-emerald-100">
+                Import FY 2025-26 or FY 2026-27 Parties, Trucks, LRs, Bills &amp; Ledgers
+              </span>
+            </div>
+            <div className="p-4 space-y-3 text-xs">
+              <div className="flex flex-wrap items-end gap-3">
+                <div>
+                  <label className="block font-semibold text-slate-700 mb-1">Record Type</label>
+                  <select
+                    value={importEntity}
+                    onChange={(e) => {
+                      setImportEntity(e.target.value as ImportEntityType);
+                      setParsedImport(null);
+                    }}
+                    className="px-3 py-1.5 rounded border border-slate-300 bg-white font-semibold"
+                  >
+                    <option value="consignments">Consignments / LRs</option>
+                    <option value="invoices">Tax Invoices / Bills</option>
+                    <option value="transactions">Ledgers / Vouchers</option>
+                    <option value="parties">Party / Customer Master</option>
+                    <option value="vehicles">Vehicle Fleet Master</option>
+                  </select>
+                </div>
+                <div>
+                  <label className="block font-semibold text-slate-700 mb-1">Target Financial Year</label>
+                  <select
+                    value={importTargetFy}
+                    onChange={(e) => setImportTargetFy(e.target.value)}
+                    className="px-3 py-1.5 rounded border border-slate-300 bg-white font-mono-num font-bold"
+                  >
+                    {fyChoices.map((fy) => (
+                      <option key={fy} value={fy}>
+                        {fy}
+                      </option>
+                    ))}
+                  </select>
+                </div>
+                <button
+                  type="button"
+                  onClick={() => downloadSampleImportTemplate(importEntity)}
+                  className="inline-flex items-center gap-1.5 px-3 py-1.5 rounded border border-slate-300 bg-white hover:bg-slate-100 text-slate-800 font-semibold cursor-pointer"
+                >
+                  <Download className="w-3.5 h-3.5" />
+                  Download Sample Template (.xlsx)
+                </button>
+                <input
+                  ref={excelInputRef}
+                  type="file"
+                  accept=".xlsx,.xls,.csv"
+                  className="hidden"
+                  onChange={(e) => {
+                    handleExcelFileSelected(e.target.files?.[0]);
+                    e.target.value = '';
+                  }}
+                />
+                <button
+                  type="button"
+                  onClick={() => excelInputRef.current?.click()}
+                  className="inline-flex items-center gap-1.5 px-4 py-1.5 rounded bg-blue-700 hover:bg-blue-800 text-white font-bold cursor-pointer"
+                >
+                  <Upload className="w-3.5 h-3.5" />
+                  Select Excel / CSV File
+                </button>
+              </div>
+
+              {parsedImport && (
+                <div className="p-3 rounded-lg bg-slate-50 border border-slate-200 space-y-2.5">
+                  <div className="flex flex-wrap items-center justify-between gap-2">
+                    <span className="font-bold text-slate-900">
+                      Ready to import {parsedImport.records.length} rows from "{parsedImport.fileName}" into{' '}
+                      <span className="text-emerald-700">{importTargetFy}</span>
+                    </span>
+                    <div className="flex gap-2">
+                      <button
+                        type="button"
+                        onClick={() => setParsedImport(null)}
+                        className="px-3 py-1 rounded border border-slate-300 bg-white text-slate-700 font-semibold cursor-pointer"
+                      >
+                        Cancel
+                      </button>
+                      <button
+                        type="button"
+                        disabled={importing}
+                        onClick={handleConfirmBulkImport}
+                        className="px-4 py-1 rounded bg-emerald-600 hover:bg-emerald-700 text-white font-bold cursor-pointer disabled:opacity-60"
+                      >
+                        {importing ? 'Importing...' : `Import ${parsedImport.records.length} Records`}
+                      </button>
+                    </div>
+                  </div>
+                  <div className="overflow-x-auto border border-slate-200 rounded bg-white">
+                    <table className="w-full text-[11px] text-left border-collapse">
+                      <thead className="bg-slate-100 text-slate-700">
+                        <tr>
+                          {parsedImport.previewHeaders.map((h) => (
+                            <th key={h} className="px-2 py-1 border-b border-slate-200">
+                              {h}
+                            </th>
+                          ))}
+                        </tr>
+                      </thead>
+                      <tbody className="divide-y divide-slate-100">
+                        {parsedImport.previewRows.map((row, idx) => (
+                          <tr key={idx}>
+                            {row.map((cell, ci) => (
+                              <td key={ci} className="px-2 py-1 font-mono-num">
+                                {cell}
+                              </td>
+                            ))}
+                          </tr>
+                        ))}
+                      </tbody>
+                    </table>
+                  </div>
+                </div>
+              )}
+            </div>
+          </div>
+
+          {/* Closing-to-Opening Balance Carry Forward Engine */}
+          <div className="bg-white rounded-xl border border-slate-200 shadow-sm overflow-hidden">
+            <div className="bg-gradient-to-r from-[#0D47A1] to-[#1E3A8A] text-white px-4 py-2.5 flex flex-wrap items-center justify-between gap-2">
+              <div className="flex items-center gap-2 text-sm font-bold">
+                <ArrowRightLeft className="w-4 h-4 text-amber-300" />
+                <span>Closing-to-Opening Balance Carry Forward ({carrySourceFy} &rarr; {carryTargetFy})</span>
+              </div>
+              <span className="text-[11px] text-blue-100">
+                Cash Closing: ₹{formatINR(closingPreview.cashClosing)} · PNB Bank Closing: ₹{formatINR(closingPreview.bankClosing)}
+              </span>
+            </div>
+            <div className="p-4 space-y-3 text-xs">
+              <div className="flex flex-wrap items-end justify-between gap-3">
+                <div className="flex flex-wrap items-end gap-3">
+                  <div>
+                    <label className="block font-semibold text-slate-700 mb-1">From Source FY</label>
+                    <select
+                      value={carrySourceFy}
+                      onChange={(e) => setCarrySourceFy(e.target.value)}
+                      className="px-3 py-1.5 rounded border border-slate-300 bg-white font-mono-num font-bold"
+                    >
+                      {fyChoices.map((fy) => (
+                        <option key={fy} value={fy}>
+                          {fy}
+                        </option>
+                      ))}
+                    </select>
+                  </div>
+                  <div>
+                    <label className="block font-semibold text-slate-700 mb-1">To Target FY (Opening Balance)</label>
+                    <select
+                      value={carryTargetFy}
+                      onChange={(e) => setCarryTargetFy(e.target.value)}
+                      className="px-3 py-1.5 rounded border border-slate-300 bg-white font-mono-num font-bold"
+                    >
+                      {fyChoices.map((fy) => (
+                        <option key={fy} value={fy}>
+                          {fy}
+                        </option>
+                      ))}
+                    </select>
+                  </div>
+                </div>
+                <button
+                  type="button"
+                  onClick={handleCarryForwardBalances}
+                  className="inline-flex items-center gap-1.5 px-4 py-2 rounded-lg bg-purple-700 hover:bg-purple-800 text-white font-bold cursor-pointer"
+                >
+                  <ArrowRightLeft className="w-3.5 h-3.5" />
+                  Carry Forward Closing Balances to {carryTargetFy} Opening Balances
+                </button>
+              </div>
+
+              <div className="max-h-56 overflow-y-auto border border-slate-200 rounded-lg">
+                <table className="w-full text-xs text-left border-collapse">
+                  <thead className="bg-slate-100 text-slate-700 sticky top-0">
+                    <tr>
+                      <th className="py-1.5 px-3">Account / Party Name</th>
+                      <th className="py-1.5 px-3">Category</th>
+                      <th className="py-1.5 px-3 text-right">Opening ({carrySourceFy})</th>
+                      <th className="py-1.5 px-3 text-right">Debits</th>
+                      <th className="py-1.5 px-3 text-right">Credits</th>
+                      <th className="py-1.5 px-3 text-right">Closing ({carrySourceFy})</th>
+                    </tr>
+                  </thead>
+                  <tbody className="divide-y divide-slate-100">
+                    {closingPreview.rows.map((r) => (
+                      <tr key={r.partyId}>
+                        <td className="py-1.5 px-3 font-semibold">{r.partyName}</td>
+                        <td className="py-1.5 px-3 text-slate-500">{r.partyType}</td>
+                        <td className="py-1.5 px-3 text-right font-mono-num">
+                          ₹{formatINR(r.openingBalance)} {r.openingType}
+                        </td>
+                        <td className="py-1.5 px-3 text-right font-mono-num">₹{formatINR(r.fyDebits)}</td>
+                        <td className="py-1.5 px-3 text-right font-mono-num">₹{formatINR(r.fyCredits)}</td>
+                        <td className="py-1.5 px-3 text-right font-mono-num font-bold text-blue-800">
+                          ₹{formatINR(r.closingBalance)} {r.closingType}
+                        </td>
+                      </tr>
+                    ))}
+                  </tbody>
+                </table>
+              </div>
+            </div>
+          </div>
         </div>
       )}
     </div>

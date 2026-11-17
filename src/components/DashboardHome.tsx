@@ -8,6 +8,8 @@ import {
   FileBarChart2,
   FileSpreadsheet,
   FolderSync,
+  Landmark,
+  Lock,
   Printer,
   Save,
   ScanLine,
@@ -17,6 +19,7 @@ import {
   Trash2,
   Truck,
   Users,
+  Wallet,
 } from 'lucide-react';
 import {
   CompanySettings,
@@ -24,7 +27,14 @@ import {
   SheetTabId,
   TransactionRecord,
 } from '../types/erp';
-import { formatDateDDMMYYYY, formatINR, formatINRCompact, makeSafeDocId, todayISO } from '../lib/formatters';
+import {
+  formatDateDDMMYYYY,
+  formatINR,
+  formatINRCompact,
+  makeSafeDocId,
+  normalizeFyLabel,
+  todayISO,
+} from '../lib/formatters';
 import {
   logBranchActivity,
   removeDocument,
@@ -41,6 +51,8 @@ interface DashboardHomeProps {
   activeStaffCode: string;
   activeStaffName: string;
   activeBranchCode: string;
+  activeFy: string;
+  isMasterAdmin: boolean;
   shipmentsCount: number;
   customersCount: number;
   transactions: TransactionRecord[];
@@ -62,6 +74,8 @@ const DashboardHomeInner: React.FC<DashboardHomeProps> = ({
   activeStaffCode,
   activeStaffName,
   activeBranchCode,
+  activeFy,
+  isMasterAdmin,
   shipmentsCount,
   customersCount,
   transactions,
@@ -87,16 +101,30 @@ const DashboardHomeInner: React.FC<DashboardHomeProps> = ({
   const [selectedTxId, setSelectedTxId] = useState<string | null>(null);
   const [quickActionsOpen, setQuickActionsOpen] = useState(true);
 
-  const { totalIncome, totalExpense } = useMemo(() => {
-    return transactions.reduce(
-      (acc, t) => {
-        if (t.txType === 'Income') acc.totalIncome += Number(t.amount || 0);
-        else acc.totalExpense += Number(t.amount || 0);
-        return acc;
-      },
-      { totalIncome: 0, totalExpense: 0 }
-    );
-  }, [transactions]);
+  const { totalIncome, totalExpense, cashBalance, bankBalance } = useMemo(() => {
+    const fyOpenings = company.fyOpeningBalances?.[normalizeFyLabel(activeFy)] || {};
+    let cash = Number(fyOpenings['__CASH__']?.amount || 0);
+    if (fyOpenings['__CASH__']?.balanceType === 'Cr') cash = -cash;
+    let bank = Number(fyOpenings['__BANK__']?.amount || 0);
+    if (fyOpenings['__BANK__']?.balanceType === 'Cr') bank = -bank;
+
+    let inc = 0;
+    let exp = 0;
+    transactions.forEach((t) => {
+      const amt = Number(t.amount || 0);
+      const isCash = t.paymentMode === 'Cash';
+      if (t.txType === 'Income') {
+        inc += amt;
+        if (isCash) cash += amt;
+        else bank += amt;
+      } else {
+        exp += amt;
+        if (isCash) cash -= amt;
+        else bank -= amt;
+      }
+    });
+    return { totalIncome: inc, totalExpense: exp, cashBalance: cash, bankBalance: bank };
+  }, [transactions, company.fyOpeningBalances, activeFy]);
 
   // Pre-indexed search index + descending date sort
   const indexedTransactions = useMemo(() => {
@@ -124,7 +152,7 @@ const DashboardHomeInner: React.FC<DashboardHomeProps> = ({
     try {
       const { formattedNo: txCode } = await reserveNextSerialNumber({
         type: 'tx',
-        fy: company.currentFy,
+        fy: activeFy,
         branchCode: activeBranchCode,
         staffCode: activeStaffCode,
         ownerUid,
@@ -137,6 +165,7 @@ const DashboardHomeInner: React.FC<DashboardHomeProps> = ({
         {
           txCode,
           txDate,
+          financialYear: normalizeFyLabel(activeFy),
           txType,
           ledgerAccount: ledgerAccount.slice(0, 100),
           partyName: partyName.trim().slice(0, 180),
@@ -329,26 +358,41 @@ const DashboardHomeInner: React.FC<DashboardHomeProps> = ({
         </div>
 
         <div className="rounded-xl bg-gradient-to-br from-[#22C55E] to-[#15803D] text-white p-4 shadow-sm flex items-center gap-3.5">
-          <div className="w-12 h-12 rounded-lg bg-white/15 flex items-center justify-center shrink-0 text-3xl font-bold">
-            ₹
+          <div className="w-12 h-12 rounded-lg bg-white/15 flex items-center justify-center shrink-0">
+            <Wallet className="w-6 h-6 text-white" />
           </div>
           <div className="min-w-0">
-            <p className="text-xs font-medium text-emerald-100">Total Income</p>
+            <p className="text-xs font-medium text-emerald-100">
+              {isMasterAdmin ? `FY Income (${activeFy})` : 'Cash Ledger Balance'}
+            </p>
             <p className="text-2xl font-extrabold font-mono-num tracking-tight truncate">
-              ₹ {formatINRCompact(totalIncome)}
+              {isMasterAdmin
+                ? `₹ ${formatINRCompact(totalIncome)}`
+                : `₹ ${formatINRCompact(cashBalance)}`}
             </p>
           </div>
         </div>
 
         <div className="rounded-xl bg-gradient-to-br from-[#FB923C] to-[#EA580C] text-white p-4 shadow-sm flex items-center gap-3.5">
-          <div className="w-12 h-12 rounded-lg bg-white/15 flex items-center justify-center shrink-0 text-3xl font-bold">
-            ₹
+          <div className="w-12 h-12 rounded-lg bg-white/15 flex items-center justify-center shrink-0">
+            {isMasterAdmin ? <Landmark className="w-6 h-6 text-white" /> : <Lock className="w-6 h-6 text-white" />}
           </div>
           <div className="min-w-0">
-            <p className="text-xs font-medium text-orange-100">Total Expenses</p>
-            <p className="text-2xl font-extrabold font-mono-num tracking-tight truncate">
-              ₹ {formatINRCompact(totalExpense)}
+            <p className="text-xs font-medium text-orange-100">
+              {isMasterAdmin ? 'PNB Bank / Expenses' : 'Bank & Company P&L'}
             </p>
+            {isMasterAdmin ? (
+              <>
+                <p className="text-lg font-extrabold font-mono-num tracking-tight truncate">
+                  Bank ₹ {formatINRCompact(bankBalance)}
+                </p>
+                <p className="text-[11px] font-mono-num text-orange-100 truncate">
+                  Exp: ₹ {formatINRCompact(totalExpense)} · Cash: ₹ {formatINRCompact(cashBalance)}
+                </p>
+              </>
+            ) : (
+              <p className="text-sm font-bold text-white/95 mt-0.5">Locked (Admin Only)</p>
+            )}
           </div>
         </div>
 
@@ -705,14 +749,16 @@ const DashboardHomeInner: React.FC<DashboardHomeProps> = ({
                 <FolderSync className="w-4 h-4 text-emerald-700" />
                 <span>Restore Database</span>
               </button>
-              <button
-                type="button"
-                onClick={() => onOpenTab('settings')}
-                className="w-full flex items-center gap-2.5 px-3 py-2 rounded-lg border border-slate-200 bg-slate-50 hover:bg-blue-50 hover:border-blue-300 text-slate-800 font-semibold transition-colors cursor-pointer"
-              >
-                <Settings className="w-4 h-4 text-purple-700" />
-                <span>Settings &amp; Staff</span>
-              </button>
+              {isMasterAdmin && (
+                <button
+                  type="button"
+                  onClick={() => onOpenTab('settings')}
+                  className="w-full flex items-center gap-2.5 px-3 py-2 rounded-lg border border-slate-200 bg-slate-50 hover:bg-blue-50 hover:border-blue-300 text-slate-800 font-semibold transition-colors cursor-pointer"
+                >
+                  <Settings className="w-4 h-4 text-purple-700" />
+                  <span>Settings &amp; Staff</span>
+                </button>
+              )}
             </div>
           </div>
         )}

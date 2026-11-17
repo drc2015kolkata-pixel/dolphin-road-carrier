@@ -6,29 +6,41 @@ import {
   HardDriveUpload,
   KeyRound,
   LogIn,
+  RotateCcw,
   ScanLine,
   ShieldCheck,
   Truck,
   UserCheck,
 } from 'lucide-react';
-import { getAuthLoginConfig } from '../lib/firestoreStore';
+import { ensureLocalAdminCreds, getAuthLoginConfig } from '../lib/firestoreStore';
+import { DrcTriangleLogo } from './DrcTriangleLogo';
 
 interface SignInScreenProps {
   loading: boolean;
   error: string | null;
   onLogin: (userId: string, password: string) => Promise<void> | void;
+  onRestoreDefaultAdmin: () => Promise<void> | void;
 }
 
-export const SignInScreen: React.FC<SignInScreenProps> = ({ loading, error, onLogin }) => {
+export const SignInScreen: React.FC<SignInScreenProps> = ({
+  loading,
+  error,
+  onLogin,
+  onRestoreDefaultAdmin,
+}) => {
   const [userId, setUserId] = useState('');
   const [password, setPassword] = useState('');
   const [showPassword, setShowPassword] = useState(false);
   const [isDefaultAdmin, setIsDefaultAdmin] = useState(true);
   const [adminUserIdHint, setAdminUserIdHint] = useState('admin');
   const [quickHint, setQuickHint] = useState<string | null>(null);
+  const [showResetBox, setShowResetBox] = useState(false);
   const passwordInputRef = useRef<HTMLInputElement | null>(null);
 
   useEffect(() => {
+    // Guarantee fresh browser localStorage immediately has default Master Admin credentials
+    ensureLocalAdminCreds();
+
     let active = true;
     getAuthLoginConfig().then((cfg) => {
       if (!active) return;
@@ -49,17 +61,28 @@ export const SignInScreen: React.FC<SignInScreenProps> = ({ loading, error, onLo
 
   const handleQuickAdminLogin = async () => {
     if (loading) return;
+    setQuickHint(null);
     if (isDefaultAdmin) {
-      setQuickHint(null);
       setUserId('admin');
       setPassword('admin123');
       await onLogin('admin', 'admin123');
     } else {
       setUserId(adminUserIdHint);
       setPassword('');
-      setQuickHint(`Enter your updated Master Admin password for "${adminUserIdHint}" and click Sign In.`);
+      setQuickHint(
+        `Enter your updated Master Admin password for "${adminUserIdHint}" or click "Forgot / Reset Admin Password" below.`
+      );
+      setShowResetBox(true);
       passwordInputRef.current?.focus();
     }
+  };
+
+  const handleRestoreDefault = async () => {
+    if (loading) return;
+    setQuickHint(null);
+    setUserId('admin');
+    setPassword('admin123');
+    await onRestoreDefaultAdmin();
   };
 
   return (
@@ -69,11 +92,9 @@ export const SignInScreen: React.FC<SignInScreenProps> = ({ loading, error, onLo
         <div className="md:col-span-5 bg-gradient-to-b from-[#0D47A1] to-[#1E3A8A] text-white p-7 sm:p-8 flex flex-col justify-between">
           <div>
             <div className="flex items-center gap-3 mb-6">
-              <img
-                src="/pwa-192x192.png"
-                alt="Dolphin Road Carrier Official DRC Logo"
-                className="w-14 h-14 rounded-xl bg-white p-1 object-contain shadow-sm border border-blue-200/40"
-              />
+              <div className="w-16 h-16 rounded-2xl bg-white p-1 shadow-md border border-blue-200/50 shrink-0 flex items-center justify-center">
+                <DrcTriangleLogo className="w-full h-full" />
+              </div>
               <div>
                 <h1 className="text-lg font-extrabold tracking-tight leading-tight">
                   DOLPHIN ROAD CARRIERS
@@ -98,7 +119,7 @@ export const SignInScreen: React.FC<SignInScreenProps> = ({ loading, error, onLo
               </div>
               <div className="flex items-center gap-2.5">
                 <HardDriveUpload className="w-4 h-4 text-purple-300 shrink-0" />
-                <span>6-Folder Google Drive Cloud Backup + Switcher</span>
+                <span>Multi-FY Accounts (2025-26 &amp; 2026-27) + Drive Backup</span>
               </div>
               <div className="flex items-center gap-2.5">
                 <ShieldCheck className="w-4 h-4 text-sky-300 shrink-0" />
@@ -214,7 +235,46 @@ export const SignInScreen: React.FC<SignInScreenProps> = ({ loading, error, onLo
             </div>
           </form>
 
-          <div className="mt-6 p-3.5 rounded-xl bg-slate-50 border border-slate-200 text-xs text-slate-600 space-y-1">
+          {/* Outside Login Screen Password Reset */}
+          <div className="mt-4 pt-3 border-t border-slate-200">
+            <div className="flex flex-wrap items-center justify-between gap-2">
+              <button
+                type="button"
+                onClick={() => setShowResetBox((v) => !v)}
+                className="inline-flex items-center gap-1.5 text-xs font-bold text-[#0D47A1] hover:text-blue-900 hover:underline cursor-pointer"
+              >
+                <RotateCcw className="w-3.5 h-3.5" />
+                <span>Forgot / Reset Admin Password</span>
+              </button>
+              <span className="text-[11px] text-slate-500">
+                100% Instant Recovery (No Code Required)
+              </span>
+            </div>
+
+            {showResetBox && (
+              <div className="mt-3 p-3.5 rounded-xl bg-amber-50 border border-amber-200 flex flex-wrap items-center justify-between gap-3">
+                <div className="text-xs text-amber-950">
+                  <p className="font-bold">Restore Default Master Admin Access</p>
+                  <p className="text-[11px] text-amber-800">
+                    Resets User ID to <code className="font-mono-num font-bold">admin</code> and
+                    Password to <code className="font-mono-num font-bold">admin123</code>, then signs
+                    you directly into the dashboard.
+                  </p>
+                </div>
+                <button
+                  type="button"
+                  disabled={loading}
+                  onClick={handleRestoreDefault}
+                  className="inline-flex items-center gap-1.5 px-3.5 py-2 rounded-lg bg-amber-600 hover:bg-amber-700 text-white text-xs font-bold shadow-sm cursor-pointer disabled:opacity-60 whitespace-nowrap"
+                >
+                  <RotateCcw className="w-3.5 h-3.5" />
+                  <span>Restore Default (admin123)</span>
+                </button>
+              </div>
+            )}
+          </div>
+
+          <div className="mt-4 p-3.5 rounded-xl bg-slate-50 border border-slate-200 text-xs text-slate-600 space-y-1">
             <p className="font-bold text-slate-800">Default Access Credentials</p>
             <p>
               Master Admin: User ID{' '}

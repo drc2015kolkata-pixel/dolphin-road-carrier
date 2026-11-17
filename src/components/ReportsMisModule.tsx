@@ -2,10 +2,12 @@ import React, { useMemo, useState } from 'react';
 import {
   BrainCircuit,
   Calculator,
+  Lock,
   Printer,
   RefreshCw,
   Search,
   Send,
+  ShieldAlert,
 } from 'lucide-react';
 import {
   CompanySettings,
@@ -16,7 +18,7 @@ import {
   Party,
   TransactionRecord,
 } from '../types/erp';
-import { daysSinceDate, formatDateDDMMYYYY, formatINR, todayISO } from '../lib/formatters';
+import { daysSinceDate, formatDateDDMMYYYY, formatINR, normalizeFyLabel, todayISO } from '../lib/formatters';
 import { upsertDocument } from '../lib/firestoreStore';
 import { GeneratedPdfResult, generateTableReportPDF } from '../lib/pdfEngine';
 import { useDebouncedValue } from '../hooks/useDebounce';
@@ -24,6 +26,8 @@ import { PaginatedDataTable, TableColumn } from './PaginatedDataTable';
 
 interface ReportsMisModuleProps {
   ownerUid: string;
+  activeFy: string;
+  isMasterAdmin: boolean;
   invoices: Invoice[];
   lorryHires: LorryHire[];
   consignments: ConsignmentNote[];
@@ -52,6 +56,8 @@ export type ReportTab =
   | 'aiAdvisor';
 
 const ReportsMisModuleInner: React.FC<ReportsMisModuleProps> = ({
+  activeFy,
+  isMasterAdmin,
   invoices,
   lorryHires,
   consignments,
@@ -153,15 +159,18 @@ const ReportsMisModuleInner: React.FC<ReportsMisModuleProps> = ({
       .sort((a, b) => b.ageDays - a.ageDays);
   }, [invoices]);
 
-  // Account Book (Ledger Summary)
+  // Account Book (Ledger Summary with Carried-Forward FY Opening Balances)
   const accountBookRows = useMemo(() => {
+    const fyOpenings = company.fyOpeningBalances?.[normalizeFyLabel(activeFy)] || {};
     const map = new Map<string, { party: string; debit: number; credit: number }>();
     parties.forEach((p) => {
-      const ob = Number(p.openingBalance || 0);
+      const cf = fyOpenings[p.name] || fyOpenings[p.id];
+      const ob = cf ? Number(cf.amount || 0) : Number(p.openingBalance || 0);
+      const bType = cf ? cf.balanceType : p.balanceType;
       map.set(p.name, {
         party: p.name,
-        debit: p.balanceType === 'Dr' ? ob : 0,
-        credit: p.balanceType === 'Cr' ? ob : 0,
+        debit: bType === 'Dr' ? ob : 0,
+        credit: bType === 'Cr' ? ob : 0,
       });
     });
     invoices.forEach((inv) => {
@@ -181,7 +190,7 @@ const ReportsMisModuleInner: React.FC<ReportsMisModuleProps> = ({
       netBalance: Math.abs(r.debit - r.credit),
       side: r.debit >= r.credit ? ('Dr' as const) : ('Cr' as const),
     }));
-  }, [parties, invoices, transactions]);
+  }, [parties, invoices, transactions, company.fyOpeningBalances, activeFy]);
 
   // Debounced search filters per tab
   const q = debouncedSearch.trim().toLowerCase();
@@ -527,16 +536,18 @@ const ReportsMisModuleInner: React.FC<ReportsMisModuleProps> = ({
     []
   );
 
-  const tabs: Array<{ id: ReportTab; label: string }> = [
+  const tabs: Array<{ id: ReportTab; label: string; adminOnly?: boolean }> = [
     { id: 'invoiceRegister', label: 'Invoice Register' },
     { id: 'purchaseRegister', label: 'Purchase / Lorry Hire' },
     { id: 'cnWise', label: 'CN-Wise P&L' },
     { id: 'lorryWise', label: 'Lorry-Wise P&L' },
     { id: 'aging', label: 'Payment Aging' },
     { id: 'accountBook', label: 'Account Book' },
-    { id: 'finalResults', label: 'Final Results (P&L / BS)' },
-    { id: 'aiAdvisor', label: 'AI MIS Advisor' },
+    { id: 'finalResults', label: 'Final Results (P&L / BS)', adminOnly: true },
+    { id: 'aiAdvisor', label: 'AI MIS Advisor', adminOnly: true },
   ];
+
+  const visibleTabs = tabs.filter((t) => isMasterAdmin || !t.adminOnly);
 
   const isTableTab =
     tab !== 'finalResults' && tab !== 'aiAdvisor';
@@ -545,7 +556,7 @@ const ReportsMisModuleInner: React.FC<ReportsMisModuleProps> = ({
     <div className="space-y-4">
       <div className="bg-white p-2 rounded-xl border border-slate-200 shadow-sm flex flex-wrap items-center justify-between gap-2">
         <div className="flex flex-wrap items-center gap-1.5">
-          {tabs.map((t) => (
+          {visibleTabs.map((t) => (
             <button
               key={t.id}
               type="button"
@@ -687,12 +698,27 @@ const ReportsMisModuleInner: React.FC<ReportsMisModuleProps> = ({
         </div>
       )}
 
-      {/* Final Results (P&L / Balance Sheet) */}
-      {tab === 'finalResults' && (
+      {/* Final Results (P&L / Balance Sheet) — Strictly Master Admin Only */}
+      {tab === 'finalResults' && !isMasterAdmin && (
+        <div className="bg-white rounded-xl border border-red-200 shadow-sm p-8 text-center space-y-2">
+          <div className="w-12 h-12 rounded-full bg-red-50 text-red-600 flex items-center justify-center mx-auto">
+            <Lock className="w-6 h-6" />
+          </div>
+          <h3 className="text-sm font-extrabold text-slate-900 flex items-center justify-center gap-1.5">
+            <ShieldAlert className="w-4 h-4 text-red-600" />
+            <span>Master Admin Restricted — Company Profit &amp; Loss</span>
+          </h3>
+          <p className="text-xs text-slate-600 max-w-md mx-auto">
+            Company Profit &amp; Loss, Balance Sheet figures, and Bank Totals are strictly locked for Staff operators. Sign in as Master Admin to view confidential financial results.
+          </p>
+        </div>
+      )}
+
+      {tab === 'finalResults' && isMasterAdmin && (
         <div className="grid grid-cols-1 md:grid-cols-2 gap-4">
           <div className="bg-white rounded-xl border border-slate-200 shadow-sm overflow-hidden">
             <div className="bg-[#0D47A1] text-white px-4 py-2.5 text-sm font-bold">
-              Profit &amp; Loss Statement (FY {company.currentFy})
+              Profit &amp; Loss Statement ({activeFy})
             </div>
             <div className="p-4 space-y-2.5 text-xs">
               <div className="flex justify-between py-1.5 border-b border-slate-100">

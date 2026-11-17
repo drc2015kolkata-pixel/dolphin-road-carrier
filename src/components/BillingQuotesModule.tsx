@@ -3,6 +3,7 @@ import {
   CheckCircle2,
   FileCheck2,
   FileSpreadsheet,
+  Lock,
   Plus,
   Printer,
   ReceiptText,
@@ -27,7 +28,9 @@ import {
   formatDateDDMMYYYY,
   formatINR,
   getDynamicFinancialYear,
+  getFyShortCode,
   makeSafeDocId,
+  normalizeFyLabel,
   todayISO,
 } from '../lib/formatters';
 import {
@@ -51,6 +54,8 @@ interface BillingQuotesModuleProps {
   activeStaffCode: string;
   activeStaffName: string;
   activeBranchCode: string;
+  activeFy: string;
+  isMasterAdmin: boolean;
   invoices: Invoice[];
   quotations: Quotation[];
   declarations: Declaration194C[];
@@ -74,6 +79,8 @@ const BillingQuotesModuleInner: React.FC<BillingQuotesModuleProps> = ({
   activeStaffCode,
   activeStaffName,
   activeBranchCode,
+  activeFy,
+  isMasterAdmin,
   invoices,
   quotations,
   declarations,
@@ -87,11 +94,12 @@ const BillingQuotesModuleInner: React.FC<BillingQuotesModuleProps> = ({
 }) => {
   const [subTab, setSubTab] = useState<'invoice' | 'quotation' | '194c'>('invoice');
   const lrScanRef = useRef<HTMLInputElement | null>(null);
+  const fyShort = getFyShortCode(activeFy);
 
   // ---- TAX INVOICE STATE ----
   const branchTag = activeBranchCode && activeBranchCode !== 'ALL' ? activeBranchCode.slice(0, 3) : 'KOL';
   const [autoAtomicInvoice, setAutoAtomicInvoice] = useState(true);
-  const [invoiceNo, setInvoiceNo] = useState(`${branchTag}/${105 + invoices.length}/26-27`);
+  const [invoiceNo, setInvoiceNo] = useState(`${branchTag}/${105 + invoices.length}/${fyShort}`);
   const [invoiceDate, setInvoiceDate] = useState(todayISO());
   const [dueDate, setDueDate] = useState(() => {
     const d = new Date();
@@ -256,6 +264,7 @@ const BillingQuotesModuleInner: React.FC<BillingQuotesModuleProps> = ({
     invoiceNo: (overrideNo || invoiceNo).trim(),
     invoiceDate,
     dueDate,
+    financialYear: normalizeFyLabel(activeFy),
     partyName: partyName.trim(),
     partyAddress: partyAddress.trim(),
     partyGstin: partyGstin.trim(),
@@ -296,7 +305,7 @@ const BillingQuotesModuleInner: React.FC<BillingQuotesModuleProps> = ({
         try {
           const serial = await reserveNextSerialNumber({
             type: 'invoice',
-            fy: company.currentFy,
+            fy: activeFy,
             branchCode: activeBranchCode,
             staffCode: activeStaffCode,
             ownerUid,
@@ -317,6 +326,7 @@ const BillingQuotesModuleInner: React.FC<BillingQuotesModuleProps> = ({
           invoiceNo: invObj.invoiceNo,
           invoiceDate: invObj.invoiceDate,
           dueDate: invObj.dueDate,
+          financialYear: normalizeFyLabel(activeFy),
           partyName: invObj.partyName,
           partyAddress: invObj.partyAddress,
           partyGstin: invObj.partyGstin,
@@ -357,7 +367,7 @@ const BillingQuotesModuleInner: React.FC<BillingQuotesModuleProps> = ({
 
       const pdf = await generateInvoicePDF(invObj, company, includeAnnexure);
       onPreviewPdf(pdf, 'Bills_Invoices');
-      setInvoiceNo(`${branchTag}/${106 + invoices.length}/26-27`);
+      setInvoiceNo(`${branchTag}/${106 + invoices.length}/${fyShort}`);
     } finally {
       setSavingInv(false);
     }
@@ -394,7 +404,7 @@ const BillingQuotesModuleInner: React.FC<BillingQuotesModuleProps> = ({
       try {
         const serial = await reserveNextSerialNumber({
           type: 'quotation',
-          fy: company.currentFy,
+          fy: activeFy,
           branchCode: activeBranchCode,
           staffCode: activeStaffCode,
           ownerUid,
@@ -411,6 +421,7 @@ const BillingQuotesModuleInner: React.FC<BillingQuotesModuleProps> = ({
       id,
       quotationNo: finalQNo,
       quotationDate: qDate,
+      financialYear: normalizeFyLabel(activeFy),
       partyName: qParty.trim(),
       partyAddress: qAddr.trim(),
       partyGstin: qGstin.trim(),
@@ -436,6 +447,7 @@ const BillingQuotesModuleInner: React.FC<BillingQuotesModuleProps> = ({
       {
         quotationNo: qObj.quotationNo,
         quotationDate: qObj.quotationDate,
+        financialYear: normalizeFyLabel(activeFy),
         partyName: qObj.partyName,
         partyAddress: qObj.partyAddress,
         partyGstin: qObj.partyGstin,
@@ -476,7 +488,7 @@ const BillingQuotesModuleInner: React.FC<BillingQuotesModuleProps> = ({
   const [dAddr, setDAddr] = useState('');
   const [dGstin, setDGstin] = useState('');
   const [dDate, setDDate] = useState(todayISO());
-  const [dFy, setDFy] = useState(getDynamicFinancialYear(todayISO()));
+  const [dFy, setDFy] = useState(normalizeFyLabel(activeFy));
   const [dPlace, setDPlace] = useState('Kolkata');
   const [declSearch, setDeclSearch] = useState('');
   const debouncedDeclSearch = useDebouncedValue(declSearch, 200);
@@ -671,26 +683,33 @@ const BillingQuotesModuleInner: React.FC<BillingQuotesModuleProps> = ({
                 Mark Paid
               </button>
             )}
-            <button
-              type="button"
-              onClick={() => {
-                onShowConfirm({
-                  title: `Delete Invoice ${inv.invoiceNo}?`,
-                  description: `Permanently delete ${inv.invoiceNo}?`,
-                  confirmLabel: 'Delete',
-                  variant: 'danger',
-                  onConfirm: () => removeDocument('invoices', inv.id),
-                });
-              }}
-              className="p-1 rounded hover:bg-red-50 text-slate-500 hover:text-red-600 cursor-pointer"
-            >
-              <Trash2 className="w-3.5 h-3.5" />
-            </button>
+            {!isMasterAdmin && inv.status === 'Paid' ? (
+              <span className="inline-flex items-center gap-0.5 px-1.5 py-0.5 rounded bg-slate-100 text-slate-500 text-[10px] font-bold">
+                <Lock className="w-3 h-3" />
+                Locked
+              </span>
+            ) : (
+              <button
+                type="button"
+                onClick={() => {
+                  onShowConfirm({
+                    title: `Delete Invoice ${inv.invoiceNo}?`,
+                    description: `Permanently delete ${inv.invoiceNo}?`,
+                    confirmLabel: 'Delete',
+                    variant: 'danger',
+                    onConfirm: () => removeDocument('invoices', inv.id),
+                  });
+                }}
+                className="p-1 rounded hover:bg-red-50 text-slate-500 hover:text-red-600 cursor-pointer"
+              >
+                <Trash2 className="w-3.5 h-3.5" />
+              </button>
+            )}
           </>
         ),
       },
     ],
-    [company, onPreviewPdf, onShowConfirm, activeStaffCode, activeStaffName, activeBranchCode, ownerUid]
+    [company, isMasterAdmin, onPreviewPdf, onShowConfirm, activeStaffCode, activeStaffName, activeBranchCode, ownerUid]
   );
 
   const quotationColumns: TableColumn<Quotation>[] = useMemo(
@@ -1652,8 +1671,8 @@ const BillingQuotesModuleInner: React.FC<BillingQuotesModuleProps> = ({
               </div>
             </div>
             <div className="px-4 py-2.5 bg-blue-50 border-t border-blue-200 text-xs text-blue-900">
-              Includes embedded PAN Card attachment (PAN: {company.pan}), Dolphin Road Carrier
-              diagonal watermark, Verification block, and Round Blue Stamp + Proprietor Signature.
+              Includes PAN Card attachment (PAN: {company.pan}), Dolphin Road Carrier diagonal
+              watermark, Verification block, and TOP-LEFT Triangular DRC Logo (strictly NO stamp or signature at bottom).
             </div>
             <div className="px-4 py-3 bg-slate-50 border-t border-slate-200 flex justify-end">
               <button

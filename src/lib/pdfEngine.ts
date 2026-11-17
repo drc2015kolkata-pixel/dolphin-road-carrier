@@ -5,13 +5,21 @@ import {
   Invoice,
   Quotation,
 } from '../types/erp';
-import { buildPdfArrayBuffer, PdfAssets, PdfTaskPayload } from './pdfBuilders';
+import {
+  buildPdfArrayBuffer,
+  PdfAssets,
+  PdfOrientation,
+  PdfTaskPayload,
+} from './pdfBuilders';
 
-const DRC_LOGO_URL = '/assets/aistudio/WhatsApp_Image_2026-11-16_at_11.55.23_PM_8d220064.jpeg';
+const DRC_TRIANGLE_LOGO_URL = '/drc-triangle-logo.svg';
+const FALLBACK_LOGO_PNG = '/pwa-192x192.png';
 const DRC_STAMP_URL = '/assets/aistudio/WhatsApp_Image_2026-11-16_at_11.55.22_PM__2__3293db0a.jpeg';
 const DRC_194C_REF_URL = '/assets/aistudio/WhatsApp_Image_2026-11-16_at_11.55.22_PM_8065282f.jpeg';
 
-let cachedAssets: PdfAssets | null = null;
+let cachedLogoDataUrl: string | undefined;
+let cachedDefaultStampDataUrl: string | undefined;
+let cachedPanCropDataUrl: string | undefined;
 let sharedPdfWorker: Worker | null = null;
 
 async function loadImageToCompressedDataUrl(
@@ -34,9 +42,9 @@ async function loadImageToCompressedDataUrl(
     const sw = cropRect ? Math.round(img.width * cropRect.sw) : img.width;
     const sh = cropRect ? Math.round(img.height * cropRect.sh) : img.height;
 
-    const scale = Math.min(1, maxWidth / Math.max(sw, sh));
-    const dw = Math.max(1, Math.round(sw * scale));
-    const dh = Math.max(1, Math.round(sh * scale));
+    const scale = Math.min(1, maxWidth / Math.max(sw || maxWidth, sh || maxWidth));
+    const dw = Math.max(1, Math.round((sw || maxWidth) * scale));
+    const dh = Math.max(1, Math.round((sh || maxWidth) * scale));
 
     const canvas = document.createElement('canvas');
     canvas.width = dw;
@@ -45,7 +53,7 @@ async function loadImageToCompressedDataUrl(
     if (!ctx) return undefined;
     ctx.fillStyle = '#ffffff';
     ctx.fillRect(0, 0, dw, dh);
-    ctx.drawImage(img, sx, sy, sw, sh, 0, 0, dw, dh);
+    ctx.drawImage(img, sx, sy, sw || dw, sh || dh, 0, 0, dw, dh);
     return canvas.toDataURL('image/jpeg', quality);
   } catch {
     return undefined;
@@ -97,24 +105,43 @@ function createFallbackTwinDolphinWatermarkDataUrl(): string | undefined {
   }
 }
 
-async function getAssets(): Promise<PdfAssets> {
-  if (cachedAssets) return cachedAssets;
-  const [logoDataUrl, stampDataUrl, panCropDataUrl] = await Promise.all([
-    loadImageToCompressedDataUrl(DRC_LOGO_URL, 220, 0.72),
-    loadImageToCompressedDataUrl(DRC_STAMP_URL, 260, 0.75),
-    loadImageToCompressedDataUrl(DRC_194C_REF_URL, 320, 0.75, {
+async function getAssets(company?: CompanySettings): Promise<PdfAssets> {
+  if (!cachedLogoDataUrl) {
+    cachedLogoDataUrl =
+      (await loadImageToCompressedDataUrl(DRC_TRIANGLE_LOGO_URL, 260, 0.85)) ||
+      (await loadImageToCompressedDataUrl(FALLBACK_LOGO_PNG, 260, 0.85));
+  }
+  if (!cachedDefaultStampDataUrl) {
+    cachedDefaultStampDataUrl = await loadImageToCompressedDataUrl(DRC_STAMP_URL, 260, 0.78);
+  }
+  if (!cachedPanCropDataUrl) {
+    cachedPanCropDataUrl = await loadImageToCompressedDataUrl(DRC_194C_REF_URL, 320, 0.75, {
       sx: 0.11,
       sy: 0.715,
       sw: 0.27,
       sh: 0.085,
-    }),
-  ]);
+    });
+  }
+
+  let stampDataUrl = cachedDefaultStampDataUrl;
+  if (company?.customStampDataUrl) {
+    const normalizedCustom = await loadImageToCompressedDataUrl(company.customStampDataUrl, 320, 0.82);
+    if (normalizedCustom) {
+      stampDataUrl = normalizedCustom;
+    }
+  }
+
   const watermarkDataUrl =
     typeof OffscreenCanvas !== 'undefined'
-      ? undefined // Rendered off-main-thread inside pdfWorker.ts!
+      ? undefined
       : createFallbackTwinDolphinWatermarkDataUrl();
-  cachedAssets = { logoDataUrl, stampDataUrl, panCropDataUrl, watermarkDataUrl };
-  return cachedAssets;
+
+  return {
+    logoDataUrl: cachedLogoDataUrl,
+    stampDataUrl,
+    panCropDataUrl: cachedPanCropDataUrl,
+    watermarkDataUrl,
+  };
 }
 
 export interface GeneratedPdfResult {
@@ -123,6 +150,8 @@ export interface GeneratedPdfResult {
   fileName: string;
   sizeKB: number;
   title: string;
+  orientation: PdfOrientation;
+  rebuildWithOrientation?: (nextOrientation: PdfOrientation) => Promise<GeneratedPdfResult>;
 }
 
 function getPdfWorker(): Worker | null {
@@ -141,6 +170,19 @@ function getPdfWorker(): Worker | null {
 
 async function runPdfTask(task: PdfTaskPayload): Promise<GeneratedPdfResult> {
   const worker = getPdfWorker();
+  const chosenOrientation: PdfOrientation =
+    task.orientation || (task.kind === 'lr3copy' || task.kind === 'tableReport' ? 'l' : 'p');
+
+  const attachRebuild = (base: Omit<GeneratedPdfResult, 'rebuildWithOrientation'>): GeneratedPdfResult => ({
+    ...base,
+    rebuildWithOrientation: async (nextOrientation: PdfOrientation) => {
+      return runPdfTask({
+        ...task,
+        orientation: nextOrientation,
+        assets: { ...task.assets },
+      });
+    },
+  });
 
   if (worker) {
     try {
@@ -185,13 +227,14 @@ async function runPdfTask(task: PdfTaskPayload): Promise<GeneratedPdfResult> {
       const blob = new Blob([result.buffer], { type: 'application/pdf' });
       const blobUrl = URL.createObjectURL(blob);
       const sizeKB = Math.max(1, Math.round(blob.size / 1024));
-      return {
+      return attachRebuild({
         blob,
         blobUrl,
         fileName: result.fileName,
         sizeKB,
         title: result.title,
-      };
+        orientation: chosenOrientation,
+      });
     } catch {
       // Fallback to main thread cleanly if worker is blocked
     }
@@ -204,59 +247,74 @@ async function runPdfTask(task: PdfTaskPayload): Promise<GeneratedPdfResult> {
   const blob = new Blob([buffer], { type: 'application/pdf' });
   const blobUrl = URL.createObjectURL(blob);
   const sizeKB = Math.max(1, Math.round(blob.size / 1024));
-  return { blob, blobUrl, fileName, sizeKB, title };
+  return attachRebuild({
+    blob,
+    blobUrl,
+    fileName,
+    sizeKB,
+    title,
+    orientation: chosenOrientation,
+  });
 }
 
 export async function generateInvoicePDF(
   invoice: Invoice,
   company: CompanySettings,
-  includeAnnexure = true
+  includeAnnexure = true,
+  orientation: PdfOrientation = 'p'
 ): Promise<GeneratedPdfResult> {
-  const assets = await getAssets();
+  const assets = await getAssets(company);
   return runPdfTask({
     kind: 'invoice',
     invoice,
     company,
     includeAnnexure,
+    orientation,
     assets: { ...assets },
   });
 }
 
 export async function generateLR3CopyPDF(
   cn: ConsignmentNote,
-  company: CompanySettings
+  company: CompanySettings,
+  orientation: PdfOrientation = 'l'
 ): Promise<GeneratedPdfResult> {
-  const assets = await getAssets();
+  const assets = await getAssets(company);
   return runPdfTask({
     kind: 'lr3copy',
     cn,
     company,
+    orientation,
     assets: { ...assets },
   });
 }
 
 export async function generateQuotationPDF(
   quote: Quotation,
-  company: CompanySettings
+  company: CompanySettings,
+  orientation: PdfOrientation = 'p'
 ): Promise<GeneratedPdfResult> {
-  const assets = await getAssets();
+  const assets = await getAssets(company);
   return runPdfTask({
     kind: 'quotation',
     quote,
     company,
+    orientation,
     assets: { ...assets },
   });
 }
 
 export async function generateDeclaration194CPDF(
   decl: Declaration194C,
-  company: CompanySettings
+  company: CompanySettings,
+  orientation: PdfOrientation = 'p'
 ): Promise<GeneratedPdfResult> {
-  const assets = await getAssets();
+  const assets = await getAssets(company);
   return runPdfTask({
     kind: 'declaration194c',
     decl,
     company,
+    orientation,
     assets: { ...assets },
   });
 }
@@ -268,11 +326,13 @@ export async function generateTableReportPDF(params: {
   rows: string[][];
   company: CompanySettings;
   fileName: string;
+  orientation?: PdfOrientation;
 }): Promise<GeneratedPdfResult> {
-  const assets = await getAssets();
+  const assets = await getAssets(params.company);
   return runPdfTask({
     kind: 'tableReport',
     ...params,
+    orientation: params.orientation || 'l',
     assets: { ...assets },
   });
 }

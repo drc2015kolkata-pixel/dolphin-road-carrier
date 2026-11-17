@@ -1,4 +1,4 @@
-import React, { useCallback, useEffect, useMemo, useState } from 'react';
+import React, { useCallback, useEffect, useMemo, useRef, useState } from 'react';
 import { User } from 'firebase/auth';
 import {
   Activity,
@@ -7,6 +7,7 @@ import {
   Bell,
   BookOpen,
   Building2,
+  Calendar,
   CalendarClock,
   CheckCircle2,
   DatabaseBackup,
@@ -16,6 +17,7 @@ import {
   GitBranch,
   Info,
   LayoutDashboard,
+  Lock,
   LogOut,
   MapPin,
   Menu,
@@ -25,7 +27,9 @@ import {
   ScanLine,
   Settings,
   ShieldAlert,
+  ShieldCheck,
   Truck,
+  Unlock,
   Users,
   UserX,
   WifiOff,
@@ -63,13 +67,23 @@ import {
   CustomAuthSession,
   loadSavedErpSession,
   loginWithCredentials,
+  resetAdminToDefaultAndLogin,
   subscribeCollection,
   upsertStaffPresence,
 } from './lib/firestoreStore';
-import { daysSinceDate, daysUntilDate, formatDateDDMMYYYY, formatINR } from './lib/formatters';
+import {
+  daysSinceDate,
+  daysUntilDate,
+  formatDateDDMMYYYY,
+  formatINR,
+  matchesSelectedFinancialYear,
+  normalizeFyLabel,
+  PRECREATED_FYS,
+} from './lib/formatters';
 import { uploadBlobToDriveFolder } from './lib/driveBackup';
 import { GeneratedPdfResult } from './lib/pdfEngine';
 import { useOnlineStatus, usePWAInstall } from './hooks/usePWAInstall';
+import { DrcTriangleLogo } from './components/DrcTriangleLogo';
 import { SignInScreen } from './components/SignInScreen';
 import { ConfirmModal } from './components/ConfirmModal';
 import { A4PreviewModal } from './components/A4PreviewModal';
@@ -155,6 +169,22 @@ export default function App() {
   );
   // Master Admin branch filter ('ALL' or specific branch code)
   const [branchFilter, setBranchFilter] = useState<string>('ALL');
+  // Active Financial Year (Pre-created FY 2025-26 & FY 2026-27 + future years)
+  const [selectedFy, setSelectedFy] = useState<string>(() => {
+    try {
+      const saved = localStorage.getItem('drc_selected_fy_v1');
+      return saved ? normalizeFyLabel(saved) : 'FY 2026-27';
+    } catch {
+      return 'FY 2026-27';
+    }
+  });
+
+  // Configurable Security Auto-Lock Overlay
+  const [isScreenLocked, setIsScreenLocked] = useState(false);
+  const [unlockPassword, setUnlockPassword] = useState('');
+  const [unlockError, setUnlockError] = useState<string | null>(null);
+  const [unlocking, setUnlocking] = useState(false);
+  const lastActivityRef = useRef<number>(Date.now());
 
   // Multi-tab Sheet Bar + Sidebar UI
   const [openTabs, setOpenTabs] = useState<SheetTabDef[]>([{ id: 'dashboard', label: 'Dashboard' }]);
@@ -273,7 +303,12 @@ export default function App() {
     activeStaffSession?.displayName ||
     erpSession?.displayName ||
     (isMasterAdmin ? 'Master Admin' : 'Operator');
-  const activeStaffRole = activeStaffSession?.role || erpSession?.role || 'Admin';
+  const activeStaffRole = activeStaffSession?.role || erpSession?.role || 'Staff';
+  const isEffectiveMasterAdmin = useMemo(() => {
+    if (!erpSession) return false;
+    if (activeStaffSession) return activeStaffSession.role === 'Admin';
+    return Boolean(erpSession.isMasterAdmin);
+  }, [erpSession, activeStaffSession]);
 
   // Branch Isolation & Master Admin Filter
   const isBranchLocked = Boolean(
@@ -319,7 +354,46 @@ export default function App() {
     activeTab,
   ]);
 
-  // Scoped datasets based on branch isolation / Master Admin branch filter
+  const companySettings: CompanySettings = useMemo(() => {
+    const custom = settingsDocs.find((d) => d.id === 'company') || settingsDocs[0];
+    if (!custom) {
+      return {
+        ...DEFAULT_COMPANY_SETTINGS,
+        ownerUid: workspaceUid,
+      };
+    }
+    return {
+      ...DEFAULT_COMPANY_SETTINGS,
+      ...custom,
+      ownerUid: custom.ownerUid || workspaceUid,
+    };
+  }, [settingsDocs, workspaceUid]);
+
+  const activeFy = useMemo(
+    () => normalizeFyLabel(selectedFy || companySettings.currentFy || 'FY 2026-27'),
+    [selectedFy, companySettings.currentFy]
+  );
+
+  const fyChoices = useMemo(() => {
+    const set = new Set<string>([
+      ...PRECREATED_FYS,
+      ...(companySettings.availableFys || []).map(normalizeFyLabel),
+      activeFy,
+    ]);
+    return Array.from(set).sort();
+  }, [companySettings.availableFys, activeFy]);
+
+  const handleSelectFy = useCallback((nextFy: string) => {
+    const normalized = normalizeFyLabel(nextFy);
+    setSelectedFy(normalized);
+    try {
+      localStorage.setItem('drc_selected_fy_v1', normalized);
+    } catch {
+      // Ignore storage quota issues
+    }
+  }, []);
+
+  // Scoped datasets based on branch isolation / Master Admin branch filter + Active Financial Year
   const filterByBranch = useCallback(
     <T extends { branchCode?: string }>(list: T[]): T[] => {
       if (effectiveBranchFilter === 'ALL') return list;
@@ -329,19 +403,46 @@ export default function App() {
   );
 
   const visibleConsignments = useMemo(
-    () => filterByBranch(consignments),
-    [consignments, filterByBranch]
+    () =>
+      filterByBranch(consignments).filter((c) =>
+        matchesSelectedFinancialYear(c.financialYear, c.cnDate, activeFy)
+      ),
+    [consignments, filterByBranch, activeFy]
   );
-  const visibleInvoices = useMemo(() => filterByBranch(invoices), [invoices, filterByBranch]);
-  const visibleQuotations = useMemo(() => filterByBranch(quotations), [quotations, filterByBranch]);
-  const visibleLorryHires = useMemo(() => filterByBranch(lorryHires), [lorryHires, filterByBranch]);
+  const visibleInvoices = useMemo(
+    () =>
+      filterByBranch(invoices).filter((inv) =>
+        matchesSelectedFinancialYear(inv.financialYear, inv.invoiceDate, activeFy)
+      ),
+    [invoices, filterByBranch, activeFy]
+  );
+  const visibleQuotations = useMemo(
+    () =>
+      filterByBranch(quotations).filter((q) =>
+        matchesSelectedFinancialYear(q.financialYear, q.quotationDate, activeFy)
+      ),
+    [quotations, filterByBranch, activeFy]
+  );
+  const visibleLorryHires = useMemo(
+    () =>
+      filterByBranch(lorryHires).filter((h) =>
+        matchesSelectedFinancialYear(h.financialYear, h.cnDate, activeFy)
+      ),
+    [lorryHires, filterByBranch, activeFy]
+  );
   const visibleTransactions = useMemo(
-    () => filterByBranch(transactions),
-    [transactions, filterByBranch]
+    () =>
+      filterByBranch(transactions).filter((t) =>
+        matchesSelectedFinancialYear(t.financialYear, t.txDate, activeFy)
+      ),
+    [transactions, filterByBranch, activeFy]
   );
   const visibleDeclarations = useMemo(
-    () => filterByBranch(declarations),
-    [declarations, filterByBranch]
+    () =>
+      filterByBranch(declarations).filter((d) =>
+        matchesSelectedFinancialYear(d.financialYear, d.declarationDate, activeFy)
+      ),
+    [declarations, filterByBranch, activeFy]
   );
 
   // Active Staff Presence & Sorted Activity Log
@@ -361,21 +462,6 @@ export default function App() {
       .sort((a, b) => getTimestampMillis(b.createdAt) - getTimestampMillis(a.createdAt))
       .slice(0, 80);
   }, [activityLogs, effectiveBranchFilter]);
-
-  const companySettings: CompanySettings = useMemo(() => {
-    const custom = settingsDocs.find((d) => d.id === 'company') || settingsDocs[0];
-    if (!custom) {
-      return {
-        ...DEFAULT_COMPANY_SETTINGS,
-        ownerUid: workspaceUid,
-      };
-    }
-    return {
-      ...DEFAULT_COMPANY_SETTINGS,
-      ...custom,
-      ownerUid: custom.ownerUid || workspaceUid,
-    };
-  }, [settingsDocs, workspaceUid]);
 
   // Real-time Red Alert Badges Computation
   const alerts = useMemo(() => {
@@ -409,12 +495,91 @@ export default function App() {
 
   const hasPermission = useCallback(
     (perm: PermissionKey): boolean => {
-      if (!activeStaffSession) return true;
+      if (!erpSession) return false;
+      if (!isEffectiveMasterAdmin && (perm === 'settings' || perm === 'mis')) return false;
+      if (!activeStaffSession) return isEffectiveMasterAdmin;
       if (activeStaffSession.role === 'Admin') return true;
       return (activeStaffSession.permissions || []).includes(perm);
     },
-    [activeStaffSession]
+    [erpSession, isEffectiveMasterAdmin, activeStaffSession]
   );
+
+  // Strict route guard: redirect non-admin staff away from restricted tabs immediately
+  useEffect(() => {
+    if (!erpSession) return;
+    if (activeTab === 'dashboard' || activeTab === 'about') return;
+    if (!hasPermission(activeTab)) {
+      setActiveTab('dashboard');
+    }
+  }, [erpSession, activeTab, hasPermission]);
+
+  // User-configurable Idle Auto-Lock monitor (defaults to 5 minutes; 0 disables)
+  useEffect(() => {
+    if (!erpSession || isScreenLocked) return;
+    const mins = Number(companySettings.autoLockMinutes ?? 5);
+    if (!Number.isFinite(mins) || mins <= 0) return;
+
+    lastActivityRef.current = Date.now();
+    const markActive = () => {
+      lastActivityRef.current = Date.now();
+    };
+    const events: Array<keyof WindowEventMap> = [
+      'mousemove',
+      'keydown',
+      'mousedown',
+      'touchstart',
+      'scroll',
+    ];
+    events.forEach((evt) => window.addEventListener(evt, markActive, { passive: true }));
+
+    const interval = setInterval(() => {
+      if (Date.now() - lastActivityRef.current >= mins * 60_000) {
+        setUnlockPassword('');
+        setUnlockError(null);
+        setIsScreenLocked(true);
+      }
+    }, 10_000);
+
+    return () => {
+      clearInterval(interval);
+      events.forEach((evt) => window.removeEventListener(evt, markActive));
+    };
+  }, [erpSession, isScreenLocked, companySettings.autoLockMinutes]);
+
+  // Optional production right-click / DevTools inspection guard (preserves inputs & Ctrl+V paste)
+  useEffect(() => {
+    if (!erpSession || !import.meta.env.PROD || companySettings.lockSourceInspection === false) {
+      return;
+    }
+    const handleContextMenu = (e: MouseEvent) => {
+      const target = e.target as HTMLElement | null;
+      const tag = target?.tagName?.toUpperCase();
+      if (tag === 'INPUT' || tag === 'TEXTAREA' || tag === 'SELECT' || target?.isContentEditable) {
+        return;
+      }
+      e.preventDefault();
+    };
+    const handleKeyDown = (e: KeyboardEvent) => {
+      const key = e.key.toUpperCase();
+      if (e.key === 'F12') {
+        e.preventDefault();
+        return;
+      }
+      if ((e.ctrlKey || e.metaKey) && e.shiftKey && (key === 'I' || key === 'J' || key === 'C')) {
+        e.preventDefault();
+        return;
+      }
+      if ((e.ctrlKey || e.metaKey) && key === 'U') {
+        e.preventDefault();
+      }
+    };
+    window.addEventListener('contextmenu', handleContextMenu);
+    window.addEventListener('keydown', handleKeyDown);
+    return () => {
+      window.removeEventListener('contextmenu', handleContextMenu);
+      window.removeEventListener('keydown', handleKeyDown);
+    };
+  }, [erpSession, companySettings.lockSourceInspection]);
 
   const openOrSwitchTab = useCallback((tabId: SheetTabId) => {
     setOpenTabs((prev) => {
@@ -444,6 +609,7 @@ export default function App() {
       const session = await loginWithCredentials(userId, password);
       setErpSession(session);
       setActiveStaffSession(session.staffAccount);
+      setIsScreenLocked(false);
       setBranchFilter('ALL');
       setOpenTabs([{ id: 'dashboard', label: 'Dashboard' }]);
       setActiveTab('dashboard');
@@ -451,6 +617,42 @@ export default function App() {
       setAuthError(err instanceof Error ? err.message : 'Login failed.');
     } finally {
       setAuthLoading(false);
+    }
+  };
+
+  const handleRestoreDefaultAdmin = async () => {
+    setAuthLoading(true);
+    setAuthError(null);
+    try {
+      const session = await resetAdminToDefaultAndLogin();
+      setErpSession(session);
+      setActiveStaffSession(null);
+      setIsScreenLocked(false);
+      setBranchFilter('ALL');
+      setOpenTabs([{ id: 'dashboard', label: 'Dashboard' }]);
+      setActiveTab('dashboard');
+    } catch (err) {
+      setAuthError(err instanceof Error ? err.message : 'Failed to reset Admin password.');
+    } finally {
+      setAuthLoading(false);
+    }
+  };
+
+  const handleUnlockScreen = async (e: React.FormEvent) => {
+    e.preventDefault();
+    if (!erpSession || unlocking) return;
+    setUnlocking(true);
+    setUnlockError(null);
+    try {
+      const operatorId = activeStaffSession ? activeStaffSession.staffCode : erpSession.userId;
+      await loginWithCredentials(operatorId, unlockPassword);
+      lastActivityRef.current = Date.now();
+      setUnlockPassword('');
+      setIsScreenLocked(false);
+    } catch (err) {
+      setUnlockError(err instanceof Error ? err.message : 'Incorrect password.');
+    } finally {
+      setUnlocking(false);
     }
   };
 
@@ -564,6 +766,7 @@ export default function App() {
         loading={authLoading}
         error={authError}
         onLogin={handleCustomLogin}
+        onRestoreDefaultAdmin={handleRestoreDefaultAdmin}
       />
     );
   }
@@ -628,11 +831,7 @@ export default function App() {
             >
               <Menu className="w-5 h-5" />
             </button>
-            <img
-              src="/pwa-192x192.png"
-              alt="DRC Logo"
-              className="w-12 h-12 rounded-lg object-contain border border-blue-100 bg-white p-0.5 shrink-0"
-            />
+            <DrcTriangleLogo className="w-11 h-11 shrink-0 drop-shadow-sm" />
             <div>
               <h1 className="text-xl md:text-2xl font-extrabold tracking-tight text-[#0B3B8C] leading-none">
                 DOLPHIN ROAD CARRIERS
@@ -658,6 +857,23 @@ export default function App() {
               </span>
             </div>
 
+            {/* Financial Year Dropdown Selector */}
+            <div className="inline-flex items-center gap-1.5 bg-indigo-50 border border-indigo-200 px-2.5 py-1 rounded-lg text-[11px] font-bold text-indigo-900">
+              <Calendar className="w-3.5 h-3.5 text-indigo-700" />
+              <select
+                value={activeFy}
+                onChange={(e) => handleSelectFy(e.target.value)}
+                className="bg-transparent font-bold text-indigo-900 focus:outline-none cursor-pointer"
+                aria-label="Select Financial Year"
+              >
+                {fyChoices.map((fy) => (
+                  <option key={fy} value={fy}>
+                    {fy}
+                  </option>
+                ))}
+              </select>
+            </div>
+
             {/* Branch Isolation / Master Filter Control */}
             <div className="inline-flex items-center gap-1.5 bg-blue-50 border border-blue-200 px-2.5 py-1 rounded-lg text-[11px] font-bold text-[#0D47A1]">
               <GitBranch className="w-3.5 h-3.5" />
@@ -678,6 +894,19 @@ export default function App() {
                 </select>
               )}
             </div>
+
+            {/* Exit Staff Preview back to Master Admin */}
+            {isMasterAdmin && activeStaffSession && (
+              <button
+                type="button"
+                onClick={() => setActiveStaffSession(null)}
+                className="inline-flex items-center gap-1 px-2.5 py-1.5 rounded-lg bg-amber-500 hover:bg-amber-600 text-white text-[11px] font-bold cursor-pointer whitespace-nowrap"
+                title="Exit Staff Preview and restore Master Admin controls"
+              >
+                <ShieldCheck className="w-3.5 h-3.5" />
+                <span>Restore Admin</span>
+              </button>
+            )}
 
             {/* Live Concurrent Staff & Activity Log Badge */}
             <button
@@ -852,6 +1081,21 @@ export default function App() {
                 </div>
               )}
             </div>
+
+            {/* Manual Instant Screen Lock Button */}
+            <button
+              type="button"
+              onClick={() => {
+                setUnlockPassword('');
+                setUnlockError(null);
+                setIsScreenLocked(true);
+              }}
+              className="inline-flex items-center gap-1 px-2.5 py-1.5 rounded-lg border border-slate-200 bg-white hover:bg-slate-100 text-slate-700 text-xs font-semibold cursor-pointer"
+              title="Lock Session Screen Immediately"
+            >
+              <Lock className="w-3.5 h-3.5 text-amber-700" />
+              <span className="hidden sm:inline">Lock</span>
+            </button>
 
             {/* Refresh App Button */}
             <button
@@ -1045,6 +1289,8 @@ export default function App() {
                 activeStaffCode={activeStaffCode}
                 activeStaffName={activeStaffName}
                 activeBranchCode={activeOperationalBranch}
+                activeFy={activeFy}
+                isMasterAdmin={isEffectiveMasterAdmin}
                 shipmentsCount={visibleConsignments.length}
                 customersCount={
                   parties.filter((p) => p.partyType === 'Customer' || p.partyType === 'Consignor')
@@ -1077,6 +1323,8 @@ export default function App() {
                 activeStaffCode={activeStaffCode}
                 activeStaffName={activeStaffName}
                 activeBranchCode={activeOperationalBranch}
+                activeFy={activeFy}
+                isMasterAdmin={isEffectiveMasterAdmin}
                 consignments={visibleConsignments}
                 parties={parties}
                 vehicles={vehicles}
@@ -1087,6 +1335,7 @@ export default function App() {
                   setPendingCnForInvoice(cn);
                   openOrSwitchTab('billing');
                 }}
+                onSwitchFy={handleSelectFy}
                 onShowConfirm={handleShowConfirm}
               />
             )}
@@ -1097,6 +1346,8 @@ export default function App() {
                 activeStaffCode={activeStaffCode}
                 activeStaffName={activeStaffName}
                 activeBranchCode={activeOperationalBranch}
+                activeFy={activeFy}
+                isMasterAdmin={isEffectiveMasterAdmin}
                 invoices={visibleInvoices}
                 quotations={visibleQuotations}
                 declarations={visibleDeclarations}
@@ -1116,6 +1367,8 @@ export default function App() {
                 activeStaffCode={activeStaffCode}
                 activeStaffName={activeStaffName}
                 activeBranchCode={activeOperationalBranch}
+                activeFy={activeFy}
+                isMasterAdmin={isEffectiveMasterAdmin}
                 lorryHires={visibleLorryHires}
                 consignments={visibleConsignments}
                 driveAccessToken={driveAccessToken}
@@ -1128,6 +1381,8 @@ export default function App() {
               <ReportsMisModule
                 key={`rep_${activeTab}_${reportInitialTab}_${reportFocusNonce}`}
                 ownerUid={workspaceUid}
+                activeFy={activeFy}
+                isMasterAdmin={isEffectiveMasterAdmin}
                 invoices={visibleInvoices}
                 lorryHires={visibleLorryHires}
                 consignments={visibleConsignments}
@@ -1137,7 +1392,7 @@ export default function App() {
                 initialSubTab={
                   activeTab === 'accounts'
                     ? 'accountBook'
-                    : activeTab === 'mis'
+                    : activeTab === 'mis' && isEffectiveMasterAdmin
                     ? 'finalResults'
                     : reportInitialTab
                 }
@@ -1150,8 +1405,9 @@ export default function App() {
               <BackupSettingsModule
                 mode={activeTab === 'backup' ? 'backup' : 'settings'}
                 ownerUid={workspaceUid}
-                isMasterAdmin={isMasterAdmin}
+                isMasterAdmin={isEffectiveMasterAdmin}
                 adminUserId={erpSession.isMasterAdmin ? erpSession.userId : 'admin'}
+                activeFy={activeFy}
                 connectedEmail={connectedEmail}
                 driveAccessToken={driveAccessToken}
                 company={companySettings}
@@ -1172,6 +1428,7 @@ export default function App() {
                 onSwitchGmail={() => handleGoogleDriveConnect(true)}
                 onSwitchStaffSession={setActiveStaffSession}
                 onUpdateAdminSession={(nextSession) => setErpSession(nextSession)}
+                onSelectFy={handleSelectFy}
                 onShowConfirm={handleShowConfirm}
               />
             )}
@@ -1179,11 +1436,7 @@ export default function App() {
             {activeTab === 'about' && (
               <div className="bg-white rounded-xl border border-slate-200 shadow-sm overflow-hidden max-w-4xl">
                 <div className="bg-gradient-to-r from-[#0D47A1] to-[#1976D2] text-white px-5 py-3.5 flex items-center gap-3">
-                  <img
-                    src="/pwa-192x192.png"
-                    alt="DRC Logo"
-                    className="w-10 h-10 rounded bg-white p-0.5 object-contain"
-                  />
+                  <DrcTriangleLogo className="w-10 h-10 shrink-0" />
                   <div>
                     <h2 className="text-base font-extrabold">{companySettings.companyName}</h2>
                     <p className="text-xs text-blue-100">Proprietor: Subhajit Saha · Kolkata Head Office</p>
@@ -1201,15 +1454,29 @@ export default function App() {
                   </div>
                   <div className="space-y-1.5">
                     <p className="font-bold text-slate-900 text-sm">Banking &amp; Official Stamp</p>
-                    <p><span className="font-semibold">Bank:</span> {companySettings.bankName} ({companySettings.bankBranch})</p>
-                    <p><span className="font-semibold">A/C No:</span> <span className="font-mono-num">{companySettings.accountNo}</span></p>
-                    <p><span className="font-semibold">IFSC / SWIFT:</span> <span className="font-mono-num">{companySettings.ifsc} / {companySettings.swift}</span></p>
-                    <img
-                      src="/assets/aistudio/WhatsApp_Image_2026-11-16_at_11.55.22_PM__2__3293db0a.jpeg"
-                      alt="DRC Authorized Stamp"
-                      referrerPolicy="no-referrer"
-                      className="h-20 object-contain mt-2 border border-slate-200 rounded p-1"
-                    />
+                    {isEffectiveMasterAdmin ? (
+                      <>
+                        <p><span className="font-semibold">Bank:</span> {companySettings.bankName} ({companySettings.bankBranch})</p>
+                        <p><span className="font-semibold">A/C No:</span> <span className="font-mono-num">{companySettings.accountNo}</span></p>
+                        <p><span className="font-semibold">IFSC / SWIFT:</span> <span className="font-mono-num">{companySettings.ifsc} / {companySettings.swift}</span></p>
+                        {companySettings.customStampDataUrl ? (
+                          <img
+                            src={companySettings.customStampDataUrl}
+                            alt="DRC Authorized Stamp"
+                            className="h-20 object-contain mt-2 border border-slate-200 rounded p-1"
+                          />
+                        ) : (
+                          <p className="text-[11px] text-slate-500 mt-2">
+                            Upload official company stamp &amp; signature inside Settings.
+                          </p>
+                        )}
+                      </>
+                    ) : (
+                      <div className="p-3 rounded-lg bg-slate-50 border border-slate-200 text-slate-600 flex items-center gap-2 mt-1">
+                        <Lock className="w-4 h-4 text-amber-700 shrink-0" />
+                        <span>Bank Account Details &amp; Digital Stamp are locked to Master Admin only.</span>
+                      </div>
+                    )}
                   </div>
                 </div>
               </div>
@@ -1340,7 +1607,7 @@ export default function App() {
         </div>
       )}
 
-      {/* Live A4 PDF Preview Modal */}
+      {/* Live A4 PDF Preview Modal with Dynamic Portrait / Landscape Rebuild */}
       <A4PreviewModal
         pdf={previewPdf?.pdf || null}
         driveFolder={previewPdf?.folder || 'Bills_Invoices'}
@@ -1348,6 +1615,15 @@ export default function App() {
         onClose={handleClosePreviewPdf}
         onSaveToDrive={handleSavePdfToDrive}
         onConnectDrive={() => handleGoogleDriveConnect(true)}
+        onReplacePdf={(nextPdf) =>
+          setPreviewPdf((prev) => {
+            if (!prev) return null;
+            if (prev.pdf.blobUrl && prev.pdf.blobUrl !== nextPdf.blobUrl) {
+              URL.revokeObjectURL(prev.pdf.blobUrl);
+            }
+            return { ...prev, pdf: nextPdf };
+          })
+        }
       />
 
       {/* Global Confirmation Modal */}
@@ -1365,17 +1641,79 @@ export default function App() {
         }}
       />
 
+      {/* Configurable Auto-Lock Security Overlay */}
+      {isScreenLocked && (
+        <div className="fixed inset-0 z-[100] flex items-center justify-center bg-slate-900/90 backdrop-blur-md p-4 no-print">
+          <div className="w-full max-w-sm bg-white rounded-2xl border border-slate-200 shadow-2xl overflow-hidden">
+            <div className="bg-gradient-to-r from-[#0D47A1] to-[#1565C0] text-white px-5 py-4 flex items-center gap-3">
+              <DrcTriangleLogo className="w-10 h-10 shrink-0" />
+              <div>
+                <h3 className="text-sm font-extrabold">Session Locked</h3>
+                <p className="text-[11px] text-blue-100">
+                  Dolphin Road Carriers &bull; Idle Security Shield
+                </p>
+              </div>
+            </div>
+            <form onSubmit={handleUnlockScreen} className="p-5 space-y-3 text-xs">
+              <div className="p-2.5 rounded-lg bg-slate-50 border border-slate-200 flex items-center justify-between">
+                <span className="text-slate-600">Operator ID:</span>
+                <strong className="font-mono-num text-[#0D47A1]">
+                  {activeStaffSession ? activeStaffSession.staffCode : erpSession.userId}
+                </strong>
+              </div>
+              {unlockError && (
+                <div className="p-2.5 rounded-lg bg-red-50 border border-red-200 text-red-700 font-semibold">
+                  {unlockError}
+                </div>
+              )}
+              <div>
+                <label className="block text-[11px] font-bold text-slate-600 mb-1">
+                  Enter Password to Unlock
+                </label>
+                <input
+                  type="password"
+                  value={unlockPassword}
+                  onChange={(e) => setUnlockPassword(e.target.value)}
+                  placeholder="Enter your password"
+                  autoFocus
+                  required
+                  className="w-full px-3 py-2 rounded-lg border border-slate-300 text-sm focus:outline-none focus:ring-2 focus:ring-blue-500"
+                />
+              </div>
+              <div className="flex items-center justify-between gap-2 pt-1">
+                <button
+                  type="button"
+                  onClick={() => {
+                    clearErpSession();
+                    setIsScreenLocked(false);
+                    setErpSession(null);
+                    setActiveStaffSession(null);
+                  }}
+                  className="px-3 py-2 rounded-lg border border-slate-300 text-slate-700 font-bold hover:bg-slate-100 cursor-pointer"
+                >
+                  Sign Out
+                </button>
+                <button
+                  type="submit"
+                  disabled={unlocking}
+                  className="inline-flex items-center gap-1.5 px-4 py-2 rounded-lg bg-[#0D47A1] hover:bg-[#0A3882] text-white font-bold cursor-pointer disabled:opacity-60"
+                >
+                  <Unlock className="w-3.5 h-3.5" />
+                  <span>{unlocking ? 'Verifying...' : 'Unlock Session'}</span>
+                </button>
+              </div>
+            </form>
+          </div>
+        </div>
+      )}
+
       {/* Android / Windows / iOS Install App Modal */}
       {iosGuideOpen && (
         <div className="fixed inset-0 z-50 flex items-center justify-center bg-slate-900/50 p-4">
           <div className="w-full max-w-md bg-white rounded-xl border border-slate-200 shadow-xl overflow-hidden text-xs">
             <div className="bg-gradient-to-r from-[#0D47A1] to-[#1565C0] text-white px-4 py-3 flex items-center justify-between">
               <div className="flex items-center gap-2">
-                <img
-                  src="/pwa-192x192.png"
-                  alt="DRC Logo"
-                  className="w-7 h-7 rounded bg-white p-0.5 object-contain"
-                />
+                <DrcTriangleLogo className="w-7 h-7 shrink-0" />
                 <h3 className="text-sm font-bold">Install Dolphin Road Carriers ERP</h3>
               </div>
               <button

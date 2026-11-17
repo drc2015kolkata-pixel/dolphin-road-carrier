@@ -12,7 +12,7 @@ import {
   Upload,
 } from 'lucide-react';
 import { ConsignmentNote, LorryHire } from '../types/erp';
-import { formatDateDDMMYYYY, formatINR, makeSafeDocId, todayISO } from '../lib/formatters';
+import { formatDateDDMMYYYY, formatINR, makeSafeDocId, normalizeFyLabel, todayISO } from '../lib/formatters';
 import { scanPODDocument } from '../lib/ocrEngine';
 import { logBranchActivity, removeDocument, upsertDocument } from '../lib/firestoreStore';
 import { uploadBlobToDriveFolder } from '../lib/driveBackup';
@@ -24,6 +24,8 @@ interface LorryHirePodModuleProps {
   activeStaffCode: string;
   activeStaffName: string;
   activeBranchCode: string;
+  activeFy: string;
+  isMasterAdmin: boolean;
   lorryHires: LorryHire[];
   consignments: ConsignmentNote[];
   driveAccessToken: string | null;
@@ -42,6 +44,8 @@ const LorryHirePodModuleInner: React.FC<LorryHirePodModuleProps> = ({
   activeStaffCode,
   activeStaffName,
   activeBranchCode,
+  activeFy,
+  isMasterAdmin,
   lorryHires,
   consignments,
   driveAccessToken,
@@ -119,6 +123,7 @@ const LorryHirePodModuleInner: React.FC<LorryHirePodModuleProps> = ({
         {
           cnNo: cnNo.trim().slice(0, 40),
           cnDate,
+          financialYear: normalizeFyLabel(activeFy),
           truckNo: truckNo.trim().toUpperCase().slice(0, 30),
           ownerName: ownerName.trim().slice(0, 140),
           fromCity: fromCity.trim().slice(0, 120),
@@ -257,6 +262,7 @@ const LorryHirePodModuleInner: React.FC<LorryHirePodModuleProps> = ({
       {
         txCode,
         txDate: payDate,
+        financialYear: normalizeFyLabel(activeFy),
         txType: 'Expense',
         ledgerAccount: 'Lorry Hire Payable A/c',
         partyName: payTarget.ownerName || payTarget.truckNo,
@@ -405,27 +411,34 @@ const LorryHirePodModuleInner: React.FC<LorryHirePodModuleProps> = ({
                   Locked (POD Required)
                 </span>
               )}
-              <button
-                type="button"
-                onClick={() =>
-                  onShowConfirm({
-                    title: `Delete Lorry Hire ${h.cnNo}?`,
-                    description: `Remove hire register record for ${h.truckNo}?`,
-                    confirmLabel: 'Delete',
-                    variant: 'danger',
-                    onConfirm: () => removeDocument('lorry_hires', h.id),
-                  })
-                }
-                className="p-1 rounded hover:bg-red-50 text-slate-500 hover:text-red-600 cursor-pointer"
-              >
-                <Trash2 className="w-3.5 h-3.5" />
-              </button>
+              {!isMasterAdmin && h.balancePaid ? (
+                <span className="inline-flex items-center gap-0.5 px-1.5 py-0.5 rounded bg-slate-100 text-slate-500 text-[10px] font-bold">
+                  <Lock className="w-3 h-3" />
+                  Finalized
+                </span>
+              ) : (
+                <button
+                  type="button"
+                  onClick={() =>
+                    onShowConfirm({
+                      title: `Delete Lorry Hire ${h.cnNo}?`,
+                      description: `Remove hire register record for ${h.truckNo}?`,
+                      confirmLabel: 'Delete',
+                      variant: 'danger',
+                      onConfirm: () => removeDocument('lorry_hires', h.id),
+                    })
+                  }
+                  className="p-1 rounded hover:bg-red-50 text-slate-500 hover:text-red-600 cursor-pointer"
+                >
+                  <Trash2 className="w-3.5 h-3.5" />
+                </button>
+              )}
             </>
           );
         },
       },
     ],
-    [onShowConfirm]
+    [onShowConfirm, isMasterAdmin]
   );
 
   return (

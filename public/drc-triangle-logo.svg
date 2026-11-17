@@ -1,0 +1,108 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 512 512" width="512" height="512" role="img" aria-label="Dolphin Road Carriers DRC Play-Store Triangular Logo">
+  <defs>
+    <linearGradient id="drcBgGrad" x1="15%" y1="5%" x2="85%" y2="95%">
+      <stop offset="0%" stop-color="#1E88E5" />
+      <stop offset="50%" stop-color="#0D47A1" />
+      <stop offset="100%" stop-color="#06215A" />
+    </linearGradient>
+    <linearGradient id="drcInnerGlow" x1="0%" y1="0%" x2="100%" y2="100%">
+      <stop offset="0%" stop-color="#38BDF8" stop-opacity="0.32" />
+      <stop offset="55%" stop-color="#1D4ED8" stop-opacity="0.06" />
+      <stop offset="100%" stop-color="#0284C7" stop-opacity="0.25" />
+    </linearGradient>
+    <linearGradient id="drcGoldTrim" x1="0%" y1="0%" x2="100%" y2="100%">
+      <stop offset="0%" stop-color="#FDE047" />
+      <stop offset="50%" stop-color="#F59E0B" />
+      <stop offset="100%" stop-color="#FEF08A" />
+    </linearGradient>
+    <linearGradient id="dolphinBody" x1="0%" y1="0%" x2="100%" y2="100%">
+      <stop offset="0%" stop-color="#FFFFFF" />
+      <stop offset="70%" stop-color="#E0F2FE" />
+      <stop offset="100%" stop-color="#BAE6FD" />
+    </linearGradient>
+  </defs>
+
+  <!-- Crisp Play-Store Style Rounded Square Backing -->
+  <rect x="0" y="0" width="512" height="512" rx="112" fill="#FFFFFF" />
+
+  <!-- Outer Rounded Play-Store Shield Triangle -->
+  <path
+    d="M 256 32
+       C 276 32, 294 42, 305 60
+       L 468 354
+       C 482 379, 476 412, 452 428
+       C 441 436, 427 440, 412 440
+       L 100 440
+       C 70 440, 46 416, 46 386
+       C 46 375, 50 363, 56 354
+       L 207 60
+       C 218 42, 236 32, 256 32 Z"
+    fill="url(#drcBgGrad)"
+    stroke="url(#drcGoldTrim)"
+    stroke-width="10"
+  />
+
+  <!-- Inner Specular Highlight Triangle -->
+  <path
+    d="M 256 58
+       L 442 370
+       C 448 380, 444 396, 430 404
+       L 82 404
+       C 68 396, 64 380, 70 370 Z"
+    fill="url(#drcInnerGlow)"
+    stroke="#FFFFFF"
+    stroke-opacity="0.3"
+    stroke-width="3"
+  />
+
+  <!-- Dynamic Ocean Wave Speed Arc inside Triangle -->
+  <path
+    d="M 122 302
+       C 178 278, 236 276, 296 292
+       C 330 301, 362 294, 388 281
+       C 358 310, 316 321, 274 312
+       C 218 300, 168 302, 122 302 Z"
+    fill="#38BDF8"
+    opacity="0.92"
+  />
+
+  <!-- Sleek Jumping Dolphin Centered Cleanly Inside Triangle -->
+  <path
+    d="M 190 278
+       C 186 240, 206 196, 248 168
+       C 258 161, 267 156, 275 154
+       C 264 142, 262 128, 269 116
+       C 278 130, 286 144, 292 158
+       C 312 167, 326 184, 332 204
+       C 322 200, 311 200, 301 204
+       C 291 188, 272 184, 254 195
+       C 266 205, 272 217, 270 229
+       C 258 218, 246 212, 234 214
+       C 220 230, 214 250, 216 272
+       C 226 277, 234 287, 238 296
+       C 222 292, 210 286, 200 280
+       C 188 292, 174 297, 158 295
+       C 168 288, 180 283, 190 278 Z"
+    fill="url(#dolphinBody)"
+  />
+
+  <!-- Dolphin Eye Accent -->
+  <circle cx="301" cy="181" r="4.2" fill="#0D47A1" />
+
+  <!-- Bold Triangular-Aligned DRC Typography -->
+  <text
+    x="256"
+    y="386"
+    text-anchor="middle"
+    font-family="'Plus Jakarta Sans', 'Segoe UI', Arial, sans-serif"
+    font-weight="900"
+    font-size="86"
+    letter-spacing="8"
+    fill="#FFFFFF"
+  >
+    DRC
+  </text>
+
+  <!-- Subtle Gold Underline -->
+  <rect x="148" y="400" width="216" height="6" rx="3" fill="url(#drcGoldTrim)" />
+</svg>

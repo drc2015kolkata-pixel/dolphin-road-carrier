@@ -86,10 +86,22 @@ export interface Driver {
   updatedAt?: unknown;
 }
 
+export interface ExtraEwayBill {
+  no: string;
+  date: string;
+}
+
+export interface ExtraTaxInvoice {
+  no: string;
+  date: string;
+  value?: number;
+}
+
 export interface ConsignmentNote {
   id: string;
   cnNo: string;
   cnDate: string;
+  financialYear?: string;
   deliveryOffice?: string;
   consignorName: string;
   consignorAddress?: string;
@@ -112,6 +124,9 @@ export interface ConsignmentNote {
   taxInvDate?: string;
   ewayBillNo?: string;
   ewayBillDate?: string;
+  extraTaxInvoices?: ExtraTaxInvoice[];
+  extraEwayBills?: ExtraEwayBill[];
+  extraVehicles?: string[];
   valueOfGoods?: number;
   truckNo: string;
   fromCity: string;
@@ -123,6 +138,8 @@ export interface ConsignmentNote {
   driverDlNo?: string;
   gstPaidBy?: string;
   insuranceStatus?: string;
+  remarks?: string;
+  scannedLrDataUrl?: string;
   billed: boolean;
   invoiceId?: string;
   branchCode?: string;
@@ -154,6 +171,7 @@ export interface Invoice {
   invoiceNo: string;
   invoiceDate: string;
   dueDate?: string;
+  financialYear?: string;
   partyName: string;
   partyAddress?: string;
   partyGstin?: string;
@@ -186,6 +204,7 @@ export interface Quotation {
   id: string;
   quotationNo: string;
   quotationDate: string;
+  financialYear?: string;
   partyName: string;
   partyAddress?: string;
   partyGstin?: string;
@@ -212,6 +231,7 @@ export interface LorryHire {
   id: string;
   cnNo: string;
   cnDate?: string;
+  financialYear?: string;
   truckNo: string;
   ownerName?: string;
   fromCity?: string;
@@ -238,6 +258,7 @@ export interface TransactionRecord {
   id: string;
   txCode: string;
   txDate: string;
+  financialYear?: string;
   txType: 'Income' | 'Expense';
   ledgerAccount: string;
   partyName: string;
@@ -306,7 +327,13 @@ export interface ActivityLog {
   createdAt?: unknown;
 }
 
+export interface FyOpeningBalanceEntry {
+  amount: number;
+  balanceType: 'Dr' | 'Cr';
+}
+
 export interface CompanySettings {
+  id?: string;
   companyName: string;
   tagline: string;
   address: string;
@@ -322,6 +349,11 @@ export interface CompanySettings {
   ifsc: string;
   swift: string;
   currentFy: string;
+  availableFys?: string[];
+  fyOpeningBalances?: Record<string, Record<string, FyOpeningBalanceEntry>>;
+  customStampDataUrl?: string;
+  autoLockMinutes?: number;
+  lockSourceInspection?: boolean;
   ownerUid: string;
   updatedAt?: unknown;
 }
@@ -362,7 +394,11 @@ export const DEFAULT_COMPANY_SETTINGS: Omit<CompanySettings, 'ownerUid' | 'updat
   accountNo: '0672050014252',
   ifsc: 'PUNB0008020',
   swift: 'PUNBINBBXXX',
-  currentFy: '2026-2027',
+  currentFy: 'FY 2026-27',
+  availableFys: ['FY 2025-26', 'FY 2026-27'],
+  fyOpeningBalances: {},
+  autoLockMinutes: 5,
+  lockSourceInspection: true,
 };
 
 export const SCHEMA_LIMITS = {

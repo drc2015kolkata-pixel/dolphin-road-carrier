@@ -1,6 +1,15 @@
 import React, { useState } from 'react';
-import { CheckCircle2, CloudUpload, Download, Printer, X } from 'lucide-react';
+import {
+  CheckCircle2,
+  CloudUpload,
+  Download,
+  FileText,
+  Printer,
+  RotateCw,
+  X,
+} from 'lucide-react';
 import { GeneratedPdfResult } from '../lib/pdfEngine';
+import { PdfOrientation } from '../lib/pdfBuilders';
 import { DriveFolderName } from '../types/erp';
 
 interface A4PreviewModalProps {
@@ -10,6 +19,7 @@ interface A4PreviewModalProps {
   onClose: () => void;
   onSaveToDrive: (pdf: GeneratedPdfResult, folder: DriveFolderName) => Promise<void>;
   onConnectDrive: () => Promise<void>;
+  onReplacePdf?: (nextPdf: GeneratedPdfResult) => void;
 }
 
 export const A4PreviewModal: React.FC<A4PreviewModalProps> = ({
@@ -19,8 +29,10 @@ export const A4PreviewModal: React.FC<A4PreviewModalProps> = ({
   onClose,
   onSaveToDrive,
   onConnectDrive,
+  onReplacePdf,
 }) => {
   const [uploading, setUploading] = useState(false);
+  const [switchingOrientation, setSwitchingOrientation] = useState(false);
   const [uploadMsg, setUploadMsg] = useState<string | null>(null);
 
   if (!pdf) return null;
@@ -44,6 +56,17 @@ export const A4PreviewModal: React.FC<A4PreviewModalProps> = ({
     }
   };
 
+  const handleOrientationChange = async (next: PdfOrientation) => {
+    if (!pdf.rebuildWithOrientation || !onReplacePdf || pdf.orientation === next) return;
+    setSwitchingOrientation(true);
+    try {
+      const rebuilt = await pdf.rebuildWithOrientation(next);
+      onReplacePdf(rebuilt);
+    } finally {
+      setSwitchingOrientation(false);
+    }
+  };
+
   const handleDriveUpload = async () => {
     setUploading(true);
     setUploadMsg(null);
@@ -64,14 +87,49 @@ export const A4PreviewModal: React.FC<A4PreviewModalProps> = ({
           <div className="min-w-0">
             <h3 className="text-base font-bold truncate">{pdf.title}</h3>
             <p className="text-xs text-blue-100 truncate">
-              {pdf.fileName} · Compressed Size: {pdf.sizeKB} KB · A4 Print Ready
+              {pdf.fileName} · {pdf.sizeKB} KB · A4{' '}
+              {pdf.orientation === 'l' ? 'Landscape (297×210mm)' : 'Portrait (210×297mm)'} · Single Combined PDF
             </p>
           </div>
-          <div className="flex items-center gap-2 shrink-0">
+          <div className="flex flex-wrap items-center gap-2 shrink-0">
+            {/* Dynamic Portrait / Landscape Switcher */}
+            {pdf.rebuildWithOrientation && onReplacePdf && (
+              <div className="inline-flex items-center rounded-lg bg-white/15 p-0.5 text-[11px] font-bold">
+                <button
+                  type="button"
+                  disabled={switchingOrientation}
+                  onClick={() => handleOrientationChange('p')}
+                  className={`inline-flex items-center gap-1 px-2.5 py-1 rounded-md transition-colors cursor-pointer ${
+                    pdf.orientation === 'p'
+                      ? 'bg-white text-[#0D47A1]'
+                      : 'text-white hover:bg-white/15'
+                  }`}
+                  title="Switch to A4 Portrait"
+                >
+                  <FileText className="w-3 h-3" />
+                  Portrait
+                </button>
+                <button
+                  type="button"
+                  disabled={switchingOrientation}
+                  onClick={() => handleOrientationChange('l')}
+                  className={`inline-flex items-center gap-1 px-2.5 py-1 rounded-md transition-colors cursor-pointer ${
+                    pdf.orientation === 'l'
+                      ? 'bg-white text-[#0D47A1]'
+                      : 'text-white hover:bg-white/15'
+                  }`}
+                  title="Switch to A4 Landscape"
+                >
+                  <RotateCw className={`w-3 h-3 ${switchingOrientation ? 'animate-spin' : ''}`} />
+                  Landscape
+                </button>
+              </div>
+            )}
+
             <button
               type="button"
               onClick={handlePrint}
-              className="inline-flex items-center gap-1.5 px-3 py-1.5 rounded-lg bg-white/15 hover:bg-white/25 text-white text-xs font-semibold transition-colors whitespace-nowrap"
+              className="inline-flex items-center gap-1.5 px-3 py-1.5 rounded-lg bg-white/15 hover:bg-white/25 text-white text-xs font-semibold transition-colors whitespace-nowrap cursor-pointer"
             >
               <Printer className="w-3.5 h-3.5" />
               Print A4
@@ -79,17 +137,17 @@ export const A4PreviewModal: React.FC<A4PreviewModalProps> = ({
             <button
               type="button"
               onClick={handleDownload}
-              className="inline-flex items-center gap-1.5 px-3 py-1.5 rounded-lg bg-emerald-600 hover:bg-emerald-700 text-white text-xs font-semibold transition-colors whitespace-nowrap"
+              className="inline-flex items-center gap-1.5 px-3 py-1.5 rounded-lg bg-emerald-600 hover:bg-emerald-700 text-white text-xs font-semibold transition-colors whitespace-nowrap cursor-pointer"
             >
               <Download className="w-3.5 h-3.5" />
-              Save PDF
+              Download PDF
             </button>
             {hasDriveToken ? (
               <button
                 type="button"
                 disabled={uploading}
                 onClick={handleDriveUpload}
-                className="inline-flex items-center gap-1.5 px-3 py-1.5 rounded-lg bg-orange-500 hover:bg-orange-600 disabled:opacity-60 text-white text-xs font-semibold transition-colors whitespace-nowrap"
+                className="inline-flex items-center gap-1.5 px-3 py-1.5 rounded-lg bg-orange-500 hover:bg-orange-600 disabled:opacity-60 text-white text-xs font-semibold transition-colors whitespace-nowrap cursor-pointer"
               >
                 <CloudUpload className="w-3.5 h-3.5" />
                 {uploading ? 'Uploading...' : `Drive: ${driveFolder}`}
@@ -98,7 +156,7 @@ export const A4PreviewModal: React.FC<A4PreviewModalProps> = ({
               <button
                 type="button"
                 onClick={onConnectDrive}
-                className="inline-flex items-center gap-1.5 px-3 py-1.5 rounded-lg bg-purple-600 hover:bg-purple-700 text-white text-xs font-semibold transition-colors whitespace-nowrap"
+                className="inline-flex items-center gap-1.5 px-3 py-1.5 rounded-lg bg-purple-600 hover:bg-purple-700 text-white text-xs font-semibold transition-colors whitespace-nowrap cursor-pointer"
               >
                 <CloudUpload className="w-3.5 h-3.5" />
                 Connect Drive
@@ -107,7 +165,7 @@ export const A4PreviewModal: React.FC<A4PreviewModalProps> = ({
             <button
               type="button"
               onClick={onClose}
-              className="p-1.5 rounded-lg hover:bg-white/20 text-white transition-colors"
+              className="p-1.5 rounded-lg hover:bg-white/20 text-white transition-colors cursor-pointer"
               aria-label="Close preview"
             >
               <X className="w-4 h-4" />

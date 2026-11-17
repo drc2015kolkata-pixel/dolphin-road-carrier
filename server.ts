@@ -1,4 +1,4 @@
-import express, { Response } from 'express';
+import express, { type Response } from 'express';
 import fs from 'fs';
 import fsp from 'fs/promises';
 import path from 'path';
@@ -103,7 +103,11 @@ const DEFAULT_COMPANY_SETTINGS_SERVER = {
   accountNo: '0672050014252',
   ifsc: 'PUNB0008020',
   swift: 'PUNBINBBXXX',
-  currentFy: '2026-2027',
+  currentFy: 'FY 2026-27',
+  availableFys: ['FY 2025-26', 'FY 2026-27'],
+  fyOpeningBalances: {},
+  autoLockMinutes: 5,
+  lockSourceInspection: true,
   ownerUid: 'drc_master_workspace',
 };
 
@@ -334,7 +338,7 @@ app.post('/api/erp/auth/login', (req, res) => {
   const cleanPassword = String(password || '').trim();
 
   if (!cleanUserId || !cleanPassword) {
-    res.status(400).json({ error: 'Please enter both User ID and Password.' });
+    res.status(400).json({ erpAuth: true, error: 'Please enter both User ID and Password.' });
     return;
   }
 
@@ -343,6 +347,7 @@ app.post('/api/erp/auth/login', (req, res) => {
   if (cleanUserId.toLowerCase() === adminCreds.userId.toLowerCase()) {
     if (cleanPassword !== adminCreds.password) {
       res.status(401).json({
+        erpAuth: true,
         error:
           adminCreds.password === 'admin123'
             ? 'Invalid password for Master Admin (default: admin123).'
@@ -352,6 +357,7 @@ app.post('/api/erp/auth/login', (req, res) => {
     }
     res.json({
       ok: true,
+      erpAuth: true,
       session: {
         userId: adminCreds.userId,
         displayName: 'Master Admin',
@@ -372,22 +378,32 @@ app.post('/api/erp/auth/login', (req, res) => {
   );
 
   if (!matchedStaff) {
-    res.status(401).json({ error: `User ID "${cleanUserId}" not found. Check Settings or contact Admin.` });
+    res.status(401).json({
+      erpAuth: true,
+      error: `User ID "${cleanUserId}" not found. Check Settings or contact Admin.`,
+    });
     return;
   }
 
   if (matchedStaff.active === false) {
-    res.status(403).json({ error: `User ID "${matchedStaff.staffCode}" is currently disabled.` });
+    res.status(403).json({
+      erpAuth: true,
+      error: `User ID "${matchedStaff.staffCode}" is currently disabled.`,
+    });
     return;
   }
 
   if (String(matchedStaff.pinHash || '') !== cleanPassword) {
-    res.status(401).json({ error: 'Incorrect password for this Staff User ID.' });
+    res.status(401).json({
+      erpAuth: true,
+      error: 'Incorrect password for this Staff User ID.',
+    });
     return;
   }
 
   res.json({
     ok: true,
+    erpAuth: true,
     session: {
       userId: String(matchedStaff.staffCode),
       displayName: String(matchedStaff.displayName || matchedStaff.staffCode),
@@ -399,6 +415,28 @@ app.post('/api/erp/auth/login', (req, res) => {
       loggedInAt: Date.now(),
     },
   });
+});
+
+app.post('/api/erp/auth/reset-admin-default', async (_req, res) => {
+  const session = await runAtomicMutation(async () => {
+    erpDb.adminCredentials = {
+      userId: 'admin',
+      password: 'admin123',
+    };
+    await queueDiskPersist();
+    return {
+      userId: 'admin',
+      displayName: 'Master Admin',
+      role: 'Admin',
+      isMasterAdmin: true,
+      branchCode: 'ALL',
+      workspaceUid: 'drc_master_workspace',
+      staffAccount: null,
+      loggedInAt: Date.now(),
+    };
+  });
+
+  res.json({ ok: true, erpAuth: true, session });
 });
 
 app.post('/api/erp/auth/update-admin', async (req, res) => {
@@ -559,6 +597,46 @@ app.post('/api/erp/upsert', async (req, res) => {
   } catch (err) {
     res.status(400).json({ error: err instanceof Error ? err.message : 'Upsert failed' });
   }
+});
+
+app.post('/api/erp/bulk-upsert', async (req, res) => {
+  const { collection: colName, items } = (req.body || {}) as {
+    collection?: string;
+    items?: Array<Record<string, unknown>>;
+  };
+
+  const col = getCollectionSafe(colName);
+  if (!col || !Array.isArray(items)) {
+    res.status(400).json({ error: 'Invalid bulk import payload.' });
+    return;
+  }
+
+  const importedCount = await runAtomicMutation(async () => {
+    const map = new Map(erpDb[col].map((d) => [d.id, d]));
+    const now = Date.now();
+    let count = 0;
+
+    for (const rawItem of items) {
+      if (!rawItem || typeof rawItem !== 'object') continue;
+      const safeId = sanitizeSafeId(String(rawItem.id || makeDocId(col.slice(0, 4))));
+      const existing = map.get(safeId);
+      map.set(safeId, {
+        ...(existing || {}),
+        ...rawItem,
+        id: safeId,
+        createdAt: existing?.createdAt ?? rawItem.createdAt ?? now,
+        updatedAt: now,
+      });
+      count++;
+    }
+
+    erpDb[col] = Array.from(map.values());
+    await queueDiskPersist();
+    broadcastCollections([col]);
+    return count;
+  });
+
+  res.json({ ok: true, count: importedCount });
 });
 
 app.post('/api/erp/delete', async (req, res) => {

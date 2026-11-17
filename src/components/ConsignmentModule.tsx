@@ -1,8 +1,12 @@
-import React, { useMemo, useRef, useState } from 'react';
+import React, { useCallback, useEffect, useMemo, useRef, useState } from 'react';
 import {
-  Camera,
+  AlertTriangle,
   CheckCircle2,
+  ClipboardPaste,
+  Edit3,
   FilePlus2,
+  Lock,
+  Plus,
   Printer,
   Save,
   ScanLine,
@@ -15,10 +19,20 @@ import {
   ConsignmentNote,
   Driver,
   DriveFolderName,
+  ExtraEwayBill,
+  ExtraTaxInvoice,
   Party,
   Vehicle,
 } from '../types/erp';
-import { formatDateDDMMYYYY, formatINR, makeSafeDocId, todayISO } from '../lib/formatters';
+import {
+  formatDateDDMMYYYY,
+  formatINR,
+  getFyShortCode,
+  makeSafeDocId,
+  normalizeFyLabel,
+  resolveFinancialYearFromDate,
+  todayISO,
+} from '../lib/formatters';
 import { scanPhysicalLR } from '../lib/ocrEngine';
 import {
   logBranchActivity,
@@ -35,6 +49,8 @@ interface ConsignmentModuleProps {
   activeStaffCode: string;
   activeStaffName: string;
   activeBranchCode: string;
+  activeFy: string;
+  isMasterAdmin: boolean;
   consignments: ConsignmentNote[];
   parties: Party[];
   vehicles: Vehicle[];
@@ -42,6 +58,7 @@ interface ConsignmentModuleProps {
   company: CompanySettings;
   onPreviewPdf: (pdf: GeneratedPdfResult, folder: DriveFolderName) => void;
   onSendCnToInvoice: (cn: ConsignmentNote) => void;
+  onSwitchFy: (fy: string) => void;
   onShowConfirm: (opts: {
     title: string;
     description: string;
@@ -56,6 +73,8 @@ const ConsignmentModuleInner: React.FC<ConsignmentModuleProps> = ({
   activeStaffCode,
   activeStaffName,
   activeBranchCode,
+  activeFy,
+  isMasterAdmin,
   consignments,
   parties,
   vehicles,
@@ -63,14 +82,26 @@ const ConsignmentModuleInner: React.FC<ConsignmentModuleProps> = ({
   company,
   onPreviewPdf,
   onSendCnToInvoice,
+  onSwitchFy,
   onShowConfirm,
 }) => {
   const fileInputRef = useRef<HTMLInputElement | null>(null);
   const cameraInputRef = useRef<HTMLInputElement | null>(null);
+  const fyShort = getFyShortCode(activeFy);
+  const branchPrefix =
+    activeBranchCode && activeBranchCode !== 'ALL' ? activeBranchCode.slice(0, 3) : 'KOL';
+
+  const isMobileDevice = useMemo(
+    () =>
+      typeof navigator !== 'undefined' &&
+      /Android|iPhone|iPad|iPod/i.test(navigator.userAgent || ''),
+    []
+  );
 
   const [editingId, setEditingId] = useState<string | null>(null);
+  const [editingBilled, setEditingBilled] = useState(false);
   const [autoAtomicCn, setAutoAtomicCn] = useState(true);
-  const [cnNo, setCnNo] = useState(`KOL-${147 + consignments.length}/26-27`);
+  const [cnNo, setCnNo] = useState(`${branchPrefix}-${147 + consignments.length}/${fyShort}`);
   const [cnDate, setCnDate] = useState(todayISO());
   const [deliveryOffice, setDeliveryOffice] = useState('');
   const [consignorName, setConsignorName] = useState('');
@@ -94,6 +125,9 @@ const ConsignmentModuleInner: React.FC<ConsignmentModuleProps> = ({
   const [taxInvDate, setTaxInvDate] = useState('');
   const [ewayBillNo, setEwayBillNo] = useState('');
   const [ewayBillDate, setEwayBillDate] = useState('');
+  const [extraTaxInvoices, setExtraTaxInvoices] = useState<ExtraTaxInvoice[]>([]);
+  const [extraEwayBills, setExtraEwayBills] = useState<ExtraEwayBill[]>([]);
+  const [extraVehicles, setExtraVehicles] = useState<string[]>([]);
   const [valueOfGoods, setValueOfGoods] = useState('0');
   const [truckNo, setTruckNo] = useState('');
   const [fromCity, setFromCity] = useState('KOLKATA');
@@ -103,20 +137,32 @@ const ConsignmentModuleInner: React.FC<ConsignmentModuleProps> = ({
   const [ownerName, setOwnerName] = useState('');
   const [driverName, setDriverName] = useState('');
   const [driverDlNo, setDriverDlNo] = useState('');
-  const [gstPaidBy, setGstPaidBy] = useState('Consignee (RCM)');
-  const [insuranceStatus, setInsuranceStatus] = useState('The Customer has not insured the consignment');
+  const [gstPaidBy] = useState('Consignee (RCM)');
+  const [insuranceStatus] = useState('The Customer has not insured the consignment');
+  const [remarks, setRemarks] = useState('');
+  const [scannedLrDataUrl, setScannedLrDataUrl] = useState('');
 
   const [ocrStatus, setOcrStatus] = useState<string | null>(null);
   const [ocrError, setOcrError] = useState<string | null>(null);
+  const [ocrFyMismatch, setOcrFyMismatch] = useState<{
+    detectedFy: string;
+    detectedDate: string;
+  } | null>(null);
   const [saving, setSaving] = useState(false);
   const [search, setSearch] = useState('');
   const debouncedSearch = useDebouncedValue(search, 200);
+
+  useEffect(() => {
+    if (!editingId) {
+      setCnNo(`${branchPrefix}-${147 + consignments.length}/${fyShort}`);
+    }
+  }, [activeFy, branchPrefix, consignments.length, editingId, fyShort]);
 
   const indexedCNs = useMemo(() => {
     const sorted = [...consignments].sort((a, b) => (b.cnDate || '').localeCompare(a.cnDate || ''));
     return sorted.map((c) => ({
       item: c,
-      haystack: `${c.cnNo || ''} ${c.consignorName || ''} ${c.consigneeName || ''} ${c.truckNo || ''} ${c.toCity || ''} ${c.branchCode || ''}`.toLowerCase(),
+      haystack: `${c.cnNo || ''} ${c.consignorName || ''} ${c.consigneeName || ''} ${c.truckNo || ''} ${c.toCity || ''} ${c.branchCode || ''} ${(c.extraVehicles || []).join(' ')}`.toLowerCase(),
     }));
   }, [consignments]);
 
@@ -126,46 +172,93 @@ const ConsignmentModuleInner: React.FC<ConsignmentModuleProps> = ({
     return indexedCNs.filter((x) => x.haystack.includes(q)).map((x) => x.item);
   }, [indexedCNs, debouncedSearch]);
 
-  const handleOCRFile = async (file: File | undefined) => {
-    if (!file) return;
-    setOcrError(null);
-    setOcrStatus('Starting background OCR scan...');
-    try {
-      const { result } = await scanPhysicalLR(file, (msg) => setOcrStatus(msg));
-      if (result.cnNo) {
-        setCnNo(result.cnNo);
-        setAutoAtomicCn(false);
+  const handleOCRFile = useCallback(
+    async (file: File | undefined) => {
+      if (!file) return;
+      setOcrError(null);
+      setOcrFyMismatch(null);
+      setOcrStatus('Scanning document in background worker (OCR + AI extraction)...');
+      try {
+        const { result, compressedDataUrl } = await scanPhysicalLR(file, (msg) =>
+          setOcrStatus(msg)
+        );
+        if (compressedDataUrl) {
+          setScannedLrDataUrl(compressedDataUrl.slice(0, 350000));
+        }
+        if (result.cnNo) {
+          setCnNo(result.cnNo);
+          setAutoAtomicCn(false);
+        }
+        if (result.cnDate) {
+          setCnDate(result.cnDate);
+          const detectedFy = resolveFinancialYearFromDate(result.cnDate);
+          if (normalizeFyLabel(detectedFy) !== normalizeFyLabel(activeFy)) {
+            setOcrFyMismatch({ detectedFy, detectedDate: result.cnDate });
+          }
+        }
+        if (result.consignorName) setConsignorName(result.consignorName);
+        if (result.consignorAddress) setConsignorAddress(result.consignorAddress);
+        if (result.consignorGstin) setConsignorGstin(result.consignorGstin);
+        if (result.consigneeName) setConsigneeName(result.consigneeName);
+        if (result.consigneeAddress) setConsigneeAddress(result.consigneeAddress);
+        if (result.consigneeGstin) setConsigneeGstin(result.consigneeGstin);
+        if (result.packages) setPackages(result.packages);
+        if (result.particulars) setParticulars(result.particulars);
+        if (result.nettWeight) setNettWeight(String(result.nettWeight));
+        if (result.grossWeight) setGrossWeight(String(result.grossWeight));
+        if (result.totalFreight) {
+          setTotalFreight(String(result.totalFreight));
+          setToPayAmount(String(result.totalFreight));
+        }
+        if (result.truckNo) setTruckNo(result.truckNo);
+        if (result.fromCity) setFromCity(result.fromCity);
+        if (result.toCity) setToCity(result.toCity);
+        if (result.ewayBillNo) setEwayBillNo(result.ewayBillNo);
+        if (result.ewayBillDate) setEwayBillDate(result.ewayBillDate);
+        if (result.taxInvNo) setTaxInvNo(result.taxInvNo);
+        if (result.taxInvDate) setTaxInvDate(result.taxInvDate);
+        if (result.valueOfGoods) setValueOfGoods(String(result.valueOfGoods));
+        if (result.ownerName) setOwnerName(result.ownerName);
+        if (result.driverName) setDriverName(result.driverName);
+        if (result.driverDlNo) setDriverDlNo(result.driverDlNo);
+        setOcrStatus(
+          result.confidenceNote ||
+            'Scanned values auto-filled below — every field remains 100% editable before saving.'
+        );
+      } catch (err) {
+        setOcrError(err instanceof Error ? err.message : 'Document scan failed');
+        setOcrStatus(null);
       }
-      if (result.cnDate) setCnDate(result.cnDate);
-      if (result.consignorName) setConsignorName(result.consignorName);
-      if (result.consignorAddress) setConsignorAddress(result.consignorAddress);
-      if (result.consignorGstin) setConsignorGstin(result.consignorGstin);
-      if (result.consigneeName) setConsigneeName(result.consigneeName);
-      if (result.consigneeAddress) setConsigneeAddress(result.consigneeAddress);
-      if (result.consigneeGstin) setConsigneeGstin(result.consigneeGstin);
-      if (result.packages) setPackages(result.packages);
-      if (result.particulars) setParticulars(result.particulars);
-      if (result.nettWeight) setNettWeight(String(result.nettWeight));
-      if (result.grossWeight) setGrossWeight(String(result.grossWeight));
-      if (result.totalFreight) {
-        setTotalFreight(String(result.totalFreight));
-        setToPayAmount(String(result.totalFreight));
+    },
+    [activeFy]
+  );
+
+  // Ctrl + V clipboard image paste support anywhere in the LR workspace
+  useEffect(() => {
+    const onPaste = (e: ClipboardEvent) => {
+      const items = e.clipboardData?.items;
+      if (!items) return;
+      for (let i = 0; i < items.length; i += 1) {
+        const item = items[i];
+        if (item.type.startsWith('image/')) {
+          const blobFile = item.getAsFile();
+          if (blobFile) {
+            e.preventDefault();
+            void handleOCRFile(blobFile);
+            return;
+          }
+        }
       }
-      if (result.truckNo) setTruckNo(result.truckNo);
-      if (result.fromCity) setFromCity(result.fromCity);
-      if (result.toCity) setToCity(result.toCity);
-      if (result.ewayBillNo) setEwayBillNo(result.ewayBillNo);
-      if (result.ewayBillDate) setEwayBillDate(result.ewayBillDate);
-      if (result.taxInvNo) setTaxInvNo(result.taxInvNo);
-      if (result.taxInvDate) setTaxInvDate(result.taxInvDate);
-      if (result.valueOfGoods) setValueOfGoods(String(result.valueOfGoods));
-      if (result.ownerName) setOwnerName(result.ownerName);
-      if (result.driverName) setDriverName(result.driverName);
-      if (result.driverDlNo) setDriverDlNo(result.driverDlNo);
-      setOcrStatus(result.confidenceNote || 'LR fields extracted cleanly.');
-    } catch (err) {
-      setOcrError(err instanceof Error ? err.message : 'OCR scan failed');
-      setOcrStatus(null);
+    };
+    window.addEventListener('paste', onPaste);
+    return () => window.removeEventListener('paste', onPaste);
+  }, [handleOCRFile]);
+
+  const handleOneTapScanClick = () => {
+    if (isMobileDevice && cameraInputRef.current) {
+      cameraInputRef.current.click();
+    } else if (fileInputRef.current) {
+      fileInputRef.current.click();
     }
   };
 
@@ -207,8 +300,9 @@ const ConsignmentModuleInner: React.FC<ConsignmentModuleProps> = ({
 
   const resetForm = () => {
     setEditingId(null);
+    setEditingBilled(false);
     setAutoAtomicCn(true);
-    setCnNo(`KOL-${147 + consignments.length}/26-27`);
+    setCnNo(`${branchPrefix}-${147 + consignments.length}/${fyShort}`);
     setCnDate(todayISO());
     setDeliveryOffice('');
     setConsignorName('');
@@ -232,6 +326,9 @@ const ConsignmentModuleInner: React.FC<ConsignmentModuleProps> = ({
     setTaxInvDate('');
     setEwayBillNo('');
     setEwayBillDate('');
+    setExtraTaxInvoices([]);
+    setExtraEwayBills([]);
+    setExtraVehicles([]);
     setValueOfGoods('0');
     setTruckNo('');
     setFromCity('KOLKATA');
@@ -241,11 +338,61 @@ const ConsignmentModuleInner: React.FC<ConsignmentModuleProps> = ({
     setOwnerName('');
     setDriverName('');
     setDriverDlNo('');
+    setRemarks('');
+    setScannedLrDataUrl('');
+    setOcrFyMismatch(null);
+  };
+
+  const handleLoadForEdit = (cn: ConsignmentNote) => {
+    if (!isMasterAdmin && cn.billed) return;
+    setEditingId(cn.id);
+    setEditingBilled(Boolean(cn.billed));
+    setAutoAtomicCn(false);
+    setCnNo(cn.cnNo);
+    setCnDate(cn.cnDate || todayISO());
+    setDeliveryOffice(cn.deliveryOffice || '');
+    setConsignorName(cn.consignorName || '');
+    setConsignorAddress(cn.consignorAddress || '');
+    setConsignorGstin(cn.consignorGstin || '');
+    setConsigneeName(cn.consigneeName || '');
+    setConsigneeAddress(cn.consigneeAddress || '');
+    setConsigneeGstin(cn.consigneeGstin || '');
+    setPackages(cn.packages || '');
+    setParticulars(cn.particulars || '');
+    setNettWeight(String(cn.nettWeight ?? 0));
+    setGrossWeight(String(cn.grossWeight ?? 0));
+    setLoadingCharge(String(cn.loadingCharge ?? 0));
+    setUnloadingCharge(String(cn.unloadingCharge ?? 0));
+    setReturnLorryCharge(String(cn.returnLorryCharge ?? 0));
+    setSttCharge(String(cn.sttCharge ?? 0));
+    setTotalFreight(String(cn.totalFreight ?? 0));
+    setPaidAmount(String(cn.paidAmount ?? 0));
+    setToPayAmount(String(cn.toPayAmount ?? 0));
+    setTaxInvNo(cn.taxInvNo || '');
+    setTaxInvDate(cn.taxInvDate || '');
+    setEwayBillNo(cn.ewayBillNo || '');
+    setEwayBillDate(cn.ewayBillDate || '');
+    setExtraTaxInvoices(cn.extraTaxInvoices || []);
+    setExtraEwayBills(cn.extraEwayBills || []);
+    setExtraVehicles(cn.extraVehicles || []);
+    setValueOfGoods(String(cn.valueOfGoods ?? 0));
+    setTruckNo(cn.truckNo || '');
+    setFromCity(cn.fromCity || 'KOLKATA');
+    setToCity(cn.toCity || '');
+    setEngineNo(cn.engineNo || '');
+    setChassisNo(cn.chassisNo || '');
+    setOwnerName(cn.ownerName || '');
+    setDriverName(cn.driverName || '');
+    setDriverDlNo(cn.driverDlNo || '');
+    setRemarks(cn.remarks || '');
+    setScannedLrDataUrl(cn.scannedLrDataUrl || '');
+    window.scrollTo({ top: 0, behavior: 'smooth' });
   };
 
   const buildPayload = (resolvedCnNo?: string): Omit<ConsignmentNote, 'id' | 'createdAt' | 'updatedAt'> => ({
     cnNo: (resolvedCnNo || cnNo).trim().slice(0, 40),
     cnDate,
+    financialYear: normalizeFyLabel(activeFy),
     deliveryOffice: deliveryOffice.trim().slice(0, 200),
     consignorName: consignorName.trim().slice(0, 180),
     consignorAddress: consignorAddress.trim().slice(0, 350),
@@ -268,6 +415,13 @@ const ConsignmentModuleInner: React.FC<ConsignmentModuleProps> = ({
     taxInvDate: taxInvDate.trim().slice(0, 20),
     ewayBillNo: ewayBillNo.trim().slice(0, 60),
     ewayBillDate: ewayBillDate.trim().slice(0, 20),
+    extraTaxInvoices: extraTaxInvoices
+      .filter((x) => x.no.trim())
+      .map((x) => ({ no: x.no.trim(), date: x.date.trim(), value: Number(x.value) || 0 })),
+    extraEwayBills: extraEwayBills
+      .filter((x) => x.no.trim())
+      .map((x) => ({ no: x.no.trim(), date: x.date.trim() })),
+    extraVehicles: extraVehicles.map((v) => v.trim().toUpperCase()).filter(Boolean),
     valueOfGoods: Number(valueOfGoods) || 0,
     truckNo: truckNo.trim().toUpperCase().slice(0, 30),
     fromCity: fromCity.trim().slice(0, 120),
@@ -279,7 +433,9 @@ const ConsignmentModuleInner: React.FC<ConsignmentModuleProps> = ({
     driverDlNo: driverDlNo.trim().slice(0, 40),
     gstPaidBy: gstPaidBy.slice(0, 40),
     insuranceStatus: insuranceStatus.slice(0, 80),
-    billed: false,
+    remarks: remarks.trim().slice(0, 1200),
+    scannedLrDataUrl: scannedLrDataUrl || '',
+    billed: editingBilled,
     invoiceId: '',
     branchCode: activeBranchCode,
     createdByStaff: activeStaffCode,
@@ -295,7 +451,7 @@ const ConsignmentModuleInner: React.FC<ConsignmentModuleProps> = ({
       if (!editingId && autoAtomicCn) {
         const { formattedNo } = await reserveNextSerialNumber({
           type: 'cn',
-          fy: company.currentFy,
+          fy: activeFy,
           branchCode: activeBranchCode,
           staffCode: activeStaffCode,
           ownerUid,
@@ -371,7 +527,16 @@ const ConsignmentModuleInner: React.FC<ConsignmentModuleProps> = ({
         key: 'truckNo',
         header: 'Truck No',
         cellClassName: 'font-mono-num font-semibold whitespace-nowrap',
-        render: (cn) => cn.truckNo,
+        render: (cn) => (
+          <span>
+            {cn.truckNo}
+            {cn.extraVehicles && cn.extraVehicles.length > 0 && (
+              <span className="ml-1 px-1 py-0.2 rounded bg-blue-50 text-blue-700 text-[10px]">
+                +{cn.extraVehicles.length}
+              </span>
+            )}
+          </span>
+        ),
       },
       {
         key: 'totalFreight',
@@ -386,7 +551,7 @@ const ConsignmentModuleInner: React.FC<ConsignmentModuleProps> = ({
         cellClassName: 'whitespace-nowrap',
         render: (cn) => (
           <span className={`font-semibold ${cn.billed ? 'text-emerald-700' : 'text-orange-700'}`}>
-            {cn.billed ? 'Billed' : 'Unbilled'}
+            {cn.billed ? 'Billed (Locked)' : 'Unbilled'}
           </span>
         ),
       },
@@ -395,106 +560,163 @@ const ConsignmentModuleInner: React.FC<ConsignmentModuleProps> = ({
         header: 'Actions',
         align: 'right',
         cellClassName: 'whitespace-nowrap space-x-1.5',
-        render: (cn) => (
-          <>
-            <button
-              type="button"
-              onClick={async () => {
-                const pdf = await generateLR3CopyPDF(cn, company);
-                onPreviewPdf(pdf, 'LR Copy');
-              }}
-              className="inline-flex items-center gap-1 px-2 py-1 rounded bg-blue-50 hover:bg-blue-100 text-blue-800 font-semibold cursor-pointer"
-              title="Print 3-Copy LR"
-            >
-              <Printer className="w-3 h-3" />
-              3-Copy
-            </button>
-            <button
-              type="button"
-              onClick={() => onSendCnToInvoice(cn)}
-              className="inline-flex items-center gap-1 px-2 py-1 rounded bg-emerald-50 hover:bg-emerald-100 text-emerald-800 font-semibold cursor-pointer"
-              title="Auto-paste into Tax Invoice"
-            >
-              <FilePlus2 className="w-3 h-3" />
-              Bill
-            </button>
-            <button
-              type="button"
-              onClick={() => {
-                onShowConfirm({
-                  title: `Delete Consignment ${cn.cnNo}?`,
-                  description: `Delete LR ${cn.cnNo} (${cn.consignorName}) permanently?`,
-                  confirmLabel: 'Delete LR',
-                  variant: 'danger',
-                  onConfirm: () => removeDocument('consignments', cn.id),
-                });
-              }}
-              className="p-1 rounded hover:bg-red-50 text-slate-500 hover:text-red-600 cursor-pointer"
-              title="Delete"
-            >
-              <Trash2 className="w-3.5 h-3.5" />
-            </button>
-          </>
-        ),
+        render: (cn) => {
+          const staffLocked = !isMasterAdmin && cn.billed;
+          return (
+            <>
+              <button
+                type="button"
+                onClick={async () => {
+                  const pdf = await generateLR3CopyPDF(cn, company);
+                  onPreviewPdf(pdf, 'LR Copy');
+                }}
+                className="inline-flex items-center gap-1 px-2 py-1 rounded bg-blue-50 hover:bg-blue-100 text-blue-800 font-semibold cursor-pointer"
+                title="Print Combined 3-Copy LR"
+              >
+                <Printer className="w-3 h-3" />
+                3-Copy
+              </button>
+              <button
+                type="button"
+                onClick={() => onSendCnToInvoice(cn)}
+                className="inline-flex items-center gap-1 px-2 py-1 rounded bg-emerald-50 hover:bg-emerald-100 text-emerald-800 font-semibold cursor-pointer"
+                title="Auto-paste into Tax Invoice"
+              >
+                <FilePlus2 className="w-3 h-3" />
+                Bill
+              </button>
+              {staffLocked ? (
+                <span
+                  className="inline-flex items-center gap-1 px-2 py-1 rounded bg-slate-100 text-slate-500 text-[10px] font-bold"
+                  title="Billed LRs are locked for non-admin staff"
+                >
+                  <Lock className="w-3 h-3" />
+                  Locked
+                </span>
+              ) : (
+                <>
+                  <button
+                    type="button"
+                    onClick={() => handleLoadForEdit(cn)}
+                    className="p-1 rounded hover:bg-blue-50 text-slate-500 hover:text-blue-700 cursor-pointer"
+                    title="Edit LR"
+                  >
+                    <Edit3 className="w-3.5 h-3.5" />
+                  </button>
+                  <button
+                    type="button"
+                    onClick={() => {
+                      onShowConfirm({
+                        title: `Delete Consignment ${cn.cnNo}?`,
+                        description: `Delete LR ${cn.cnNo} (${cn.consignorName}) permanently?`,
+                        confirmLabel: 'Delete LR',
+                        variant: 'danger',
+                        onConfirm: () => removeDocument('consignments', cn.id),
+                      });
+                    }}
+                    className="p-1 rounded hover:bg-red-50 text-slate-500 hover:text-red-600 cursor-pointer"
+                    title="Delete"
+                  >
+                    <Trash2 className="w-3.5 h-3.5" />
+                  </button>
+                </>
+              )}
+            </>
+          );
+        },
       },
     ],
-    [company, onPreviewPdf, onSendCnToInvoice, onShowConfirm]
+    [company, isMasterAdmin, onPreviewPdf, onSendCnToInvoice, onShowConfirm]
   );
 
   return (
     <div className="space-y-4">
-      {/* LR Scan-to-Form OCR Banner */}
+      {/* Hidden File & Rear-Camera Inputs */}
+      <input
+        ref={cameraInputRef}
+        type="file"
+        accept="image/*"
+        capture="environment"
+        className="hidden"
+        onChange={(e) => {
+          handleOCRFile(e.target.files?.[0]);
+          e.target.value = '';
+        }}
+      />
+      <input
+        ref={fileInputRef}
+        type="file"
+        accept="image/*"
+        className="hidden"
+        onChange={(e) => {
+          handleOCRFile(e.target.files?.[0]);
+          e.target.value = '';
+        }}
+      />
+
+      {/* One-Tap Device Scanner + Ctrl+V Paste Banner */}
       <div className="bg-white rounded-xl border border-slate-200 shadow-sm p-4 flex flex-wrap items-center justify-between gap-4">
-        <div>
+        <div className="min-w-0 flex-1">
           <h3 className="text-sm font-bold text-slate-900 flex items-center gap-2">
-            <ScanLine className="w-4 h-4 text-blue-700" />
-            <span>Physical LR Scanner (Background Worker OCR + AI Vision)</span>
+            <ScanLine className="w-4 h-4 text-blue-700 shrink-0" />
+            <span>One-Tap Device Scanner &amp; Smart OCR Auto-Fill (100% Editable)</span>
           </h3>
           <p className="text-xs text-slate-600 mt-0.5">
-            Capture via Android camera or upload a scanned Bilty/LR image. Background workers compress
-            and extract CN No, Consignor, Consignee, Truck No, E-Way Bill, Weight &amp; Freight without UI lag.
+            Tap <strong>Scan Bill / Document</strong> (opens rear camera on Mobile, File / HP Ink Tank
+            315 scanner on Windows PC), or press <kbd className="px-1.5 py-0.5 rounded bg-slate-100 border border-slate-300 font-mono-num text-[10px]">Ctrl + V</kbd> to
+            paste any clipped document image and auto-fill Party, Date, Goods, Weight, Inv/Challan &amp; Freight.
           </p>
           {ocrStatus && (
             <p className="text-xs text-emerald-700 font-semibold mt-1.5 flex items-center gap-1.5">
-              <CheckCircle2 className="w-3.5 h-3.5" />
+              <CheckCircle2 className="w-3.5 h-3.5 shrink-0" />
               <span>{ocrStatus}</span>
             </p>
           )}
           {ocrError && <p className="text-xs text-red-600 font-semibold mt-1.5">{ocrError}</p>}
+          {ocrFyMismatch && (
+            <div className="mt-2 p-2.5 rounded-lg bg-amber-50 border border-amber-300 flex flex-wrap items-center justify-between gap-2 text-xs text-amber-950">
+              <span className="inline-flex items-center gap-1.5 font-semibold">
+                <AlertTriangle className="w-4 h-4 text-amber-600 shrink-0" />
+                Scanned date ({formatDateDDMMYYYY(ocrFyMismatch.detectedDate)}) belongs to{' '}
+                <strong>{ocrFyMismatch.detectedFy}</strong> (currently viewing {activeFy}).
+              </span>
+              <button
+                type="button"
+                onClick={() => {
+                  onSwitchFy(ocrFyMismatch.detectedFy);
+                  setOcrFyMismatch(null);
+                }}
+                className="px-3 py-1 rounded bg-amber-600 hover:bg-amber-700 text-white font-bold cursor-pointer whitespace-nowrap"
+              >
+                Switch to {ocrFyMismatch.detectedFy}
+              </button>
+            </div>
+          )}
         </div>
 
-        <div className="flex items-center gap-2.5 shrink-0">
-          <input
-            ref={cameraInputRef}
-            type="file"
-            accept="image/*"
-            capture="environment"
-            className="hidden"
-            onChange={(e) => handleOCRFile(e.target.files?.[0])}
-          />
-          <input
-            ref={fileInputRef}
-            type="file"
-            accept="image/*"
-            className="hidden"
-            onChange={(e) => handleOCRFile(e.target.files?.[0])}
-          />
+        <div className="flex flex-wrap items-center gap-2 shrink-0">
           <button
             type="button"
-            onClick={() => cameraInputRef.current?.click()}
-            className="inline-flex items-center gap-1.5 px-3.5 py-2 rounded-lg bg-emerald-600 hover:bg-emerald-700 text-white text-xs font-bold transition-colors cursor-pointer whitespace-nowrap"
+            onClick={handleOneTapScanClick}
+            className="inline-flex items-center gap-1.5 px-4 py-2 rounded-lg bg-emerald-600 hover:bg-emerald-700 text-white text-xs font-bold shadow-sm transition-colors cursor-pointer whitespace-nowrap"
           >
-            <Camera className="w-4 h-4" />
-            Camera Scan LR
+            <ScanLine className="w-4 h-4" />
+            <span>Scan Bill / Document</span>
           </button>
-          <button
-            type="button"
-            onClick={() => fileInputRef.current?.click()}
-            className="inline-flex items-center gap-1.5 px-3.5 py-2 rounded-lg bg-blue-700 hover:bg-blue-800 text-white text-xs font-bold transition-colors cursor-pointer whitespace-nowrap"
-          >
-            <Upload className="w-4 h-4" />
-            Upload LR Scan
-          </button>
+          {isMobileDevice && (
+            <button
+              type="button"
+              onClick={() => fileInputRef.current?.click()}
+              className="inline-flex items-center gap-1.5 px-3 py-2 rounded-lg bg-blue-700 hover:bg-blue-800 text-white text-xs font-bold transition-colors cursor-pointer whitespace-nowrap"
+            >
+              <Upload className="w-4 h-4" />
+              Gallery File
+            </button>
+          )}
+          <span className="hidden sm:inline-flex items-center gap-1 px-2.5 py-2 rounded-lg border border-slate-200 bg-slate-50 text-[11px] font-semibold text-slate-600">
+            <ClipboardPaste className="w-3.5 h-3.5 text-blue-700" />
+            Ctrl + V Ready
+          </span>
         </div>
       </div>
 
@@ -506,10 +728,10 @@ const ConsignmentModuleInner: React.FC<ConsignmentModuleProps> = ({
         <div className="bg-gradient-to-r from-[#0D47A1] to-[#1976D2] text-white px-4 py-2.5 flex flex-wrap items-center justify-between gap-2">
           <span className="text-sm font-bold">
             {editingId
-              ? `Editing Consignment Note: ${cnNo}`
-              : `New Consignment Note (Branch: ${activeBranchCode})`}
+              ? `Editing Consignment Note: ${cnNo} (${activeFy})`
+              : `New Consignment Note (Branch: ${activeBranchCode} · ${activeFy})`}
           </span>
-          <div className="flex items-center gap-3">
+          <div className="flex flex-wrap items-center gap-2.5">
             {!editingId && (
               <label className="inline-flex items-center gap-1.5 text-xs font-semibold text-blue-100 cursor-pointer">
                 <input
@@ -520,6 +742,14 @@ const ConsignmentModuleInner: React.FC<ConsignmentModuleProps> = ({
                 Auto Atomic CN Serial
               </label>
             )}
+            <button
+              type="button"
+              onClick={handleOneTapScanClick}
+              className="inline-flex items-center gap-1.5 px-3 py-1 rounded bg-emerald-500 hover:bg-emerald-600 text-white text-xs font-bold cursor-pointer whitespace-nowrap"
+            >
+              <ScanLine className="w-3.5 h-3.5" />
+              Scan Bill / Document
+            </button>
             <button
               type="button"
               onClick={handlePrint3CopyCurrent}
@@ -540,7 +770,7 @@ const ConsignmentModuleInner: React.FC<ConsignmentModuleProps> = ({
               type="text"
               required={!autoAtomicCn || Boolean(editingId)}
               disabled={autoAtomicCn && !editingId}
-              value={autoAtomicCn && !editingId ? 'AUTO SERVER SERIAL' : cnNo}
+              value={autoAtomicCn && !editingId ? `AUTO SERVER SERIAL (${fyShort})` : cnNo}
               onChange={(e) => setCnNo(e.target.value)}
               className="w-full px-2.5 py-1.5 rounded border border-slate-300 font-mono-num disabled:bg-blue-50 disabled:text-blue-800 disabled:font-bold"
             />
@@ -633,7 +863,7 @@ const ConsignmentModuleInner: React.FC<ConsignmentModuleProps> = ({
           </datalist>
 
           <div>
-            <label className="block font-semibold text-slate-700 mb-1">Truck / Lorry No *</label>
+            <label className="block font-semibold text-slate-700 mb-1">Primary Truck / Lorry No *</label>
             <input
               type="text"
               required
@@ -724,7 +954,7 @@ const ConsignmentModuleInner: React.FC<ConsignmentModuleProps> = ({
           </div>
 
           <div>
-            <label className="block font-semibold text-slate-700 mb-1">Party Tax Inv. No</label>
+            <label className="block font-semibold text-slate-700 mb-1">Party Tax Inv. / Challan No</label>
             <input
               type="text"
               value={taxInvNo}
@@ -785,6 +1015,159 @@ const ConsignmentModuleInner: React.FC<ConsignmentModuleProps> = ({
               className="w-full px-2.5 py-1.5 rounded border border-slate-300 font-mono-num"
             />
           </div>
+
+          {/* Multi-Vehicle, Multi-Invoice & Multi-EWB Schedule Builders */}
+          <div className="md:col-span-3 p-3 rounded-lg bg-slate-50 border border-slate-200 space-y-2.5">
+            <div className="flex flex-wrap items-center justify-between gap-2">
+              <span className="font-bold text-slate-800">
+                Additional Vehicles, Invoices / Challans &amp; E-Way Bills (Auto-Spills to Page 2 in PDF)
+              </span>
+              <div className="flex flex-wrap gap-1.5">
+                <button
+                  type="button"
+                  onClick={() => setExtraVehicles((prev) => [...prev, ''])}
+                  className="inline-flex items-center gap-1 px-2.5 py-1 rounded bg-white border border-slate-300 hover:bg-blue-50 text-blue-800 font-semibold cursor-pointer"
+                >
+                  <Plus className="w-3 h-3" /> Add Vehicle
+                </button>
+                <button
+                  type="button"
+                  onClick={() =>
+                    setExtraTaxInvoices((prev) => [...prev, { no: '', date: taxInvDate || todayISO() }])
+                  }
+                  className="inline-flex items-center gap-1 px-2.5 py-1 rounded bg-white border border-slate-300 hover:bg-blue-50 text-blue-800 font-semibold cursor-pointer"
+                >
+                  <Plus className="w-3 h-3" /> Add Tax Inv
+                </button>
+                <button
+                  type="button"
+                  onClick={() =>
+                    setExtraEwayBills((prev) => [...prev, { no: '', date: ewayBillDate || todayISO() }])
+                  }
+                  className="inline-flex items-center gap-1 px-2.5 py-1 rounded bg-white border border-slate-300 hover:bg-blue-50 text-blue-800 font-semibold cursor-pointer"
+                >
+                  <Plus className="w-3 h-3" /> Add E-Way Bill
+                </button>
+              </div>
+            </div>
+
+            {extraVehicles.length > 0 && (
+              <div className="flex flex-wrap gap-2">
+                {extraVehicles.map((veh, idx) => (
+                  <div key={idx} className="inline-flex items-center gap-1 bg-white border border-slate-300 rounded px-2 py-1">
+                    <input
+                      type="text"
+                      value={veh}
+                      onChange={(e) =>
+                        setExtraVehicles((prev) =>
+                          prev.map((v, i) => (i === idx ? e.target.value.toUpperCase() : v))
+                        )
+                      }
+                      placeholder={`Truck #${idx + 2}`}
+                      className="w-28 font-mono-num uppercase focus:outline-none"
+                    />
+                    <button
+                      type="button"
+                      onClick={() => setExtraVehicles((prev) => prev.filter((_, i) => i !== idx))}
+                      className="text-red-600 cursor-pointer"
+                    >
+                      ×
+                    </button>
+                  </div>
+                ))}
+              </div>
+            )}
+
+            {extraTaxInvoices.length > 0 && (
+              <div className="grid grid-cols-1 sm:grid-cols-2 md:grid-cols-3 gap-2">
+                {extraTaxInvoices.map((inv, idx) => (
+                  <div key={idx} className="flex items-center gap-1 bg-white border border-slate-300 rounded px-2 py-1">
+                    <input
+                      type="text"
+                      value={inv.no}
+                      onChange={(e) =>
+                        setExtraTaxInvoices((prev) =>
+                          prev.map((x, i) => (i === idx ? { ...x, no: e.target.value } : x))
+                        )
+                      }
+                      placeholder={`Inv/Challan #${idx + 2}`}
+                      className="flex-1 min-w-0 font-mono-num focus:outline-none"
+                    />
+                    <input
+                      type="date"
+                      value={inv.date}
+                      onChange={(e) =>
+                        setExtraTaxInvoices((prev) =>
+                          prev.map((x, i) => (i === idx ? { ...x, date: e.target.value } : x))
+                        )
+                      }
+                      className="w-28 font-mono-num text-[11px] focus:outline-none"
+                    />
+                    <button
+                      type="button"
+                      onClick={() =>
+                        setExtraTaxInvoices((prev) => prev.filter((_, i) => i !== idx))
+                      }
+                      className="text-red-600 cursor-pointer"
+                    >
+                      ×
+                    </button>
+                  </div>
+                ))}
+              </div>
+            )}
+
+            {extraEwayBills.length > 0 && (
+              <div className="grid grid-cols-1 sm:grid-cols-2 md:grid-cols-3 gap-2">
+                {extraEwayBills.map((ewb, idx) => (
+                  <div key={idx} className="flex items-center gap-1 bg-white border border-slate-300 rounded px-2 py-1">
+                    <input
+                      type="text"
+                      value={ewb.no}
+                      onChange={(e) =>
+                        setExtraEwayBills((prev) =>
+                          prev.map((x, i) => (i === idx ? { ...x, no: e.target.value } : x))
+                        )
+                      }
+                      placeholder={`EWB #${idx + 2}`}
+                      className="flex-1 min-w-0 font-mono-num focus:outline-none"
+                    />
+                    <input
+                      type="date"
+                      value={ewb.date}
+                      onChange={(e) =>
+                        setExtraEwayBills((prev) =>
+                          prev.map((x, i) => (i === idx ? { ...x, date: e.target.value } : x))
+                        )
+                      }
+                      className="w-28 font-mono-num text-[11px] focus:outline-none"
+                    />
+                    <button
+                      type="button"
+                      onClick={() => setExtraEwayBills((prev) => prev.filter((_, i) => i !== idx))}
+                      className="text-red-600 cursor-pointer"
+                    >
+                      ×
+                    </button>
+                  </div>
+                ))}
+              </div>
+            )}
+          </div>
+
+          {/* Extra-Large Wide Remarks Box */}
+          <div className="md:col-span-3">
+            <label className="block font-bold text-slate-800 mb-1">
+              Large Remarks / Delivery &amp; Freight Instructions (Prints Inside Wide LR Remarks Box)
+            </label>
+            <textarea
+              rows={3}
+              value={remarks}
+              onChange={(e) => setRemarks(e.target.value)}
+              placeholder="Enter detailed route instructions, delivery endorsements, detention terms, door delivery notes, or special cargo instructions..."
+              className="w-full px-3 py-2 rounded-lg border border-slate-300 bg-white text-slate-900 text-xs leading-relaxed focus:outline-none focus:ring-2 focus:ring-blue-600"
+            />
+          </div>
         </div>
 
         <div className="px-4 py-3 bg-slate-50 border-t border-slate-200 flex items-center justify-end gap-2.5">
@@ -811,7 +1194,9 @@ const ConsignmentModuleInner: React.FC<ConsignmentModuleProps> = ({
       {/* Saved Consignments Table (Paginated 50 rows/page) */}
       <div className="bg-white rounded-xl border border-slate-200 shadow-sm overflow-hidden">
         <div className="bg-gradient-to-r from-[#0D47A1] to-[#1976D2] text-white px-4 py-2 flex flex-wrap items-center justify-between gap-2">
-          <span className="text-sm font-bold">Saved Consignment Notes ({filteredCNs.length})</span>
+          <span className="text-sm font-bold">
+            Saved Consignment Notes ({filteredCNs.length} · {activeFy})
+          </span>
           <div className="flex items-center gap-2">
             <Search className="w-3.5 h-3.5 text-blue-100" />
             <input
@@ -829,7 +1214,7 @@ const ConsignmentModuleInner: React.FC<ConsignmentModuleProps> = ({
           columns={cnColumns}
           getRowId={(cn) => cn.id}
           defaultPageSize={50}
-          emptyMessage="No consignment notes found. Scan a physical LR or fill the form above."
+          emptyMessage="No consignment notes found in this Financial Year. Scan a physical document or fill the form above."
         />
       </div>
     </div>

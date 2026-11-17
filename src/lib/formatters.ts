@@ -33,15 +33,56 @@ export function todayISO(): string {
   return `${y}-${m}-${day}`;
 }
 
+export const PRECREATED_FYS = ['FY 2025-26', 'FY 2026-27'] as const;
+
+export function normalizeFyLabel(raw?: string): string {
+  if (!raw) return 'FY 2026-27';
+  const s = String(raw).trim().toUpperCase();
+  const fullMatch = s.match(/(\d{4})\s*[-–\/]\s*(\d{2,4})/);
+  if (fullMatch) {
+    const start = Number(fullMatch[1]);
+    const endShort = fullMatch[2].slice(-2);
+    return `FY ${start}-${endShort}`;
+  }
+  const shortMatch = s.match(/(\d{2})\s*[-–\/]\s*(\d{2})/);
+  if (shortMatch) {
+    return `FY 20${shortMatch[1]}-${shortMatch[2]}`;
+  }
+  return s.startsWith('FY ') ? s : `FY ${s}`;
+}
+
 export function getDynamicFinancialYear(dateStr?: string): string {
   const d = dateStr ? new Date(dateStr) : new Date();
-  if (Number.isNaN(d.getTime())) return '2026-2027';
+  if (Number.isNaN(d.getTime())) return 'FY 2026-27';
   const year = d.getFullYear();
   const month = d.getMonth() + 1;
-  if (month >= 4) {
-    return `${year}-${year + 1}`;
+  const startYear = month >= 4 ? year : year - 1;
+  const endShort = String((startYear + 1) % 100).padStart(2, '0');
+  return `FY ${startYear}-${endShort}`;
+}
+
+export function resolveFinancialYearFromDate(dateStr?: string): string {
+  return getDynamicFinancialYear(dateStr);
+}
+
+export function getFyShortCode(fy: string): string {
+  const norm = normalizeFyLabel(fy);
+  const m = norm.match(/(\d{4})-(\d{2})/);
+  if (m) return `${m[1].slice(-2)}-${m[2]}`;
+  return '26-27';
+}
+
+export function matchesSelectedFinancialYear(
+  explicitFy: string | undefined,
+  dateStr: string | undefined,
+  activeFy: string
+): boolean {
+  const target = normalizeFyLabel(activeFy);
+  if (explicitFy && explicitFy.trim()) {
+    return normalizeFyLabel(explicitFy) === target;
   }
-  return `${year - 1}-${year}`;
+  if (!dateStr) return true;
+  return resolveFinancialYearFromDate(dateStr) === target;
 }
 
 export function daysUntilDate(dateStr?: string): number | null {
