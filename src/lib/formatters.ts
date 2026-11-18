@@ -33,7 +33,7 @@ export function todayISO(): string {
   return `${y}-${m}-${day}`;
 }
 
-export const PRECREATED_FYS = ['FY 2025-26', 'FY 2026-27'] as const;
+export const PRECREATED_FYS = ['FY 2025-26', 'FY 2026-27', 'FY 2027-28'] as const;
 
 export function normalizeFyLabel(raw?: string): string {
   if (!raw) return 'FY 2026-27';
@@ -155,9 +155,11 @@ function integerToIndianWords(num: number): string {
 }
 
 export function amountToIndianWords(amount: number): string {
-  const safe = Math.max(0, Number(amount) || 0);
-  const rupees = Math.floor(safe);
-  const paise = Math.round((safe - rupees) * 100);
+  const raw = Number(amount);
+  const safe = Number.isFinite(raw) ? Math.max(0, raw) : 0;
+  const totalPaise = Math.round(safe * 100);
+  const rupees = Math.floor(totalPaise / 100);
+  const paise = totalPaise % 100;
 
   let result = `Rupees ${integerToIndianWords(rupees)}`;
   if (paise > 0) {
@@ -166,8 +168,8 @@ export function amountToIndianWords(amount: number): string {
   return `${result} Only`;
 }
 
-export function sanitizeFileName(name: string): string {
-  return name
+export function sanitizeFileName(name: string | undefined | null): string {
+  return String(name ?? '')
     .trim()
     .replace(/[^a-zA-Z0-9_\-]+/g, '_')
     .replace(/^_+|_+$/g, '')

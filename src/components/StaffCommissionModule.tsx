@@ -130,7 +130,14 @@ export const StaffCommissionModule: React.FC<StaffCommissionModuleProps> = ({
           (c.remarks || '').toLowerCase().includes(q)
         );
       })
-      .sort((a, b) => (a.entryDate || '').localeCompare(b.entryDate || ''));
+      .sort((a, b) => {
+        const dCmp = (a.entryDate || '').localeCompare(b.entryDate || '');
+        if (dCmp !== 0) return dCmp;
+        const order = { Commission: 0, 'Advance Taken': 1, Paid: 2 } as const;
+        const tCmp = (order[a.entryType] ?? 3) - (order[b.entryType] ?? 3);
+        if (tCmp !== 0) return tCmp;
+        return (a.id || '').localeCompare(b.id || '');
+      });
   }, [commissions, activeFy, staffFilter, searchTerm]);
 
   // Compute running balance row-by-row down to 0
@@ -141,7 +148,8 @@ export const StaffCommissionModule: React.FC<StaffCommissionModuleProps> = ({
     let totalPaid = 0;
 
     const rows = fyFiltered.map((entry) => {
-      const amt = Number(entry.amount || 0);
+      const rawAmt = Number(entry.amount);
+      const amt = Number.isFinite(rawAmt) ? Math.max(0, rawAmt) : 0;
       if (entry.entryType === 'Commission') {
         totalCommission += amt;
         runningBalance += amt;
@@ -152,6 +160,7 @@ export const StaffCommissionModule: React.FC<StaffCommissionModuleProps> = ({
         totalPaid += amt;
         runningBalance -= amt;
       }
+      runningBalance = Math.round(runningBalance * 100) / 100;
       return {
         ...entry,
         runningBalance,
@@ -516,8 +525,8 @@ export const StaffCommissionModule: React.FC<StaffCommissionModuleProps> = ({
               </label>
               <input
                 type="number"
-                min="1"
-                step="1"
+                min="0.01"
+                step="0.01"
                 value={amount}
                 onChange={(e) => setAmount(e.target.value)}
                 required

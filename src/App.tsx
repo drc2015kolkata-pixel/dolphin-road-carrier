@@ -936,13 +936,21 @@ export default function App() {
       id: string;
       title: string;
       keywords: string;
+      allowed: boolean;
       action: () => void;
     }> = [
-      { id: 'pg-lr', title: 'Consignment / LR (Bilty Entry)', keywords: 'cn lr bilty consignment', action: () => openOrSwitchTab('lr') },
+      {
+        id: 'pg-lr',
+        title: 'Consignment / LR (Bilty Entry)',
+        keywords: 'cn lr bilty consignment',
+        allowed: hasPermission('lr'),
+        action: () => openOrSwitchTab('lr'),
+      },
       {
         id: 'pg-bill',
         title: 'Tax Invoice / Billing Builder',
         keywords: 'bill tax invoice billing gst',
+        allowed: hasPermission('billing'),
         action: () => {
           setBillingInitialSubTab('invoice');
           setBillingFocusNonce((n) => n + 1);
@@ -953,6 +961,7 @@ export default function App() {
         id: 'pg-qtn',
         title: 'Proforma Rate Quotation (10-Sec Auto-Fill)',
         keywords: 'quotation quote rate proforma',
+        allowed: hasPermission('billing') && getSheetAccess('quotations') !== 'blocked',
         action: () => {
           setBillingInitialSubTab('quotation');
           setBillingFocusNonce((n) => n + 1);
@@ -963,23 +972,66 @@ export default function App() {
         id: 'pg-194c',
         title: 'Section 194C Non-Deduction Declaration',
         keywords: 'declaration 194c tds pan',
+        allowed: hasPermission('billing') && getSheetAccess('declarations') !== 'blocked',
         action: () => {
           setBillingInitialSubTab('194c');
           setBillingFocusNonce((n) => n + 1);
           openOrSwitchTab('billing');
         },
       },
-      { id: 'pg-lh', title: 'Lorry Hire & POD Reconciliation', keywords: 'lorry hire pod shortage challan', action: () => openOrSwitchTab('lorryHire') },
-      { id: 'pg-comm', title: 'Staff Commission & Advance Ledger', keywords: 'commission advance wheeler staff', action: () => openOrSwitchTab('commission') },
-      { id: 'pg-bank', title: 'Bank Receipt & 194C TDS Import', keywords: 'bank statement excel import tds credit', action: () => openOrSwitchTab('bankImport') },
-      { id: 'pg-rep', title: 'FoxPro GST Register & 6 Statements', keywords: 'gst register report statement foxpro', action: () => openOrSwitchTab('reports') },
-      { id: 'pg-master', title: 'Party, Owner, Broker, Lorry & Driver Master', keywords: 'party master owner broker lorry vehicle driver', action: () => openOrSwitchTab('master') },
-      { id: 'pg-access', title: 'Staff Sheet Access Control (Matrix)', keywords: 'staff sheet access control permission', action: () => openOrSwitchTab('staffAccess') },
-      { id: 'pg-set', title: 'Settings, Multi-Bank & UPI QR', keywords: 'settings bank upi branch backup drive', action: () => openOrSwitchTab('settings') },
+      {
+        id: 'pg-lh',
+        title: 'Lorry Hire & POD Reconciliation',
+        keywords: 'lorry hire pod shortage challan',
+        allowed: hasPermission('lorryHire'),
+        action: () => openOrSwitchTab('lorryHire'),
+      },
+      {
+        id: 'pg-comm',
+        title: 'Staff Commission & Advance Ledger',
+        keywords: 'commission advance wheeler staff',
+        allowed: hasPermission('commission'),
+        action: () => openOrSwitchTab('commission'),
+      },
+      {
+        id: 'pg-bank',
+        title: 'Bank Receipt & 194C TDS Import',
+        keywords: 'bank statement excel import tds credit',
+        allowed: hasPermission('bankImport'),
+        action: () => openOrSwitchTab('bankImport'),
+      },
+      {
+        id: 'pg-rep',
+        title: 'FoxPro GST Register & 6 Statements',
+        keywords: 'gst register report statement foxpro',
+        allowed: hasPermission('reports'),
+        action: () => openOrSwitchTab('reports'),
+      },
+      {
+        id: 'pg-master',
+        title: 'Party, Owner, Broker, Lorry & Driver Master',
+        keywords: 'party master owner broker lorry vehicle driver',
+        allowed: hasPermission('master'),
+        action: () => openOrSwitchTab('master'),
+      },
+      {
+        id: 'pg-access',
+        title: 'Staff Sheet Access Control (Matrix)',
+        keywords: 'staff sheet access control permission',
+        allowed: isEffectiveMasterAdmin,
+        action: () => openOrSwitchTab('staffAccess'),
+      },
+      {
+        id: 'pg-set',
+        title: 'Settings, Multi-Bank & UPI QR',
+        keywords: 'settings bank upi branch backup drive',
+        allowed: hasPermission('settings'),
+        action: () => openOrSwitchTab('settings'),
+      },
     ];
 
     pageShortcuts.forEach((p) => {
-      if (p.title.toLowerCase().includes(q) || p.keywords.includes(q)) {
+      if (p.allowed && (p.title.toLowerCase().includes(q) || p.keywords.includes(q))) {
         results.push({
           id: p.id,
           badge: 'SCREEN',
@@ -990,73 +1042,93 @@ export default function App() {
       }
     });
 
-    invoices
-      .filter((inv) => `${inv.invoiceNo} ${inv.partyName}`.toLowerCase().includes(q))
-      .slice(0, 6)
-      .forEach((inv) => {
-        results.push({
-          id: `inv-${inv.id}`,
-          badge: 'BILL',
-          title: `${inv.invoiceNo} — ${inv.partyName}`,
-          subtitle: `₹${formatINR(inv.grandTotal)} · ${inv.status} · Click to Preview PDF`,
-          onSelect: async () => {
-            const pdf = await generateInvoicePDF(inv, companySettings, true, 'p', inv.copyCount || 1);
-            handlePreviewPdf(pdf, 'Bills_Invoices');
-          },
+    if (hasPermission('billing')) {
+      invoices
+        .filter((inv) => `${inv.invoiceNo} ${inv.partyName}`.toLowerCase().includes(q))
+        .slice(0, 6)
+        .forEach((inv) => {
+          results.push({
+            id: `inv-${inv.id}`,
+            badge: 'BILL',
+            title: `${inv.invoiceNo} — ${inv.partyName}`,
+            subtitle: `₹${formatINR(inv.grandTotal)} · ${inv.status} · Click to Preview PDF`,
+            onSelect: async () => {
+              const pdf = await generateInvoicePDF(inv, companySettings, true, 'p', inv.copyCount || 1);
+              handlePreviewPdf(pdf, 'Bills_Invoices');
+            },
+          });
         });
-      });
+    }
 
-    consignments
-      .filter((cn) => `${cn.cnNo} ${cn.truckNo} ${cn.consignorName} ${cn.billingPartyName || ''}`.toLowerCase().includes(q))
-      .slice(0, 6)
-      .forEach((cn) => {
-        results.push({
-          id: `cn-${cn.id}`,
-          badge: 'CN/LR',
-          title: `${cn.cnNo} · ${cn.truckNo}`,
-          subtitle: `${cn.billingPartyName || cn.consignorName} · ${cn.fromCity}→${cn.toCity} · Preview 4-Copy LR`,
-          onSelect: async () => {
-            const pdf = await generateLR3CopyPDF(cn, companySettings);
-            handlePreviewPdf(pdf, 'LR Copy');
-          },
+    if (hasPermission('lr')) {
+      consignments
+        .filter((cn) => `${cn.cnNo} ${cn.truckNo} ${cn.consignorName} ${cn.billingPartyName || ''}`.toLowerCase().includes(q))
+        .slice(0, 6)
+        .forEach((cn) => {
+          results.push({
+            id: `cn-${cn.id}`,
+            badge: 'CN/LR',
+            title: `${cn.cnNo} · ${cn.truckNo}`,
+            subtitle: `${cn.billingPartyName || cn.consignorName} · ${cn.fromCity}→${cn.toCity} · Preview 4-Copy LR`,
+            onSelect: async () => {
+              const pdf = await generateLR3CopyPDF(cn, companySettings);
+              handlePreviewPdf(pdf, 'LR Copy');
+            },
+          });
         });
-      });
+    }
 
-    quotations
-      .filter((qt) => `${qt.quotationNo} ${qt.partyName} ${qt.destination}`.toLowerCase().includes(q))
-      .slice(0, 4)
-      .forEach((qt) => {
-        results.push({
-          id: `qt-${qt.id}`,
-          badge: 'QUOTE',
-          title: `${qt.quotationNo} — ${qt.partyName}`,
-          subtitle: `${qt.destination} · ₹${formatINR(qt.freight)} · Preview PDF`,
-          onSelect: async () => {
-            const pdf = await generateQuotationPDF(qt, companySettings);
-            handlePreviewPdf(pdf, 'Quotations');
-          },
+    if (hasPermission('billing') && getSheetAccess('quotations') !== 'blocked') {
+      quotations
+        .filter((qt) => `${qt.quotationNo} ${qt.partyName} ${qt.destination}`.toLowerCase().includes(q))
+        .slice(0, 4)
+        .forEach((qt) => {
+          results.push({
+            id: `qt-${qt.id}`,
+            badge: 'QUOTE',
+            title: `${qt.quotationNo} — ${qt.partyName}`,
+            subtitle: `${qt.destination} · ₹${formatINR(qt.freight)} · Preview PDF`,
+            onSelect: async () => {
+              const pdf = await generateQuotationPDF(qt, companySettings);
+              handlePreviewPdf(pdf, 'Quotations');
+            },
+          });
         });
-      });
+    }
 
-    vehicles
-      .filter((v) => `${v.truckNo} ${v.ownerName}`.toLowerCase().includes(q))
-      .slice(0, 4)
-      .forEach((v) => {
-        results.push({
-          id: `veh-${v.id}`,
-          badge: 'TRUCK',
-          title: `${v.truckNo} (${v.ownerName})`,
-          subtitle: `${v.vehicleType || 'Fleet'} · Open Lorry Register`,
-          onSelect: () => {
-            setMasterInitialTab('vehicles');
-            setMasterFocusNonce((n) => n + 1);
-            openOrSwitchTab('master');
-          },
+    if (hasPermission('master')) {
+      vehicles
+        .filter((v) => `${v.truckNo} ${v.ownerName}`.toLowerCase().includes(q))
+        .slice(0, 4)
+        .forEach((v) => {
+          results.push({
+            id: `veh-${v.id}`,
+            badge: 'TRUCK',
+            title: `${v.truckNo} (${v.ownerName})`,
+            subtitle: `${v.vehicleType || 'Fleet'} · Open Lorry Register`,
+            onSelect: () => {
+              setMasterInitialTab('vehicles');
+              setMasterFocusNonce((n) => n + 1);
+              openOrSwitchTab('master');
+            },
+          });
         });
-      });
+    }
 
     return results.slice(0, 14);
-  }, [globalSearch, invoices, consignments, quotations, vehicles, companySettings, handlePreviewPdf, openOrSwitchTab]);
+  }, [
+    globalSearch,
+    invoices,
+    consignments,
+    quotations,
+    vehicles,
+    companySettings,
+    handlePreviewPdf,
+    openOrSwitchTab,
+    hasPermission,
+    getSheetAccess,
+    isEffectiveMasterAdmin,
+  ]);
 
   const formattedClock = useMemo(() => {
     const dateStr = now.toLocaleDateString('en-GB', {
@@ -1485,7 +1557,7 @@ export default function App() {
                                 {inv.invoiceNo} · {inv.partyName}
                               </p>
                               <p className="text-[11px] text-red-700">
-                                Overdue ₹{formatINR(inv.grandTotal - inv.paidAmount)} (Dated{' '}
+                                Overdue ₹{formatINR(Math.max(0, Number(inv.grandTotal || 0) - Number(inv.paidAmount || 0)))} (Dated{' '}
                                 {formatDateDDMMYYYY(inv.invoiceDate)})
                               </p>
                             </div>
@@ -1867,6 +1939,8 @@ export default function App() {
                 activeFy={activeFy}
                 isMasterAdmin={isEffectiveMasterAdmin}
                 readOnly={getSheetAccess('billing') === 'view'}
+                quotationsAccess={getSheetAccess('quotations')}
+                declarationsAccess={getSheetAccess('declarations')}
                 initialSubTab={billingInitialSubTab}
                 invoices={visibleInvoices}
                 quotations={visibleQuotations}
@@ -1947,6 +2021,7 @@ export default function App() {
                 ownerUid={workspaceUid}
                 activeFy={activeFy}
                 isMasterAdmin={isEffectiveMasterAdmin}
+                readOnly={getSheetAccess(activeTab === 'accounts' ? 'accounts' : 'reports') === 'view'}
                 invoices={visibleInvoices}
                 lorryHires={visibleLorryHires}
                 consignments={visibleConsignments}

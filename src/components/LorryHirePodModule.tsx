@@ -836,7 +836,7 @@ const LorryHirePodModuleInner: React.FC<LorryHirePodModuleProps> = ({
         },
       },
     ],
-    [onShowConfirm, isMasterAdmin, onPreviewPdf]
+    [onShowConfirm, isMasterAdmin, readOnly, onPreviewPdf]
   );
 
   // Live POD Modal shortage/damage preview

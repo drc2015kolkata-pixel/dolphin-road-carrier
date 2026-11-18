@@ -110,7 +110,7 @@ const DEFAULT_COMPANY_SETTINGS_SERVER = {
   ifsc: 'PUNB0008020',
   swift: 'PUNBINBBXXX',
   currentFy: 'FY 2026-27',
-  availableFys: ['FY 2025-26', 'FY 2026-27'],
+  availableFys: ['FY 2025-26', 'FY 2026-27', 'FY 2027-28'],
   fyOpeningBalances: {},
   autoLockMinutes: 5,
   lockSourceInspection: true,

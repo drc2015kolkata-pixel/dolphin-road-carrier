@@ -397,6 +397,7 @@ export function computeFyClosingBalances(params: {
     matchesSelectedFinancialYear(t.financialYear, t.txDate, normSourceFy)
   );
 
+  const invoiceNoSet = new Set(fyInvoices.map((i) => i.invoiceNo));
   const carryForwardMap: Record<string, FyOpeningBalanceEntry> = {};
 
   const rows: ClosingBalanceRow[] = parties.map((p) => {
@@ -407,17 +408,31 @@ export function computeFyClosingBalances(params: {
 
     const pKey = p.name.trim().toLowerCase();
 
-    // Bills raised increase Party Receivable (Debit)
-    const billDr = fyInvoices
-      .filter((i) => i.partyName.trim().toLowerCase() === pKey)
-      .reduce((s, i) => s + Number(i.grandTotal || 0), 0);
+    // Bills raised increase Party Receivable (Debit); settled paidAmount (Credit+TDS) reduces Receivable
+    const partyBills = fyInvoices.filter((i) => i.partyName.trim().toLowerCase() === pKey);
+    const billDr = partyBills.reduce((s, i) => s + Number(i.grandTotal || 0), 0);
+    const billCr = partyBills.reduce((s, i) => s + Number(i.paidAmount || 0), 0);
 
-    // Cash/Bank Receipts from Party decrease Receivable (Credit); Expenses/Payments paid increase Debit
+    // Unlinked Cash/Bank Receipts decrease Receivable (Credit); direct Expenses paid increase Debit
+    // (Skip auto-generated linkedInvoiceNo BNK receipts & LH- lorry hire settlement txs to avoid double-counting)
     const txCr = fyTx
-      .filter((t) => t.partyName.trim().toLowerCase() === pKey && t.txType === 'Income')
+      .filter(
+        (t) =>
+          t.partyName.trim().toLowerCase() === pKey &&
+          t.txType === 'Income' &&
+          !(t.linkedInvoiceNo && invoiceNoSet.has(t.linkedInvoiceNo))
+      )
       .reduce((s, t) => s + Number(t.amount || 0), 0);
     const txDr = fyTx
-      .filter((t) => t.partyName.trim().toLowerCase() === pKey && t.txType === 'Expense')
+      .filter(
+        (t) =>
+          t.partyName.trim().toLowerCase() === pKey &&
+          t.txType === 'Expense' &&
+          !(
+            t.ledgerAccount === 'Lorry Hire Payable A/c' &&
+            (Boolean(t.linkedCnNo) || /^LH-/i.test(t.txCode || ''))
+          )
+      )
       .reduce((s, t) => s + Number(t.amount || 0), 0);
 
     // Truck Owner Hire payable (Credit) & Advance/Balance paid (Debit)
@@ -432,7 +447,7 @@ export function computeFyClosingBalances(params: {
       );
 
     const fyDebits = billDr + txDr + hireDr;
-    const fyCredits = txCr + hireCr;
+    const fyCredits = billCr + txCr + hireCr;
     const netSigned = signedOpening + fyDebits - fyCredits;
     const closingType: 'Dr' | 'Cr' = netSigned >= 0 ? 'Dr' : 'Cr';
     const closingBalance = Math.abs(Math.round(netSigned * 100) / 100);

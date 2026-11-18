@@ -314,6 +314,7 @@ const ConsignmentModuleInner: React.FC<ConsignmentModuleProps> = ({
 
   // Ctrl + V clipboard image paste support anywhere in the LR workspace
   useEffect(() => {
+    if (readOnly) return;
     const onPaste = (e: ClipboardEvent) => {
       const items = e.clipboardData?.items;
       if (!items) return;
@@ -331,7 +332,7 @@ const ConsignmentModuleInner: React.FC<ConsignmentModuleProps> = ({
     };
     window.addEventListener('paste', onPaste);
     return () => window.removeEventListener('paste', onPaste);
-  }, [handleOCRFile]);
+  }, [handleOCRFile, readOnly]);
 
   const stopLiveCamera = useCallback(() => {
     if (liveStreamRef.current) {
@@ -1070,8 +1071,9 @@ const ConsignmentModuleInner: React.FC<ConsignmentModuleProps> = ({
             )}
             <button
               type="button"
+              disabled={readOnly}
               onClick={handleOneTapScanClick}
-              className="inline-flex items-center gap-1.5 px-3 py-1 rounded bg-emerald-500 hover:bg-emerald-600 text-white text-xs font-bold cursor-pointer whitespace-nowrap"
+              className="inline-flex items-center gap-1.5 px-3 py-1 rounded bg-emerald-500 hover:bg-emerald-600 text-white text-xs font-bold cursor-pointer whitespace-nowrap disabled:opacity-50"
             >
               <ScanLine className="w-3.5 h-3.5" />
               Scan Bill / Document
@@ -1473,7 +1475,16 @@ const ConsignmentModuleInner: React.FC<ConsignmentModuleProps> = ({
                 <EditableSearchSelect
                   ariaLabel="Rate Mode"
                   value={rateMode}
-                  onChange={setRateMode}
+                  onChange={(nextMode) => {
+                    setRateMode(nextMode);
+                    const rateNum = Number(ratePerUnit);
+                    const wt = Number(nettWeight) || Number(grossWeight) || 0;
+                    if (Number.isFinite(rateNum) && rateNum > 0 && /ton|mt/i.test(nextMode) && wt > 0) {
+                      const calc = Math.round(rateNum * wt * 100) / 100;
+                      setTotalFreight(String(calc));
+                      setToPayAmount(String(Math.max(0, calc - (Number(paidAmount) || 0))));
+                    }
+                  }}
                   options={rateModeOptions}
                   placeholder="Fixed / Per MT"
                   onAddOption={(val) => addDropdownItem(ownerUid, company, 'rateModes', val)}

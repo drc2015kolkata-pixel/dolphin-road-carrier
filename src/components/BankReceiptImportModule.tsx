@@ -1,4 +1,4 @@
-import React, { useMemo, useState } from 'react';
+import React, { useEffect, useMemo, useState } from 'react';
 import * as XLSX from 'xlsx';
 import {
   CheckCircle2,
@@ -118,9 +118,13 @@ export function extractCreditReceiptsFromRows(params: {
 
     const combinedText = `${rawPartyHint} ${description} ${referenceNo}`.toLowerCase();
 
-    // Auto-match Invoice by Party Name / Invoice No / Reference / Unpaid Amount
+    // Auto-match Invoice by Party Name / Invoice No / Reference / Unpaid Amount (prioritize unpaid/partial bills)
+    const prioritizedInvoices = [
+      ...fyInvoices.filter((inv) => inv.status !== 'Paid'),
+      ...fyInvoices.filter((inv) => inv.status === 'Paid'),
+    ];
     let matchedInv: Invoice | undefined;
-    for (const inv of fyInvoices) {
+    for (const inv of prioritizedInvoices) {
       const invNoClean = (inv.invoiceNo || '').toLowerCase();
       const partyTokens = (inv.partyName || '')
         .toLowerCase()
@@ -205,11 +209,20 @@ export const BankReceiptImportModule: React.FC<BankReceiptImportModuleProps> = (
   onOpenPreview,
 }) => {
   const bankNames = useMemo(() => {
-    const list = (company.bankAccounts || []).map((b) => `${b.bankName} (${b.accountNo.slice(-4)})`);
-    return list.length > 0 ? list : [`${company.bankName} (${company.accountNo.slice(-4)})`];
+    const list = (company.bankAccounts || []).map(
+      (b) => `${b.bankName || 'Bank'} (${(b.accountNo || '').slice(-4)})`
+    );
+    return list.length > 0
+      ? list
+      : [`${company.bankName || 'Bank'} (${(company.accountNo || '').slice(-4)})`];
   }, [company]);
 
   const [selectedBank, setSelectedBank] = useState(bankNames[0]);
+  useEffect(() => {
+    if (bankNames.length > 0 && !bankNames.includes(selectedBank)) {
+      setSelectedBank(bankNames[0]);
+    }
+  }, [bankNames, selectedBank]);
   const [mirrorDrive, setMirrorDrive] = useState(false);
   const [importing, setImporting] = useState(false);
   const [statusMsg, setStatusMsg] = useState<string | null>(null);
@@ -325,7 +338,7 @@ export const BankReceiptImportModule: React.FC<BankReceiptImportModuleProps> = (
     const totalApplied = Number(rec.creditAmount || 0) + Number(rec.tdsAmount || 0);
     const nextPaid = Math.min(
       Number(inv.grandTotal || 0),
-      Number(inv.paidAmount || 0) + totalApplied
+      Math.round((Number(inv.paidAmount || 0) + totalApplied) * 100) / 100
     );
     const nextStatus: Invoice['status'] =
       nextPaid >= Number(inv.grandTotal || 0) - 1 ? 'Paid' : 'Partial';

@@ -271,7 +271,7 @@ const MasterModuleInner: React.FC<MasterModuleProps> = ({
 
   const handleSaveOwner = async (e: React.FormEvent) => {
     e.preventDefault();
-    if (!oName.trim()) return;
+    if (!oName.trim() || readOnly) return;
     const op = Number(oOpening) || 0;
     await upsertDocument(
       'parties',
@@ -309,7 +309,7 @@ const MasterModuleInner: React.FC<MasterModuleProps> = ({
 
   const handleSaveBroker = async (e: React.FormEvent) => {
     e.preventDefault();
-    if (!bName.trim()) return;
+    if (!bName.trim() || readOnly) return;
     const op = Number(bOpening) || 0;
     await upsertDocument(
       'parties',
@@ -349,7 +349,7 @@ const MasterModuleInner: React.FC<MasterModuleProps> = ({
 
   const handleSaveVehicle = async (e: React.FormEvent) => {
     e.preventDefault();
-    if (!vTruck.trim() || !vOwner.trim()) return;
+    if (!vTruck.trim() || !vOwner.trim() || readOnly) return;
     await upsertDocument(
       'vehicles',
       makeSafeDocId('veh'),
@@ -377,7 +377,7 @@ const MasterModuleInner: React.FC<MasterModuleProps> = ({
 
   const handleSaveDriver = async (e: React.FormEvent) => {
     e.preventDefault();
-    if (!dName.trim() || !dDl.trim() || !dExp) return;
+    if (!dName.trim() || !dDl.trim() || !dExp || readOnly) return;
     await upsertDocument(
       'drivers',
       makeSafeDocId('drv'),
@@ -698,26 +698,29 @@ const MasterModuleInner: React.FC<MasterModuleProps> = ({
         key: 'action',
         header: 'Action',
         align: 'right',
-        render: (p) => (
-          <button
-            type="button"
-            onClick={() =>
-              onShowConfirm({
-                title: `Delete Party ${p.name}?`,
-                description: `Remove ${p.name} from Master Directory?`,
-                confirmLabel: 'Delete',
-                variant: 'danger',
-                onConfirm: () => removeDocument('parties', p.id),
-              })
-            }
-            className="p-1 rounded hover:bg-red-50 text-slate-500 hover:text-red-600 cursor-pointer"
-          >
-            <Trash2 className="w-3.5 h-3.5" />
-          </button>
-        ),
+        render: (p) =>
+          readOnly ? (
+            <span className="text-[10px] font-bold text-slate-400">View</span>
+          ) : (
+            <button
+              type="button"
+              onClick={() =>
+                onShowConfirm({
+                  title: `Delete Party ${p.name}?`,
+                  description: `Remove ${p.name} from Master Directory?`,
+                  confirmLabel: 'Delete',
+                  variant: 'danger',
+                  onConfirm: () => removeDocument('parties', p.id),
+                })
+              }
+              className="p-1 rounded hover:bg-red-50 text-slate-500 hover:text-red-600 cursor-pointer"
+            >
+              <Trash2 className="w-3.5 h-3.5" />
+            </button>
+          ),
       },
     ],
-    [onShowConfirm]
+    [onShowConfirm, readOnly]
   );
 
   const ownerColumns = useMemo<Array<TableColumn<Party>>>(
@@ -763,26 +766,28 @@ const MasterModuleInner: React.FC<MasterModuleProps> = ({
               <Printer className="w-3 h-3" />
               Profile PDF
             </button>
-            <button
-              type="button"
-              onClick={() =>
-                onShowConfirm({
-                  title: `Delete Lorry Owner ${o.name}?`,
-                  description: `Remove ${o.name} from Lorry Owner Master?`,
-                  confirmLabel: 'Delete',
-                  variant: 'danger',
-                  onConfirm: () => removeDocument('parties', o.id),
-                })
-              }
-              className="p-1 rounded hover:bg-red-50 text-slate-500 hover:text-red-600 cursor-pointer"
-            >
-              <Trash2 className="w-3.5 h-3.5" />
-            </button>
+            {!readOnly && (
+              <button
+                type="button"
+                onClick={() =>
+                  onShowConfirm({
+                    title: `Delete Lorry Owner ${o.name}?`,
+                    description: `Remove ${o.name} from Lorry Owner Master?`,
+                    confirmLabel: 'Delete',
+                    variant: 'danger',
+                    onConfirm: () => removeDocument('parties', o.id),
+                  })
+                }
+                className="p-1 rounded hover:bg-red-50 text-slate-500 hover:text-red-600 cursor-pointer"
+              >
+                <Trash2 className="w-3.5 h-3.5" />
+              </button>
+            )}
           </>
         ),
       },
     ],
-    [onShowConfirm, onPreviewPdf]
+    [onShowConfirm, onPreviewPdf, readOnly]
   );
 
   const brokerColumns = useMemo<Array<TableColumn<Party>>>(
@@ -839,26 +844,28 @@ const MasterModuleInner: React.FC<MasterModuleProps> = ({
               <Printer className="w-3 h-3" />
               Profile PDF
             </button>
-            <button
-              type="button"
-              onClick={() =>
-                onShowConfirm({
-                  title: `Delete Broker ${b.name}?`,
-                  description: `Remove ${b.name} from Broker Master?`,
-                  confirmLabel: 'Delete',
-                  variant: 'danger',
-                  onConfirm: () => removeDocument('parties', b.id),
-                })
-              }
-              className="p-1 rounded hover:bg-red-50 text-slate-500 hover:text-red-600 cursor-pointer"
-            >
-              <Trash2 className="w-3.5 h-3.5" />
-            </button>
+            {!readOnly && (
+              <button
+                type="button"
+                onClick={() =>
+                  onShowConfirm({
+                    title: `Delete Broker ${b.name}?`,
+                    description: `Remove ${b.name} from Broker Master?`,
+                    confirmLabel: 'Delete',
+                    variant: 'danger',
+                    onConfirm: () => removeDocument('parties', b.id),
+                  })
+                }
+                className="p-1 rounded hover:bg-red-50 text-slate-500 hover:text-red-600 cursor-pointer"
+              >
+                <Trash2 className="w-3.5 h-3.5" />
+              </button>
+            )}
           </>
         ),
       },
     ],
-    [onShowConfirm, onPreviewPdf]
+    [onShowConfirm, onPreviewPdf, readOnly]
   );
 
   const vehicleColumns = useMemo<Array<TableColumn<Vehicle>>>(
@@ -884,26 +891,28 @@ const MasterModuleInner: React.FC<MasterModuleProps> = ({
               <Printer className="w-3 h-3" />
               PDF
             </button>
-            <button
-              type="button"
-              onClick={() =>
-                onShowConfirm({
-                  title: `Delete Vehicle ${v.truckNo}?`,
-                  description: `Remove ${v.truckNo} from Fleet Master?`,
-                  confirmLabel: 'Delete',
-                  variant: 'danger',
-                  onConfirm: () => removeDocument('vehicles', v.id),
-                })
-              }
-              className="p-1 rounded hover:bg-red-50 text-slate-500 hover:text-red-600 cursor-pointer"
-            >
-              <Trash2 className="w-3.5 h-3.5" />
-            </button>
+            {!readOnly && (
+              <button
+                type="button"
+                onClick={() =>
+                  onShowConfirm({
+                    title: `Delete Vehicle ${v.truckNo}?`,
+                    description: `Remove ${v.truckNo} from Fleet Master?`,
+                    confirmLabel: 'Delete',
+                    variant: 'danger',
+                    onConfirm: () => removeDocument('vehicles', v.id),
+                  })
+                }
+                className="p-1 rounded hover:bg-red-50 text-slate-500 hover:text-red-600 cursor-pointer"
+              >
+                <Trash2 className="w-3.5 h-3.5" />
+              </button>
+            )}
           </>
         ),
       },
     ],
-    [onShowConfirm, onPreviewPdf]
+    [onShowConfirm, onPreviewPdf, readOnly]
   );
 
   const driverColumns = useMemo<Array<TableColumn<Driver>>>(
@@ -938,26 +947,28 @@ const MasterModuleInner: React.FC<MasterModuleProps> = ({
               <Printer className="w-3 h-3" />
               Profile PDF
             </button>
-            <button
-              type="button"
-              onClick={() =>
-                onShowConfirm({
-                  title: `Delete Driver ${d.name}?`,
-                  description: `Remove ${d.name} from Driver Master?`,
-                  confirmLabel: 'Delete',
-                  variant: 'danger',
-                  onConfirm: () => removeDocument('drivers', d.id),
-                })
-              }
-              className="p-1 rounded hover:bg-red-50 text-slate-500 hover:text-red-600 cursor-pointer"
-            >
-              <Trash2 className="w-3.5 h-3.5" />
-            </button>
+            {!readOnly && (
+              <button
+                type="button"
+                onClick={() =>
+                  onShowConfirm({
+                    title: `Delete Driver ${d.name}?`,
+                    description: `Remove ${d.name} from Driver Master?`,
+                    confirmLabel: 'Delete',
+                    variant: 'danger',
+                    onConfirm: () => removeDocument('drivers', d.id),
+                  })
+                }
+                className="p-1 rounded hover:bg-red-50 text-slate-500 hover:text-red-600 cursor-pointer"
+              >
+                <Trash2 className="w-3.5 h-3.5" />
+              </button>
+            )}
           </>
         ),
       },
     ],
-    [onShowConfirm, onPreviewPdf]
+    [onShowConfirm, onPreviewPdf, readOnly]
   );
 
   return (
@@ -1313,7 +1324,8 @@ const MasterModuleInner: React.FC<MasterModuleProps> = ({
             <div className="px-4 py-3 bg-slate-50 border-t border-slate-200 flex justify-end">
               <button
                 type="submit"
-                className="inline-flex items-center gap-1.5 px-4 py-1.5 rounded-md bg-blue-700 hover:bg-blue-800 text-white text-xs font-bold cursor-pointer"
+                disabled={readOnly}
+                className="inline-flex items-center gap-1.5 px-4 py-1.5 rounded-md bg-blue-700 hover:bg-blue-800 text-white text-xs font-bold cursor-pointer disabled:opacity-50"
               >
                 <Save className="w-3.5 h-3.5" />
                 Save Lorry Owner
@@ -1457,7 +1469,8 @@ const MasterModuleInner: React.FC<MasterModuleProps> = ({
             <div className="px-4 py-3 bg-slate-50 border-t border-slate-200 flex justify-end">
               <button
                 type="submit"
-                className="inline-flex items-center gap-1.5 px-4 py-1.5 rounded-md bg-blue-700 hover:bg-blue-800 text-white text-xs font-bold cursor-pointer"
+                disabled={readOnly}
+                className="inline-flex items-center gap-1.5 px-4 py-1.5 rounded-md bg-blue-700 hover:bg-blue-800 text-white text-xs font-bold cursor-pointer disabled:opacity-50"
               >
                 <Save className="w-3.5 h-3.5" />
                 Save Broker
@@ -1588,7 +1601,8 @@ const MasterModuleInner: React.FC<MasterModuleProps> = ({
             <div className="px-4 py-3 bg-slate-50 border-t border-slate-200 flex justify-end">
               <button
                 type="submit"
-                className="inline-flex items-center gap-1.5 px-4 py-1.5 rounded-md bg-blue-700 hover:bg-blue-800 text-white text-xs font-bold cursor-pointer"
+                disabled={readOnly}
+                className="inline-flex items-center gap-1.5 px-4 py-1.5 rounded-md bg-blue-700 hover:bg-blue-800 text-white text-xs font-bold cursor-pointer disabled:opacity-50"
               >
                 <Save className="w-3.5 h-3.5" />
                 Save Vehicle
@@ -1720,7 +1734,8 @@ const MasterModuleInner: React.FC<MasterModuleProps> = ({
             <div className="px-4 py-3 bg-slate-50 border-t border-slate-200 flex justify-end">
               <button
                 type="submit"
-                className="inline-flex items-center gap-1.5 px-4 py-1.5 rounded-md bg-blue-700 hover:bg-blue-800 text-white text-xs font-bold cursor-pointer"
+                disabled={readOnly}
+                className="inline-flex items-center gap-1.5 px-4 py-1.5 rounded-md bg-blue-700 hover:bg-blue-800 text-white text-xs font-bold cursor-pointer disabled:opacity-50"
               >
                 <Save className="w-3.5 h-3.5" />
                 Save Driver

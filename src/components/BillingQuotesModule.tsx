@@ -69,6 +69,8 @@ interface BillingQuotesModuleProps {
   activeFy: string;
   isMasterAdmin: boolean;
   readOnly?: boolean;
+  quotationsAccess?: 'edit' | 'view' | 'blocked';
+  declarationsAccess?: 'edit' | 'view' | 'blocked';
   initialSubTab?: 'invoice' | 'quotation' | '194c';
   invoices: Invoice[];
   quotations: Quotation[];
@@ -112,6 +114,8 @@ const BillingQuotesModuleInner: React.FC<BillingQuotesModuleProps> = ({
   activeFy,
   isMasterAdmin,
   readOnly = false,
+  quotationsAccess = 'edit',
+  declarationsAccess = 'edit',
   initialSubTab = 'invoice',
   invoices,
   quotations,
@@ -124,10 +128,26 @@ const BillingQuotesModuleInner: React.FC<BillingQuotesModuleProps> = ({
   onPreviewPdf,
   onShowConfirm,
 }) => {
-  const [subTab, setSubTab] = useState<'invoice' | 'quotation' | '194c'>(initialSubTab);
+  const [subTab, setSubTab] = useState<'invoice' | 'quotation' | '194c'>(() => {
+    if (initialSubTab === 'quotation' && quotationsAccess === 'blocked') return 'invoice';
+    if (initialSubTab === '194c' && declarationsAccess === 'blocked') return 'invoice';
+    return initialSubTab;
+  });
   useEffect(() => {
-    if (initialSubTab) setSubTab(initialSubTab);
-  }, [initialSubTab]);
+    if (!initialSubTab) return;
+    if (initialSubTab === 'quotation' && quotationsAccess === 'blocked') {
+      setSubTab('invoice');
+      return;
+    }
+    if (initialSubTab === '194c' && declarationsAccess === 'blocked') {
+      setSubTab('invoice');
+      return;
+    }
+    setSubTab(initialSubTab);
+  }, [initialSubTab, quotationsAccess, declarationsAccess]);
+
+  const quotationReadOnly = quotationsAccess !== 'edit';
+  const declarationReadOnly = declarationsAccess !== 'edit';
 
   const availableBanks = useMemo(() => {
     if (company.bankAccounts && company.bankAccounts.length > 0) {
@@ -151,6 +171,12 @@ const BillingQuotesModuleInner: React.FC<BillingQuotesModuleProps> = ({
   const [selectedBankId, setSelectedBankId] = useState<string>(
     () => availableBanks.find((b) => b.isDefault)?.id || availableBanks[0]?.id || ''
   );
+  useEffect(() => {
+    if (availableBanks.length === 0) return;
+    if (!availableBanks.some((b) => b.id === selectedBankId)) {
+      setSelectedBankId(availableBanks.find((b) => b.isDefault)?.id || availableBanks[0]?.id || '');
+    }
+  }, [availableBanks, selectedBankId]);
   const effectiveGoodsList = useMemo(
     () => getEffectiveDropdownList(company, 'goodsTypes'),
     [company]
@@ -349,16 +375,18 @@ const BillingQuotesModuleInner: React.FC<BillingQuotesModuleProps> = ({
     [rows]
   );
 
-  const detNum = Number(detentionCharges) || 0;
-  const unlNum = Number(unloadingCharges) || 0;
-  const stNum = Number(stCharges) || 0;
+  const detNum = Math.max(0, Number(detentionCharges) || 0);
+  const unlNum = Math.max(0, Number(unloadingCharges) || 0);
+  const stNum = Math.max(0, Number(stCharges) || 0);
   const taxableSubtotal = freightSum + detNum + unlNum + stNum;
   const effectiveGstRate = isExportCountry ? 0 : gstRate;
   const totalTax = Number(((taxableSubtotal * effectiveGstRate) / 100).toFixed(2));
   const cgstAmt = isExportCountry || interstate ? 0 : Number((totalTax / 2).toFixed(2));
-  const sgstAmt = isExportCountry || interstate ? 0 : Number((totalTax / 2).toFixed(2));
+  const sgstAmt = isExportCountry || interstate ? 0 : Number((totalTax - cgstAmt).toFixed(2));
   const igstAmt = !isExportCountry && interstate ? totalTax : 0;
-  const grandTotal = isExportCountry || reverseCharge ? taxableSubtotal : taxableSubtotal + totalTax;
+  const grandTotal = Number(
+    (isExportCountry || reverseCharge ? taxableSubtotal : taxableSubtotal + totalTax).toFixed(2)
+  );
 
   const pickerConsignments = useMemo(() => {
     const q = debouncedCnPickerSearch.trim().toLowerCase();
@@ -488,6 +516,7 @@ const BillingQuotesModuleInner: React.FC<BillingQuotesModuleProps> = ({
 
   const handleSaveInvoice = async (e: React.FormEvent) => {
     e.preventDefault();
+    if (readOnly) return;
     setInvValidationError(null);
     const validRows = rows.filter((r) => r.cnNo || r.vehicle || r.freight > 0);
     if (!partyName.trim() || validRows.length === 0) return;
@@ -607,7 +636,7 @@ const BillingQuotesModuleInner: React.FC<BillingQuotesModuleProps> = ({
 
   const handleSaveQuotation = async (e: React.FormEvent) => {
     e.preventDefault();
-    if (!qParty.trim() || readOnly) return;
+    if (!qParty.trim() || quotationReadOnly) return;
 
     let finalQNo = qNo.trim();
     if (autoAtomicQuotation) {
@@ -713,7 +742,7 @@ const BillingQuotesModuleInner: React.FC<BillingQuotesModuleProps> = ({
 
   const handleSave194C = async (e: React.FormEvent) => {
     e.preventDefault();
-    if (!dParty.trim()) return;
+    if (!dParty.trim() || declarationReadOnly) return;
     const id = makeSafeDocId('decl');
     const decl: Declaration194C = {
       id,
@@ -1120,30 +1149,34 @@ const BillingQuotesModuleInner: React.FC<BillingQuotesModuleProps> = ({
           <FileSpreadsheet className="w-4 h-4" />
           Tax Invoice / Bill of Supply
         </button>
-        <button
-          type="button"
-          onClick={() => setSubTab('quotation')}
-          className={`inline-flex items-center gap-2 px-4 py-2 rounded-lg text-xs font-bold transition-colors cursor-pointer whitespace-nowrap ${
-            subTab === 'quotation'
-              ? 'bg-[#0D47A1] text-white'
-              : 'text-slate-700 hover:bg-slate-100'
-          }`}
-        >
-          <ReceiptText className="w-4 h-4" />
-          Proforma Rate Quotation
-        </button>
-        <button
-          type="button"
-          onClick={() => setSubTab('194c')}
-          className={`inline-flex items-center gap-2 px-4 py-2 rounded-lg text-xs font-bold transition-colors cursor-pointer whitespace-nowrap ${
-            subTab === '194c'
-              ? 'bg-[#0D47A1] text-white'
-              : 'text-slate-700 hover:bg-slate-100'
-          }`}
-        >
-          <FileCheck2 className="w-4 h-4" />
-          Section 194C Declaration
-        </button>
+        {quotationsAccess !== 'blocked' && (
+          <button
+            type="button"
+            onClick={() => setSubTab('quotation')}
+            className={`inline-flex items-center gap-2 px-4 py-2 rounded-lg text-xs font-bold transition-colors cursor-pointer whitespace-nowrap ${
+              subTab === 'quotation'
+                ? 'bg-[#0D47A1] text-white'
+                : 'text-slate-700 hover:bg-slate-100'
+            }`}
+          >
+            <ReceiptText className="w-4 h-4" />
+            Proforma Rate Quotation
+          </button>
+        )}
+        {declarationsAccess !== 'blocked' && (
+          <button
+            type="button"
+            onClick={() => setSubTab('194c')}
+            className={`inline-flex items-center gap-2 px-4 py-2 rounded-lg text-xs font-bold transition-colors cursor-pointer whitespace-nowrap ${
+              subTab === '194c'
+                ? 'bg-[#0D47A1] text-white'
+                : 'text-slate-700 hover:bg-slate-100'
+            }`}
+          >
+            <FileCheck2 className="w-4 h-4" />
+            Section 194C Declaration
+          </button>
+        )}
       </div>
 
       {/* ================================================================= */}
@@ -1507,10 +1540,11 @@ const BillingQuotesModuleInner: React.FC<BillingQuotesModuleProps> = ({
                           <td className="p-1.5">
                             <input
                               type="number"
+                              min={0}
                               step="0.001"
                               value={row.weight}
                               onChange={(e) => {
-                                const w = Number(e.target.value) || 0;
+                                const w = Math.max(0, Number(e.target.value) || 0);
                                 setRows((prev) =>
                                   prev.map((r, i) => {
                                     if (i !== idx) return r;
@@ -1563,10 +1597,11 @@ const BillingQuotesModuleInner: React.FC<BillingQuotesModuleProps> = ({
                           <td className="p-1.5">
                             <input
                               type="number"
+                              min={0}
                               step="0.01"
                               value={row.ratePerMt}
                               onChange={(e) => {
-                                const rate = Number(e.target.value) || 0;
+                                const rate = Math.max(0, Number(e.target.value) || 0);
                                 setRows((prev) =>
                                   prev.map((r, i) => {
                                     if (i !== idx) return r;
@@ -1584,12 +1619,13 @@ const BillingQuotesModuleInner: React.FC<BillingQuotesModuleProps> = ({
                           <td className="p-1.5">
                             <input
                               type="number"
+                              min={0}
                               step="0.01"
                               value={row.freight}
                               onChange={(e) =>
                                 setRows((prev) =>
                                   prev.map((r, i) =>
-                                    i === idx ? { ...r, freight: Number(e.target.value) || 0 } : r
+                                    i === idx ? { ...r, freight: Math.max(0, Number(e.target.value) || 0) } : r
                                   )
                                 )
                               }
@@ -1647,10 +1683,10 @@ const BillingQuotesModuleInner: React.FC<BillingQuotesModuleProps> = ({
                       {isExportCountry
                         ? `${billingCountry}: GST Exempt (0%)`
                         : /^19/.test(partyGstin.trim())
-                          ? 'WB (19): CGST 2.5% + SGST 2.5%'
+                          ? `WB (19): CGST ${(effectiveGstRate / 2).toFixed(1)}% + SGST ${(effectiveGstRate / 2).toFixed(1)}%`
                           : interstate
-                            ? 'Interstate: IGST 5%'
-                            : 'Intra-State: CGST 2.5% + SGST 2.5%'}
+                            ? `Interstate: IGST ${effectiveGstRate.toFixed(1)}%`
+                            : `Intra-State: CGST ${(effectiveGstRate / 2).toFixed(1)}% + SGST ${(effectiveGstRate / 2).toFixed(1)}%`}
                     </span>
                   </div>
 
@@ -1711,9 +1747,9 @@ const BillingQuotesModuleInner: React.FC<BillingQuotesModuleProps> = ({
                   </div>
 
                   <div className="grid grid-cols-2 gap-1 text-slate-700 font-mono-num pt-1">
-                    <span>CGST (2.5%): ₹{formatINR(cgstAmt)}</span>
-                    <span>SGST (2.5%): ₹{formatINR(sgstAmt)}</span>
-                    <span>IGST (5.0%): ₹{formatINR(igstAmt)}</span>
+                    <span>CGST ({(effectiveGstRate / 2).toFixed(1)}%): ₹{formatINR(cgstAmt)}</span>
+                    <span>SGST ({(effectiveGstRate / 2).toFixed(1)}%): ₹{formatINR(sgstAmt)}</span>
+                    <span>IGST ({effectiveGstRate.toFixed(1)}%): ₹{formatINR(igstAmt)}</span>
                     <span className="font-bold">Total Tax: ₹{formatINR(totalTax)}</span>
                   </div>
                 </div>
@@ -2109,7 +2145,7 @@ const BillingQuotesModuleInner: React.FC<BillingQuotesModuleProps> = ({
             <div className="px-4 py-3 bg-slate-50 border-t border-slate-200 flex justify-end">
               <button
                 type="submit"
-                disabled={readOnly}
+                disabled={quotationReadOnly}
                 className="inline-flex items-center gap-1.5 px-4 py-1.5 rounded-md bg-blue-700 hover:bg-blue-800 text-white text-xs font-bold cursor-pointer disabled:opacity-50"
               >
                 <Printer className="w-3.5 h-3.5" />
@@ -2238,7 +2274,7 @@ const BillingQuotesModuleInner: React.FC<BillingQuotesModuleProps> = ({
             <div className="px-4 py-3 bg-slate-50 border-t border-slate-200 flex justify-end">
               <button
                 type="submit"
-                disabled={readOnly}
+                disabled={declarationReadOnly}
                 className="inline-flex items-center gap-1.5 px-4 py-1.5 rounded-md bg-blue-700 hover:bg-blue-800 text-white text-xs font-bold cursor-pointer disabled:opacity-50"
               >
                 <Printer className="w-3.5 h-3.5" />

@@ -637,6 +637,9 @@ function buildInvoiceDoc(
     const taxY = boxTop + 10.5;
     doc.setFont('helvetica', 'normal');
     doc.setFontSize(7.3);
+    const gstSlab = isCrossBorderExempt ? 0 : Number(invoice.gstRate ?? 5);
+    const halfSlabStr = (gstSlab / 2).toFixed(1);
+    const fullSlabStr = gstSlab.toFixed(1);
     if (isCrossBorderExempt) {
       doc.setFont('helvetica', 'bold');
       doc.setTextColor(180, 35, 35);
@@ -648,15 +651,15 @@ function buildInvoiceDoc(
       doc.text(`Reverse Charge (RCM) : ${invoice.reverseCharge ? 'Yes' : 'No'}`, M + 2, taxY);
       doc.setFont('helvetica', 'bold');
       doc.text(
-        `GST Slab : ${Number(invoice.gstRate ?? 5).toFixed(1)}% (${invoice.interstate || (invoice.igstAmt || 0) > 0 ? 'IGST Interstate' : 'CGST 2.5% + SGST 2.5%'})`,
+        `GST Slab : ${fullSlabStr}% (${invoice.interstate || (invoice.igstAmt || 0) > 0 ? 'IGST Interstate' : `CGST ${halfSlabStr}% + SGST ${halfSlabStr}%`})`,
         M + 2,
         taxY + 5
       );
     }
     doc.setFont('helvetica', 'bold');
-    doc.text(`CGST (2.5%) : ${formatINR(invoice.cgstAmt || 0)}`, M + 2, taxY + 10.5);
-    doc.text(`SGST (2.5%) : ${formatINR(invoice.sgstAmt || 0)}`, M + 2, taxY + 15.5);
-    doc.text(`IGST (5.0%) : ${formatINR(invoice.igstAmt || 0)}`, M + 2, taxY + 20.5);
+    doc.text(`CGST (${halfSlabStr}%) : ${formatINR(invoice.cgstAmt || 0)}`, M + 2, taxY + 10.5);
+    doc.text(`SGST (${halfSlabStr}%) : ${formatINR(invoice.sgstAmt || 0)}`, M + 2, taxY + 15.5);
+    doc.text(`IGST (${fullSlabStr}%) : ${formatINR(invoice.igstAmt || 0)}`, M + 2, taxY + 20.5);
     doc.text(`TOTAL GST   : ${formatINR(invoice.totalTax || 0)}`, M + 2, taxY + 25.5);
     doc.setFontSize(6.6);
     doc.setFont('helvetica', 'normal');
@@ -1281,15 +1284,15 @@ function buildQuotationDoc(
 
   doc.setFont('helvetica', 'bold');
   doc.setFontSize(10.5);
-  doc.text(`M/S ${company.companyName}`, SAFE_MARGIN, SAFE_MARGIN + 31);
+  doc.text(`M/S ${company.companyName || 'DOLPHIN ROAD CARRIER'}`, SAFE_MARGIN, SAFE_MARGIN + 31);
   doc.setFont('helvetica', 'normal');
   doc.setFontSize(8.2);
-  doc.text(company.address, SAFE_MARGIN, SAFE_MARGIN + 36);
-  doc.text(`GSTIN: ${company.gstin}`, SAFE_MARGIN, SAFE_MARGIN + 40.5);
+  doc.text(String(company.address || ''), SAFE_MARGIN, SAFE_MARGIN + 36);
+  doc.text(`GSTIN: ${company.gstin || ''}`, SAFE_MARGIN, SAFE_MARGIN + 40.5);
 
-  doc.text(`M: ${company.phones}`, pw - SAFE_MARGIN, SAFE_MARGIN + 31, { align: 'right' });
+  doc.text(`M: ${company.phones || ''}`, pw - SAFE_MARGIN, SAFE_MARGIN + 31, { align: 'right' });
   doc.text(`Date: ${formatDateDDMMYYYY(quote.quotationDate)}`, pw - SAFE_MARGIN, SAFE_MARGIN + 36, { align: 'right' });
-  doc.text(`Ref No: ${quote.quotationNo}`, pw - SAFE_MARGIN, SAFE_MARGIN + 40.5, { align: 'right' });
+  doc.text(`Ref No: ${quote.quotationNo || '-'}`, pw - SAFE_MARGIN, SAFE_MARGIN + 40.5, { align: 'right' });
 
   doc.setFont('helvetica', 'bold');
   doc.setFontSize(9);
@@ -1299,7 +1302,7 @@ function buildQuotationDoc(
   doc.line(SAFE_MARGIN, SAFE_MARGIN + 51, pw - SAFE_MARGIN, SAFE_MARGIN + 51);
 
   doc.text('Quotation For:', SAFE_MARGIN, SAFE_MARGIN + 57);
-  doc.text(`M/S ${quote.partyName}`, SAFE_MARGIN, SAFE_MARGIN + 62);
+  doc.text(`M/S ${quote.partyName || 'PARTY'}`, SAFE_MARGIN, SAFE_MARGIN + 62);
   doc.setFont('helvetica', 'normal');
   doc.text(quote.partyAddress || '-', SAFE_MARGIN, SAFE_MARGIN + 67);
   doc.setFont('helvetica', 'bold');
@@ -1310,15 +1313,15 @@ function buildQuotationDoc(
   doc.text(quote.validityText || '7 Days', pw - SAFE_MARGIN, SAFE_MARGIN + 62, { align: 'right' });
 
   const rows: Array<[string, string]> = [
-    ['Vehicle Type', quote.vehicleType],
+    ['Vehicle Type', quote.vehicleType || '-'],
     ...(quote.goodsType ? [['Goods Type', quote.goodsType] as [string, string]] : []),
-    ['Freight', `Rs. ${formatINR(quote.freight)}${quote.rateMode ? ` (${quote.rateMode})` : ''}`],
+    ['Freight', `Rs. ${formatINR(quote.freight || 0)}${quote.rateMode ? ` (${quote.rateMode})` : ''}`],
     ['Loading Charges', quote.loadingCharge || 'NO Extra Charges'],
     ['Unloading Charges', quote.unloadingCharge || 'YES Extra Charges'],
     ['Parking', quote.parkingCharge || 'YES Extra Charges'],
     ['Detention', quote.detentionCharge || 'YES Extra Charges'],
     ['Ton Guarantee', quote.tonGuarantee || '09 TON Loading Capacity'],
-    ['Destination', quote.destination],
+    ['Destination', quote.destination || '-'],
     ['Advance Pay', quote.advancePay || 'No Advance Before Lorry Loading'],
     ['Entry Point', quote.entryPoint || 'As Applicable'],
   ];
@@ -1334,9 +1337,9 @@ function buildQuotationDoc(
     doc.rect(SAFE_MARGIN + labelW, ty, valW, rowH);
     doc.setFont('helvetica', 'bold');
     doc.setFontSize(8.2);
-    doc.text(k, SAFE_MARGIN + 2.5, ty + rowH - 2.1);
+    doc.text(String(k ?? ''), SAFE_MARGIN + 2.5, ty + rowH - 2.1);
     doc.setFont('helvetica', 'normal');
-    doc.text(v, SAFE_MARGIN + labelW + 3, ty + rowH - 2.1);
+    doc.text(String(v ?? '-'), SAFE_MARGIN + labelW + 3, ty + rowH - 2.1);
     ty += rowH;
   });
 
@@ -1346,6 +1349,7 @@ function buildQuotationDoc(
     ty = SAFE_MARGIN + 10;
   }
 
+  const qBank = resolveInvoiceBankAccount(company);
   doc.rect(SAFE_MARGIN, ty, cw * 0.52, 28);
   doc.setFont('helvetica', 'bold');
   doc.setFontSize(8.2);
@@ -1353,9 +1357,9 @@ function buildQuotationDoc(
   doc.setFont('helvetica', 'normal');
   doc.setFontSize(7.8);
   doc.text(`A/C Name   : ${company.companyName}`, SAFE_MARGIN + 2.5, ty + 11);
-  doc.text(`Bank Name  : ${company.bankName}`, SAFE_MARGIN + 2.5, ty + 16);
-  doc.text(`A/C No     : ${company.accountNo}`, SAFE_MARGIN + 2.5, ty + 21);
-  doc.text(`IFSC Code  : ${company.ifsc} (${company.bankBranch})`, SAFE_MARGIN + 2.5, ty + 26);
+  doc.text(`Bank Name  : ${qBank.bankName}`, SAFE_MARGIN + 2.5, ty + 16);
+  doc.text(`A/C No     : ${qBank.accountNo}`, SAFE_MARGIN + 2.5, ty + 21);
+  doc.text(`IFSC Code  : ${qBank.ifsc} (${qBank.branch})`, SAFE_MARGIN + 2.5, ty + 26);
 
   // BOTTOM-RIGHT Company Stamp & Signature
   drawBottomRightStampAndSign(doc, assets, pw - SAFE_MARGIN, ty + 5, 29, 18);
@@ -1415,12 +1419,12 @@ function buildDeclaration194CDoc(
   doc.setFont('times', 'bolditalic');
   doc.setFontSize(18);
   doc.setTextColor(15, 23, 42);
-  doc.text(company.companyName, SAFE_MARGIN + 28, SAFE_MARGIN + 8);
+  doc.text(company.companyName || 'DOLPHIN ROAD CARRIER', SAFE_MARGIN + 28, SAFE_MARGIN + 8);
 
   doc.setFont('helvetica', 'normal');
   doc.setFontSize(8.5);
-  doc.text(company.address, SAFE_MARGIN + 28, SAFE_MARGIN + 13.5);
-  doc.text(`E-mail:- ${company.email}   |   Mob: ${company.phones}`, SAFE_MARGIN + 28, SAFE_MARGIN + 18.5);
+  doc.text(company.address || '', SAFE_MARGIN + 28, SAFE_MARGIN + 13.5);
+  doc.text(`E-mail:- ${company.email || ''}   |   Mob: ${company.phones || ''}`, SAFE_MARGIN + 28, SAFE_MARGIN + 18.5);
 
   doc.setFont('helvetica', 'bold');
   doc.setFontSize(10);

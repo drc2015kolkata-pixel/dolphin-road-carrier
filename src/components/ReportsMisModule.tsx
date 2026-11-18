@@ -53,6 +53,7 @@ interface ReportsMisModuleProps {
   ownerUid: string;
   activeFy: string;
   isMasterAdmin: boolean;
+  readOnly?: boolean;
   invoices: Invoice[];
   lorryHires: LorryHire[];
   consignments: ConsignmentNote[];
@@ -95,6 +96,7 @@ type FoxproStatementKind =
 const ReportsMisModuleInner: React.FC<ReportsMisModuleProps> = ({
   activeFy,
   isMasterAdmin,
+  readOnly = false,
   invoices,
   lorryHires,
   consignments,
@@ -127,7 +129,10 @@ const ReportsMisModuleInner: React.FC<ReportsMisModuleProps> = ({
 
     const expenseByCn = new Map<string, number>();
     transactions.forEach((t) => {
-      if (t.txType === 'Expense' && t.linkedCnNo) {
+      const isAutoLorryBalanceTx =
+        t.ledgerAccount === 'Lorry Hire Payable A/c' &&
+        (Boolean(t.linkedCnNo) || /^LH-/i.test(t.txCode || ''));
+      if (t.txType === 'Expense' && t.linkedCnNo && !isAutoLorryBalanceTx) {
         expenseByCn.set(t.linkedCnNo, (expenseByCn.get(t.linkedCnNo) || 0) + Number(t.amount || 0));
       }
     });
@@ -205,6 +210,7 @@ const ReportsMisModuleInner: React.FC<ReportsMisModuleProps> = ({
   const accountBookRows = useMemo(() => {
     const fyOpenings = company.fyOpeningBalances?.[normalizeFyLabel(activeFy)] || {};
     const map = new Map<string, { party: string; debit: number; credit: number }>();
+    const invoiceNoSet = new Set(invoices.map((i) => i.invoiceNo));
     parties.forEach((p) => {
       const cf = fyOpenings[p.name] || fyOpenings[p.id];
       const ob = cf ? Number(cf.amount || 0) : Number(p.openingBalance || 0);
@@ -221,7 +227,22 @@ const ReportsMisModuleInner: React.FC<ReportsMisModuleProps> = ({
       cur.credit += Number(inv.paidAmount || 0);
       map.set(inv.partyName, cur);
     });
+    lorryHires.forEach((h) => {
+      const ownerKey = (h.ownerName || '').trim();
+      if (!ownerKey) return;
+      const cur = map.get(ownerKey) || { party: ownerKey, debit: 0, credit: 0 };
+      cur.credit += Number(h.hireAmount || 0);
+      cur.debit += Number(h.advancePaid || 0) + (h.balancePaid ? Number(h.balancePayable || 0) : 0);
+      map.set(ownerKey, cur);
+    });
     transactions.forEach((tx) => {
+      const isLinkedInvReceipt =
+        tx.txType === 'Income' && Boolean(tx.linkedInvoiceNo && invoiceNoSet.has(tx.linkedInvoiceNo));
+      const isAutoLorryBalanceTx =
+        tx.txType === 'Expense' &&
+        tx.ledgerAccount === 'Lorry Hire Payable A/c' &&
+        (Boolean(tx.linkedCnNo) || /^LH-/i.test(tx.txCode || ''));
+      if (isLinkedInvReceipt || isAutoLorryBalanceTx) return;
       const cur = map.get(tx.partyName) || { party: tx.partyName, debit: 0, credit: 0 };
       if (tx.txType === 'Income') cur.credit += Number(tx.amount || 0);
       else cur.debit += Number(tx.amount || 0);
@@ -229,10 +250,10 @@ const ReportsMisModuleInner: React.FC<ReportsMisModuleProps> = ({
     });
     return Array.from(map.values()).map((r) => ({
       ...r,
-      netBalance: Math.abs(r.debit - r.credit),
+      netBalance: Math.round(Math.abs(r.debit - r.credit) * 100) / 100,
       side: r.debit >= r.credit ? ('Dr' as const) : ('Cr' as const),
     }));
-  }, [parties, invoices, transactions, company.fyOpeningBalances, activeFy]);
+  }, [parties, invoices, lorryHires, transactions, company.fyOpeningBalances, activeFy]);
 
   // Debounced search filters per tab
   const q = debouncedSearch.trim().toLowerCase();
@@ -703,7 +724,13 @@ const ReportsMisModuleInner: React.FC<ReportsMisModuleProps> = ({
 
     const lorryHireCost = lorryHires.reduce((s, h) => s + Number(h.hireAmount || 0), 0);
     const directExpenses = transactions
-      .filter((t) => t.txType === 'Expense')
+      .filter((t) => {
+        if (t.txType !== 'Expense') return false;
+        const isAutoLorryBalanceTx =
+          t.ledgerAccount === 'Lorry Hire Payable A/c' &&
+          (Boolean(t.linkedCnNo) || /^LH-/i.test(t.txCode || ''));
+        return !isAutoLorryBalanceTx;
+      })
       .reduce((s, t) => s + Number(t.amount || 0), 0);
     const totalExpense = lorryHireCost + directExpenses;
     const netProfit = totalRevenue - totalExpense;
@@ -720,6 +747,7 @@ const ReportsMisModuleInner: React.FC<ReportsMisModuleProps> = ({
   }, [invoices, transactions, lorryHires]);
 
   const handleRecalculateBalances = async () => {
+    if (readOnly) return;
     let updated = 0;
     for (const p of parties) {
       const row = accountBookRows.find((r) => r.party === p.name);
@@ -740,6 +768,7 @@ const ReportsMisModuleInner: React.FC<ReportsMisModuleProps> = ({
   };
 
   const handleAutoTransferBalances = () => {
+    if (readOnly) return;
     onShowConfirm({
       title: 'Auto Transfer Closing Balances to Opening Balance?',
       description:
@@ -1708,16 +1737,18 @@ const ReportsMisModuleInner: React.FC<ReportsMisModuleProps> = ({
           <div className="flex flex-wrap gap-2">
             <button
               type="button"
+              disabled={readOnly}
               onClick={handleRecalculateBalances}
-              className="inline-flex items-center gap-1.5 px-3.5 py-2 rounded-lg bg-blue-700 hover:bg-blue-800 text-white text-xs font-bold cursor-pointer"
+              className="inline-flex items-center gap-1.5 px-3.5 py-2 rounded-lg bg-blue-700 hover:bg-blue-800 text-white text-xs font-bold cursor-pointer disabled:opacity-50"
             >
               <Calculator className="w-4 h-4" />
               Recalculate Party Balances
             </button>
             <button
               type="button"
+              disabled={readOnly}
               onClick={handleAutoTransferBalances}
-              className="inline-flex items-center gap-1.5 px-3.5 py-2 rounded-lg bg-purple-700 hover:bg-purple-800 text-white text-xs font-bold cursor-pointer"
+              className="inline-flex items-center gap-1.5 px-3.5 py-2 rounded-lg bg-purple-700 hover:bg-purple-800 text-white text-xs font-bold cursor-pointer disabled:opacity-50"
             >
               <RefreshCw className="w-4 h-4" />
               Auto Transfer Balances (FY Carry Forward)
