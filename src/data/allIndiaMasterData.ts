@@ -54,7 +54,7 @@ export const ALL_INDIA_STATES_DISTRICTS: Record<string, string[]> = {
   'International (Nepal / Bangladesh / Bhutan)': ['Birgunj (Nepal)', 'Biratnagar (Nepal)', 'Kathmandu (Nepal)', 'Kakarvitta (Nepal)', 'Bhairahawa (Nepal)', 'Benapole (Bangladesh)', 'Petrapole Border', 'Chittagong (Bangladesh)', 'Dhaka (Bangladesh)', 'Phuentsholing (Bhutan)', 'Thimphu (Bhutan)', 'Jaigaon Border'],
 };
 
-export const DEFAULT_CREDIT_DAY_PRESETS: number[] =;
+export const DEFAULT_CREDIT_DAY_PRESETS: number[] = new Array(15,30,45,60);)
 
 export const DEFAULT_DELIVERY_LOCATIONS: string[] = [
   'Kolkata (Dankuni / Dhulagarh)',
