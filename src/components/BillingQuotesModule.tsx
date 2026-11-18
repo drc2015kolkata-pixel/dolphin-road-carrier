@@ -1,9 +1,12 @@
 import React, { useEffect, useMemo, useRef, useState } from 'react';
 import {
+  AlertTriangle,
   CheckCircle2,
   FileCheck2,
   FileSpreadsheet,
   Lock,
+  Mail,
+  MessageSquare,
   Plus,
   Printer,
   ReceiptText,
@@ -46,6 +49,15 @@ import {
   reserveNextSerialNumber,
   upsertDocument,
 } from '../lib/firestoreStore';
+import { getEffectiveDropdownList } from '../lib/dropdownMasterStore';
+import {
+  PRIORITY_CORRIDOR_REGIONS,
+  buildEmailShareHref,
+  buildOverdueBillMessage,
+  buildWhatsAppShareHref,
+  getInvoicePendingDays,
+  triggerExternalShareLink,
+} from '../lib/shareUtils';
 import { useDebouncedValue } from '../hooks/useDebounce';
 import { PaginatedDataTable, TableColumn } from './PaginatedDataTable';
 
@@ -56,6 +68,8 @@ interface BillingQuotesModuleProps {
   activeBranchCode: string;
   activeFy: string;
   isMasterAdmin: boolean;
+  readOnly?: boolean;
+  initialSubTab?: 'invoice' | 'quotation' | '194c';
   invoices: Invoice[];
   quotations: Quotation[];
   declarations: Declaration194C[];
@@ -74,6 +88,22 @@ interface BillingQuotesModuleProps {
   }) => void;
 }
 
+const QUICK_CORRIDOR_DESTINATIONS = [
+  'KOLKATA to SILIGURI',
+  'KOLKATA to GUWAHATI (ASSAM)',
+  'KOLKATA to COOCH BEHAR',
+  'KOLKATA to ALIPURDUAR',
+  'KOLKATA to MALDA',
+  'KOLKATA to RAIGANJ',
+  'KOLKATA to PATNA (BIHAR)',
+  'KOLKATA to BHUBANESWAR (ODISHA)',
+  'KOLKATA to RANCHI (JHARKHAND)',
+  'KOLKATA to CHENNAI (TAMIL NADU)',
+  'KOLKATA to BIRGUNJ / KATHMANDU (NEPAL)',
+  'KOLKATA to BENAPOLE / DHAKA (BANGLADESH)',
+  'KOLKATA to PHUENTSHOLING / THIMPHU (BHUTAN)',
+];
+
 const BillingQuotesModuleInner: React.FC<BillingQuotesModuleProps> = ({
   ownerUid,
   activeStaffCode,
@@ -81,6 +111,8 @@ const BillingQuotesModuleInner: React.FC<BillingQuotesModuleProps> = ({
   activeBranchCode,
   activeFy,
   isMasterAdmin,
+  readOnly = false,
+  initialSubTab = 'invoice',
   invoices,
   quotations,
   declarations,
@@ -92,7 +124,38 @@ const BillingQuotesModuleInner: React.FC<BillingQuotesModuleProps> = ({
   onPreviewPdf,
   onShowConfirm,
 }) => {
-  const [subTab, setSubTab] = useState<'invoice' | 'quotation' | '194c'>('invoice');
+  const [subTab, setSubTab] = useState<'invoice' | 'quotation' | '194c'>(initialSubTab);
+  useEffect(() => {
+    if (initialSubTab) setSubTab(initialSubTab);
+  }, [initialSubTab]);
+
+  const availableBanks = useMemo(() => {
+    if (company.bankAccounts && company.bankAccounts.length > 0) {
+      return company.bankAccounts;
+    }
+    return [
+      {
+        id: 'default-pnb',
+        accountName: `${company.bankName || 'Punjab National Bank'} (Primary)`,
+        bankName: company.bankName || 'Punjab National Bank',
+        branch: company.bankBranch || 'Kolkata',
+        accountNo: company.accountNo || '',
+        ifsc: company.ifsc || '',
+        swift: company.swift || '',
+        upiId: company.upiId || '',
+        isDefault: true,
+      },
+    ];
+  }, [company]);
+
+  const [selectedBankId, setSelectedBankId] = useState<string>(
+    () => availableBanks.find((b) => b.isDefault)?.id || availableBanks[0]?.id || ''
+  );
+  const effectiveGoodsList = useMemo(
+    () => getEffectiveDropdownList(company, 'goodsTypes'),
+    [company]
+  );
+
   const lrScanRef = useRef<HTMLInputElement | null>(null);
   const fyShort = getFyShortCode(activeFy);
 
@@ -413,6 +476,7 @@ const BillingQuotesModuleInner: React.FC<BillingQuotesModuleProps> = ({
     status: 'Unpaid',
     remarks,
     copyCount,
+    selectedBankId: selectedBankId || undefined,
     consignmentRows: rows.filter((r) => r.cnNo || r.vehicle || r.freight > 0),
     annexureLorries: rows
       .filter((r) => r.cnNo || r.vehicle)
@@ -487,6 +551,7 @@ const BillingQuotesModuleInner: React.FC<BillingQuotesModuleProps> = ({
           status: 'Unpaid',
           remarks: invObj.remarks,
           copyCount: invObj.copyCount,
+          selectedBankId: invObj.selectedBankId || '',
           consignmentRows: validRows,
           annexureLorries: invObj.annexureLorries || [],
           branchCode: activeBranchCode,
@@ -514,16 +579,20 @@ const BillingQuotesModuleInner: React.FC<BillingQuotesModuleProps> = ({
     }
   };
 
-  // ---- QUOTATION STATE ----
+  // ---- QUOTATION STATE (10-Second Auto-Fill) ----
   const [autoAtomicQuotation, setAutoAtomicQuotation] = useState(true);
   const [qNo, setQNo] = useState(`QTN/2026/${String(19 + quotations.length).padStart(3, '0')}`);
   const [qDate, setQDate] = useState(todayISO());
   const [qParty, setQParty] = useState('');
   const [qAddr, setQAddr] = useState('');
   const [qGstin, setQGstin] = useState('');
+  const [qPhone, setQPhone] = useState('');
+  const [qEmail, setQEmail] = useState('');
   const [qSubject] = useState('To Vehicles Freight Rate Quotation');
   const [qValidity, setQValidity] = useState('7 Days After Lorry Unloading');
   const [qVehicleType, setQVehicleType] = useState('09 TON Open / Closed Truck');
+  const [qGoodsType, setQGoodsType] = useState('General Merchandise / Industrial Goods');
+  const [qRateMode, setQRateMode] = useState<'Fixed' | 'Per Ton'>('Fixed');
   const [qFreight, setQFreight] = useState('34500');
   const [qLoading, setQLoading] = useState('NO Extra Charges');
   const [qUnloading, setQUnloading] = useState('YES Extra Charges');
@@ -538,7 +607,7 @@ const BillingQuotesModuleInner: React.FC<BillingQuotesModuleProps> = ({
 
   const handleSaveQuotation = async (e: React.FormEvent) => {
     e.preventDefault();
-    if (!qParty.trim()) return;
+    if (!qParty.trim() || readOnly) return;
 
     let finalQNo = qNo.trim();
     if (autoAtomicQuotation) {
@@ -566,9 +635,13 @@ const BillingQuotesModuleInner: React.FC<BillingQuotesModuleProps> = ({
       partyName: qParty.trim(),
       partyAddress: qAddr.trim(),
       partyGstin: qGstin.trim(),
+      partyPhone: qPhone.trim(),
+      partyEmail: qEmail.trim(),
       subject: qSubject.trim(),
       validityText: qValidity.trim(),
       vehicleType: qVehicleType.trim(),
+      goodsType: qGoodsType.trim(),
+      rateMode: qRateMode,
       freight: Number(qFreight) || 0,
       loadingCharge: qLoading,
       unloadingCharge: qUnloading,
@@ -592,9 +665,13 @@ const BillingQuotesModuleInner: React.FC<BillingQuotesModuleProps> = ({
         partyName: qObj.partyName,
         partyAddress: qObj.partyAddress,
         partyGstin: qObj.partyGstin,
+        partyPhone: qObj.partyPhone || '',
+        partyEmail: qObj.partyEmail || '',
         subject: qObj.subject,
         validityText: qObj.validityText,
         vehicleType: qObj.vehicleType,
+        goodsType: qObj.goodsType || '',
+        rateMode: qObj.rateMode || 'Fixed',
         freight: qObj.freight,
         loadingCharge: qObj.loadingCharge,
         unloadingCharge: qObj.unloadingCharge,
@@ -758,99 +835,184 @@ const BillingQuotesModuleInner: React.FC<BillingQuotesModuleProps> = ({
       },
       {
         key: 'status',
-        header: 'Status',
-        render: (inv) => (
-          <span
-            className={`font-semibold ${
-              inv.status === 'Paid'
-                ? 'text-emerald-700'
-                : inv.status === 'Partial'
-                ? 'text-orange-700'
-                : 'text-red-700'
-            }`}
-          >
-            {inv.status}
-          </span>
-        ),
+        header: 'Status & 15/30d Aging',
+        render: (inv) => {
+          const pendingDays = inv.status === 'Paid' ? 0 : getInvoicePendingDays(inv);
+          return (
+            <div className="flex flex-wrap items-center gap-1.5">
+              <span
+                className={`font-semibold ${
+                  inv.status === 'Paid'
+                    ? 'text-emerald-700'
+                    : inv.status === 'Partial'
+                    ? 'text-orange-700'
+                    : 'text-red-700'
+                }`}
+              >
+                {inv.status}
+              </span>
+              {inv.status !== 'Paid' && pendingDays >= 30 && (
+                <span className="px-1.5 py-0.5 rounded bg-red-600 text-white text-[10px] font-extrabold">
+                  30d+ Due ({pendingDays}d)
+                </span>
+              )}
+              {inv.status !== 'Paid' && pendingDays >= 15 && pendingDays < 30 && (
+                <span className="px-1.5 py-0.5 rounded bg-amber-500 text-white text-[10px] font-extrabold">
+                  15d+ Alert ({pendingDays}d)
+                </span>
+              )}
+            </div>
+          );
+        },
       },
       {
         key: 'actions',
         header: 'Actions',
         headerClassName: 'text-right',
         cellClassName: 'text-right space-x-1.5 whitespace-nowrap',
-        render: (inv) => (
-          <>
-            <button
-              type="button"
-              onClick={async () => {
-                const pdf = await generateInvoicePDF(inv, company, true, 'p', inv.copyCount || 1);
-                onPreviewPdf(pdf, 'Bills_Invoices');
-              }}
-              className="inline-flex items-center gap-1 px-2 py-1 rounded bg-blue-50 hover:bg-blue-100 text-blue-800 font-semibold cursor-pointer"
-            >
-              <Printer className="w-3 h-3" />
-              PDF
-            </button>
-            {inv.status !== 'Paid' && (
+        render: (inv) => {
+          const pendingDays = inv.status === 'Paid' ? 0 : getInvoicePendingDays(inv);
+          const partyRec = parties.find(
+            (p) => p.name.trim().toLowerCase() === (inv.partyName || '').trim().toLowerCase()
+          );
+          return (
+            <>
               <button
                 type="button"
-                onClick={() => {
-                  onShowConfirm({
-                    title: `Mark Invoice ${inv.invoiceNo} as Paid?`,
-                    description: `Record full settlement of ₹${formatINR(inv.grandTotal)} from ${inv.partyName}?`,
-                    confirmLabel: 'Mark Paid',
-                    onConfirm: async () => {
-                      await upsertDocument(
-                        'invoices',
-                        inv.id,
-                        { paidAmount: inv.grandTotal, status: 'Paid' },
-                        false
-                      );
-                      await logBranchActivity({
-                        action: 'Marked Invoice Paid',
-                        module: 'Billing',
-                        docRefCode: inv.invoiceNo,
-                        summary: `Full payment ₹${formatINR(inv.grandTotal)} received from ${inv.partyName}`,
-                        staffCode: activeStaffCode,
-                        staffName: activeStaffName,
-                        branchCode: activeBranchCode,
-                        ownerUid,
+                onClick={async () => {
+                  const pdf = await generateInvoicePDF(inv, company, true, 'p', inv.copyCount || 1);
+                  onPreviewPdf(pdf, 'Bills_Invoices');
+                }}
+                className="inline-flex items-center gap-1 px-2 py-1 rounded bg-blue-50 hover:bg-blue-100 text-blue-800 font-semibold cursor-pointer"
+              >
+                <Printer className="w-3 h-3" />
+                PDF
+              </button>
+              {inv.status !== 'Paid' && pendingDays >= 15 && (
+                <>
+                  <button
+                    type="button"
+                    onClick={() => {
+                      const msg = buildOverdueBillMessage({
+                        invoice: inv,
+                        companyName: company.companyName,
+                        pendingDays,
                       });
-                    },
-                  });
-                }}
-                className="px-2 py-1 rounded bg-emerald-50 hover:bg-emerald-100 text-emerald-800 font-semibold cursor-pointer"
-              >
-                Mark Paid
-              </button>
-            )}
-            {!isMasterAdmin && inv.status === 'Paid' ? (
-              <span className="inline-flex items-center gap-0.5 px-1.5 py-0.5 rounded bg-slate-100 text-slate-500 text-[10px] font-bold">
-                <Lock className="w-3 h-3" />
-                Locked
-              </span>
-            ) : (
-              <button
-                type="button"
-                onClick={() => {
-                  onShowConfirm({
-                    title: `Delete Invoice ${inv.invoiceNo}?`,
-                    description: `Permanently delete ${inv.invoiceNo}?`,
-                    confirmLabel: 'Delete',
-                    variant: 'danger',
-                    onConfirm: () => removeDocument('invoices', inv.id),
-                  });
-                }}
-                className="p-1 rounded hover:bg-red-50 text-slate-500 hover:text-red-600 cursor-pointer"
-              >
-                <Trash2 className="w-3.5 h-3.5" />
-              </button>
-            )}
-          </>
-        ),
+                      const href = buildWhatsAppShareHref({
+                        phone: partyRec?.phone || '',
+                        message: msg,
+                      });
+                      triggerExternalShareLink(href);
+                    }}
+                    className="inline-flex items-center gap-1 px-2 py-1 rounded bg-emerald-600 hover:bg-emerald-700 text-white text-[11px] font-bold cursor-pointer"
+                    title="Send WhatsApp payment alert"
+                  >
+                    <MessageSquare className="w-3 h-3" />
+                    WA
+                  </button>
+                  <button
+                    type="button"
+                    onClick={() => {
+                      const msg = buildOverdueBillMessage({
+                        invoice: inv,
+                        companyName: company.companyName,
+                        pendingDays,
+                      });
+                      const href = buildEmailShareHref({
+                        email: partyRec?.email || '',
+                        subject: `Payment Reminder: Bill ${inv.invoiceNo} (${pendingDays} Days Pending)`,
+                        body: msg,
+                      });
+                      triggerExternalShareLink(href);
+                    }}
+                    className="inline-flex items-center gap-1 px-2 py-1 rounded bg-indigo-600 hover:bg-indigo-700 text-white text-[11px] font-bold cursor-pointer"
+                    title="Send Email payment alert"
+                  >
+                    <Mail className="w-3 h-3" />
+                    Email
+                  </button>
+                </>
+              )}
+              {inv.status !== 'Paid' && !readOnly && (
+                <button
+                  type="button"
+                  onClick={() => {
+                    onShowConfirm({
+                      title: `Mark Invoice ${inv.invoiceNo} as Paid?`,
+                      description: `Record full settlement of ₹${formatINR(inv.grandTotal)} from ${inv.partyName}?`,
+                      confirmLabel: 'Mark Paid',
+                      onConfirm: async () => {
+                        await upsertDocument(
+                          'invoices',
+                          inv.id,
+                          { paidAmount: inv.grandTotal, status: 'Paid' },
+                          false
+                        );
+                        await logBranchActivity({
+                          action: 'Marked Invoice Paid',
+                          module: 'Billing',
+                          docRefCode: inv.invoiceNo,
+                          summary: `Full payment ₹${formatINR(inv.grandTotal)} received from ${inv.partyName}`,
+                          staffCode: activeStaffCode,
+                          staffName: activeStaffName,
+                          branchCode: activeBranchCode,
+                          ownerUid,
+                        });
+                      },
+                    });
+                  }}
+                  className="px-2 py-1 rounded bg-emerald-50 hover:bg-emerald-100 text-emerald-800 font-semibold cursor-pointer"
+                >
+                  Mark Paid
+                </button>
+              )}
+              {readOnly || (!isMasterAdmin && inv.status === 'Paid') ? (
+                <span className="inline-flex items-center gap-0.5 px-1.5 py-0.5 rounded bg-slate-100 text-slate-500 text-[10px] font-bold">
+                  <Lock className="w-3 h-3" />
+                  {readOnly ? 'View' : 'Locked'}
+                </span>
+              ) : (
+                <button
+                  type="button"
+                  onClick={() => {
+                    onShowConfirm({
+                      title: `Delete Invoice ${inv.invoiceNo}?`,
+                      description: `Permanently delete ${inv.invoiceNo}?`,
+                      confirmLabel: 'Delete',
+                      variant: 'danger',
+                      onConfirm: () => removeDocument('invoices', inv.id),
+                    });
+                  }}
+                  className="p-1 rounded hover:bg-red-50 text-slate-500 hover:text-red-600 cursor-pointer"
+                >
+                  <Trash2 className="w-3.5 h-3.5" />
+                </button>
+              )}
+            </>
+          );
+        },
       },
     ],
-    [company, isMasterAdmin, onPreviewPdf, onShowConfirm, activeStaffCode, activeStaffName, activeBranchCode, ownerUid]
+    [
+      company,
+      parties,
+      isMasterAdmin,
+      readOnly,
+      onPreviewPdf,
+      onShowConfirm,
+      activeStaffCode,
+      activeStaffName,
+      activeBranchCode,
+      ownerUid,
+    ]
+  );
+
+  const overdue15Or30Invoices = useMemo(
+    () =>
+      invoices
+        .filter((inv) => inv.status !== 'Paid' && getInvoicePendingDays(inv) >= 15)
+        .sort((a, b) => getInvoicePendingDays(b) - getInvoicePendingDays(a)),
+    [invoices]
   );
 
   const quotationColumns: TableColumn<Quotation>[] = useMemo(
@@ -1202,6 +1364,23 @@ const BillingQuotesModuleInner: React.FC<BillingQuotesModuleProps> = ({
                     onChange={(e) => setSac(e.target.value)}
                     className="w-full px-2.5 py-1.5 rounded border border-slate-300 font-mono-num"
                   />
+                </div>
+                <div className="md:col-span-2">
+                  <label className="block font-semibold text-slate-700 mb-1">
+                    Bank Account &amp; UPI QR on Invoice PDF
+                  </label>
+                  <select
+                    aria-label="Bank Account for Tax Invoice"
+                    value={selectedBankId}
+                    onChange={(e) => setSelectedBankId(e.target.value)}
+                    className="w-full px-2.5 py-1.5 rounded border border-slate-300 bg-white font-semibold"
+                  >
+                    {availableBanks.map((b) => (
+                      <option key={b.id} value={b.id}>
+                        {b.accountName} — {b.bankName} ({b.accountNo})
+                      </option>
+                    ))}
+                  </select>
                 </div>
               </div>
 
@@ -1645,8 +1824,8 @@ const BillingQuotesModuleInner: React.FC<BillingQuotesModuleProps> = ({
                 </button>
                 <button
                   type="submit"
-                  disabled={savingInv}
-                  className="inline-flex items-center gap-1.5 px-4 py-1.5 rounded-md bg-blue-700 hover:bg-blue-800 text-white text-xs font-bold cursor-pointer disabled:opacity-60"
+                  disabled={savingInv || readOnly}
+                  className="inline-flex items-center gap-1.5 px-4 py-1.5 rounded-md bg-blue-700 hover:bg-blue-800 text-white text-xs font-bold cursor-pointer disabled:opacity-50"
                 >
                   <Save className="w-3.5 h-3.5" />
                   {savingInv ? 'Saving...' : 'Save & Preview Invoice PDF'}
@@ -1654,6 +1833,18 @@ const BillingQuotesModuleInner: React.FC<BillingQuotesModuleProps> = ({
               </div>
             </div>
           </form>
+
+          {/* 15 / 30-Day Overdue Payment Alert Strip */}
+          {overdue15Or30Invoices.length > 0 && (
+            <div className="bg-amber-50 border border-amber-300 rounded-xl p-3 flex flex-wrap items-center justify-between gap-2 text-xs">
+              <div className="flex items-center gap-2 font-bold text-amber-950">
+                <AlertTriangle className="w-4 h-4 text-red-600 shrink-0" />
+                <span>
+                  {overdue15Or30Invoices.length} Pending Tax Invoice(s) Reached 15 / 30+ Days Credit Limit — Use WA or Email alert buttons in the register below.
+                </span>
+              </div>
+            </div>
+          )}
 
           {/* Saved Invoices Table (Paginated 50/page) */}
           <div className="bg-white rounded-xl border border-slate-200 shadow-sm overflow-hidden">
@@ -1737,8 +1928,11 @@ const BillingQuotesModuleInner: React.FC<BillingQuotesModuleProps> = ({
                     if (p) {
                       setQAddr(p.address || '');
                       setQGstin(p.gstin || '');
+                      setQPhone(p.phone || '');
+                      setQEmail(p.email || '');
                     }
                   }}
+                  placeholder="Auto-fills Address, GSTIN, Phone & Email"
                   className="w-full px-2.5 py-1.5 rounded border border-slate-300"
                 />
                 <datalist id="q-party-list">
@@ -1766,14 +1960,56 @@ const BillingQuotesModuleInner: React.FC<BillingQuotesModuleProps> = ({
                 />
               </div>
               <div>
-                <label className="block font-semibold text-slate-700 mb-1">Destination *</label>
+                <label className="block font-semibold text-slate-700 mb-1">Party Phone (WhatsApp Share)</label>
+                <input
+                  type="text"
+                  value={qPhone}
+                  onChange={(e) => setQPhone(e.target.value)}
+                  placeholder="10-digit WhatsApp no"
+                  className="w-full px-2.5 py-1.5 rounded border border-slate-300 font-mono-num"
+                />
+              </div>
+              <div>
+                <label className="block font-semibold text-slate-700 mb-1">Party Email</label>
+                <input
+                  type="email"
+                  value={qEmail}
+                  onChange={(e) => setQEmail(e.target.value)}
+                  placeholder="dispatch@party.com"
+                  className="w-full px-2.5 py-1.5 rounded border border-slate-300"
+                />
+              </div>
+              <div>
+                <label className="block font-semibold text-slate-700 mb-1">Destination Route *</label>
                 <input
                   type="text"
                   required
+                  list="q-dest-list"
                   value={qDest}
                   onChange={(e) => setQDest(e.target.value)}
+                  placeholder={PRIORITY_CORRIDOR_REGIONS.join(', ')}
                   className="w-full px-2.5 py-1.5 rounded border border-slate-300"
                 />
+                <datalist id="q-dest-list">
+                  {QUICK_CORRIDOR_DESTINATIONS.map((d) => (
+                    <option key={d} value={d} />
+                  ))}
+                </datalist>
+              </div>
+              <div>
+                <label className="block font-semibold text-slate-700 mb-1">Goods Type</label>
+                <input
+                  type="text"
+                  list="q-goods-list"
+                  value={qGoodsType}
+                  onChange={(e) => setQGoodsType(e.target.value)}
+                  className="w-full px-2.5 py-1.5 rounded border border-slate-300"
+                />
+                <datalist id="q-goods-list">
+                  {effectiveGoodsList.map((g) => (
+                    <option key={g} value={g} />
+                  ))}
+                </datalist>
               </div>
               <div>
                 <label className="block font-semibold text-slate-700 mb-1">Vehicle Type *</label>
@@ -1786,14 +2022,25 @@ const BillingQuotesModuleInner: React.FC<BillingQuotesModuleProps> = ({
                 />
               </div>
               <div>
-                <label className="block font-semibold text-slate-700 mb-1">Freight Amount (₹) *</label>
-                <input
-                  type="number"
-                  required
-                  value={qFreight}
-                  onChange={(e) => setQFreight(e.target.value)}
-                  className="w-full px-2.5 py-1.5 rounded border border-slate-300 font-mono-num font-bold"
-                />
+                <label className="block font-semibold text-slate-700 mb-1">Rate Mode &amp; Freight Amount (₹) *</label>
+                <div className="flex gap-1.5">
+                  <select
+                    aria-label="Quotation Rate Mode"
+                    value={qRateMode}
+                    onChange={(e) => setQRateMode(e.target.value as 'Fixed' | 'Per Ton')}
+                    className="px-2 py-1.5 rounded border border-slate-300 bg-white font-bold"
+                  >
+                    <option value="Fixed">Fixed</option>
+                    <option value="Per Ton">Per Ton</option>
+                  </select>
+                  <input
+                    type="number"
+                    required
+                    value={qFreight}
+                    onChange={(e) => setQFreight(e.target.value)}
+                    className="flex-1 min-w-0 px-2.5 py-1.5 rounded border border-slate-300 font-mono-num font-bold"
+                  />
+                </div>
               </div>
               <div>
                 <label className="block font-semibold text-slate-700 mb-1">Ton Guarantee</label>
@@ -1862,7 +2109,8 @@ const BillingQuotesModuleInner: React.FC<BillingQuotesModuleProps> = ({
             <div className="px-4 py-3 bg-slate-50 border-t border-slate-200 flex justify-end">
               <button
                 type="submit"
-                className="inline-flex items-center gap-1.5 px-4 py-1.5 rounded-md bg-blue-700 hover:bg-blue-800 text-white text-xs font-bold cursor-pointer"
+                disabled={readOnly}
+                className="inline-flex items-center gap-1.5 px-4 py-1.5 rounded-md bg-blue-700 hover:bg-blue-800 text-white text-xs font-bold cursor-pointer disabled:opacity-50"
               >
                 <Printer className="w-3.5 h-3.5" />
                 Save &amp; Preview Quotation PDF
@@ -1990,7 +2238,8 @@ const BillingQuotesModuleInner: React.FC<BillingQuotesModuleProps> = ({
             <div className="px-4 py-3 bg-slate-50 border-t border-slate-200 flex justify-end">
               <button
                 type="submit"
-                className="inline-flex items-center gap-1.5 px-4 py-1.5 rounded-md bg-blue-700 hover:bg-blue-800 text-white text-xs font-bold cursor-pointer"
+                disabled={readOnly}
+                className="inline-flex items-center gap-1.5 px-4 py-1.5 rounded-md bg-blue-700 hover:bg-blue-800 text-white text-xs font-bold cursor-pointer disabled:opacity-50"
               >
                 <Printer className="w-3.5 h-3.5" />
                 Generate &amp; Preview 194C PDF

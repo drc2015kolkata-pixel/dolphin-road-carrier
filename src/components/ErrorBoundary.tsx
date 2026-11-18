@@ -1,5 +1,6 @@
 import React, { Component, ErrorInfo, ReactNode } from 'react';
-import { AlertTriangle, RotateCcw } from 'lucide-react';
+import { AlertTriangle, RotateCcw, Wrench } from 'lucide-react';
+import { revokeThermalMemoryCooledUrls } from '../lib/selfHealing';
 
 interface Props {
   children: ReactNode;
@@ -27,6 +28,16 @@ export class ErrorBoundary extends Component<Props, State> {
     console.error('ErrorBoundary caught error:', error, errorInfo);
   }
 
+  private handleSafeRepairAndRetry = () => {
+    try {
+      revokeThermalMemoryCooledUrls();
+      localStorage.removeItem('drc_erp_ui_pref_v1');
+    } catch {
+      // Ignore storage cleanup errors
+    }
+    this.setState({ hasError: false, errorMessage: '' });
+  };
+
   public render() {
     if (this.state.hasError) {
       let friendlyDetail = this.state.errorMessage;
@@ -50,15 +61,25 @@ export class ErrorBoundary extends Component<Props, State> {
               <AlertTriangle className="w-6 h-6 shrink-0" />
               <h2 className="text-lg font-bold">Application Recovery Required</h2>
             </div>
-            <p className="text-sm text-slate-600 mb-4 break-words">{friendlyDetail}</p>
-            <button
-              type="button"
-              onClick={() => window.location.reload()}
-              className="inline-flex items-center gap-2 px-4 py-2 rounded-lg bg-blue-700 text-white text-sm font-medium hover:bg-blue-800 transition-colors"
-            >
-              <RotateCcw className="w-4 h-4" />
-              Reload Application
-            </button>
+            <p className="text-sm text-slate-700 mb-4 break-words">{friendlyDetail}</p>
+            <div className="flex flex-wrap items-center gap-2.5">
+              <button
+                type="button"
+                onClick={this.handleSafeRepairAndRetry}
+                className="inline-flex items-center gap-2 px-4 py-2 rounded-lg bg-emerald-600 text-white text-sm font-semibold hover:bg-emerald-700 transition-colors cursor-pointer"
+              >
+                <Wrench className="w-4 h-4" />
+                Auto-Fix & Resume
+              </button>
+              <button
+                type="button"
+                onClick={() => window.location.reload()}
+                className="inline-flex items-center gap-2 px-4 py-2 rounded-lg bg-blue-700 text-white text-sm font-semibold hover:bg-blue-800 transition-colors cursor-pointer"
+              >
+                <RotateCcw className="w-4 h-4" />
+                Reload Application
+              </button>
+            </div>
           </div>
         </div>
       );

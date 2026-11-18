@@ -1,6 +1,8 @@
 import { jsPDF } from 'jspdf';
+import QRCode from 'qrcode';
 import {
   BillCopyCount,
+  CompanyBankAccount,
   CompanySettings,
   ConsignmentNote,
   Declaration194C,
@@ -110,18 +112,108 @@ export type PdfTaskPayload =
 
 const SAFE_MARGIN = 11; // >=10mm safe print margin for HP Ink Tank 315 A4
 
-function drawDiagonalWatermark(doc: jsPDF, text = 'DOLPHIN ROAD CARRIER') {
+function drawCenteredWatermark(
+  doc: jsPDF,
+  assets: PdfAssets | undefined,
+  text = 'DOLPHIN ROAD CARRIER'
+) {
   const pageWidth = doc.internal.pageSize.getWidth();
   const pageHeight = doc.internal.pageSize.getHeight();
+
+  if (assets?.watermarkDataUrl) {
+    const size = Math.min(84, Math.min(pageWidth, pageHeight) * 0.42);
+    try {
+      doc.addImage(
+        assets.watermarkDataUrl,
+        getJsPdfImageFormat(assets.watermarkDataUrl),
+        pageWidth / 2 - size / 2,
+        pageHeight / 2 - size / 2,
+        size,
+        size,
+        undefined,
+        'FAST'
+      );
+      return;
+    } catch {
+      // Fallback to crisp centered text crest
+    }
+  }
+
   doc.saveGraphicsState();
-  doc.setTextColor(218, 227, 240);
+  doc.setTextColor(226, 232, 240);
   doc.setFont('helvetica', 'bold');
-  doc.setFontSize(34);
-  doc.text(text, pageWidth / 2, pageHeight / 2 + 24, {
-    align: 'center',
-    angle: 35,
-  });
+  doc.setFontSize(30);
+  doc.text('D.R.C', pageWidth / 2, pageHeight / 2 - 4, { align: 'center' });
+  doc.setFontSize(13);
+  doc.text(text, pageWidth / 2, pageHeight / 2 + 6, { align: 'center' });
   doc.restoreGraphicsState();
+}
+
+function resolveInvoiceBankAccount(
+  company: CompanySettings,
+  selectedBankId?: string
+): CompanyBankAccount {
+  const accounts = company.bankAccounts || [];
+  const found =
+    (selectedBankId ? accounts.find((b) => b.id === selectedBankId) : undefined) ||
+    accounts.find((b) => b.isDefault) ||
+    accounts[0];
+
+  if (found) {
+    return found;
+  }
+  return {
+    id: 'primary',
+    bankName: company.bankName || 'PUNJAB NATIONAL BANK',
+    accountName: company.companyName || 'DOLPHIN ROAD CARRIER',
+    accountNo: company.accountNo || '0672050014252',
+    ifsc: company.ifsc || 'PUNB0008020',
+    branch: company.bankBranch || 'JORASANKO, KOLKATA',
+    upiId: company.upiId || 'dolphinroadcarrier@pnb',
+    swift: company.swift || 'PUNBINBBXXX',
+    isDefault: true,
+  };
+}
+
+function drawVectorUpiQr(
+  doc: jsPDF,
+  upiUri: string,
+  boxX: number,
+  boxY: number,
+  qrSizeMm = 18.5
+) {
+  try {
+    const qr = QRCode.create(upiUri, { errorCorrectionLevel: 'M' });
+    const count = qr.modules.size;
+    if (count > 0) {
+      doc.setFillColor(255, 255, 255);
+      doc.setDrawColor(0, 0, 0);
+      doc.setLineWidth(0.35);
+      doc.rect(boxX - 1.2, boxY - 1.2, qrSizeMm + 2.4, qrSizeMm + 6.4, 'FD');
+
+      const cell = qrSizeMm / count;
+      doc.setFillColor(0, 0, 0);
+      for (let r = 0; r < count; r += 1) {
+        for (let c = 0; c < count; c += 1) {
+          if (qr.modules.get(r, c)) {
+            doc.rect(boxX + c * cell, boxY + r * cell, cell + 0.04, cell + 0.04, 'F');
+          }
+        }
+      }
+      doc.setFont('helvetica', 'bold');
+      doc.setFontSize(6.6);
+      doc.setTextColor(0, 0, 0);
+      doc.text('BANK QR', boxX + qrSizeMm / 2, boxY + qrSizeMm + 3.8, { align: 'center' });
+      return;
+    }
+  } catch {
+    // Fallback box if QR encoding throws
+  }
+  doc.setDrawColor(0, 0, 0);
+  doc.rect(boxX, boxY, qrSizeMm, qrSizeMm + 4);
+  doc.setFont('helvetica', 'bold');
+  doc.setFontSize(6.5);
+  doc.text('BANK QR', boxX + qrSizeMm / 2, boxY + qrSizeMm / 2 + 2, { align: 'center' });
 }
 
 function getJsPdfImageFormat(dataUrl: string): 'PNG' | 'JPEG' | 'WEBP' {
@@ -319,17 +411,13 @@ function buildInvoiceDoc(
   const gstPaidByLabel = invoice.gstPaidBy || (invoice.reverseCharge ? 'Consignee' : 'Transporter');
 
   const drawOuterBorder = () => {
-    doc.setDrawColor(15, 23, 42);
-    doc.setLineWidth(0.5);
+    doc.setDrawColor(0, 0, 0);
+    doc.setLineWidth(0.55);
     doc.rect(M, M, cw, ch);
   };
 
   const drawHeader = (isContPage: boolean, copyLabel: string) => {
-    if (assets?.watermarkDataUrl) {
-      doc.addImage(assets.watermarkDataUrl, 'JPEG', pw / 2 - 55, ph / 2 - 35, 110, 68, undefined, 'FAST');
-    } else {
-      drawDiagonalWatermark(doc);
-    }
+    drawCenteredWatermark(doc, assets, company.companyName || 'DOLPHIN ROAD CARRIER');
 
     drawOuterBorder();
 
@@ -615,13 +703,40 @@ function buildInvoiceDoc(
     });
 
     const bankBoxY = wordsBarY + 7;
+    const selectedBank = resolveInvoiceBankAccount(company, invoice.selectedBankId);
+    const upiPayAddress =
+      selectedBank.upiId ||
+      company.upiId ||
+      `${(selectedBank.accountNo || '0672050014252').replace(/\s+/g, '')}@${(selectedBank.ifsc || 'PUNB0008020').slice(0, 4).toLowerCase()}.ifsc.npci`;
+    const upiUri = `upi://pay?pa=${encodeURIComponent(upiPayAddress)}&pn=${encodeURIComponent(
+      selectedBank.accountName || company.companyName || 'DOLPHIN ROAD CARRIER'
+    )}&am=${Number(invoice.grandTotal || 0).toFixed(2)}&tn=${encodeURIComponent(
+      `Bill ${invoice.invoiceNo || ''}`
+    )}&cu=INR`;
+
+    doc.setDrawColor(0, 0, 0);
+    doc.setLineWidth(0.35);
     doc.rect(M, bankBoxY, cw, 27);
+    doc.setTextColor(0, 0, 0);
     doc.setFont('helvetica', 'bold');
     doc.setFontSize(7.4);
-    doc.text(`Bank   : ${company.bankName}`, M + 2, bankBoxY + 5);
-    doc.text(`Branch : ${company.bankBranch} (SWIFT: ${company.swift})`, M + 2, bankBoxY + 9.8);
-    doc.text(`A/c No : ${company.accountNo}`, M + 2, bankBoxY + 14.6);
-    doc.text(`IFSC   : ${company.ifsc}`, M + 2, bankBoxY + 19.4);
+    doc.text(`Bank   : ${selectedBank.bankName}`, M + 2, bankBoxY + 5);
+    doc.text(
+      `Branch : ${selectedBank.branch}${selectedBank.swift ? ` (SWIFT: ${selectedBank.swift})` : ''}`,
+      M + 2,
+      bankBoxY + 9.8
+    );
+    doc.text(`A/c No : ${selectedBank.accountNo}`, M + 2, bankBoxY + 14.6);
+    doc.text(`IFSC   : ${selectedBank.ifsc}   |   A/c Name: ${selectedBank.accountName}`, M + 2, bankBoxY + 19.4);
+    if (selectedBank.upiId) {
+      doc.setFont('helvetica', 'normal');
+      doc.setFontSize(6.8);
+      doc.text(`UPI ID : ${selectedBank.upiId}`, M + 2, bankBoxY + 24.2);
+    }
+
+    // Scannable Vector UPI BANK QR right beside Bank Details
+    const qrBoxX = M + cw - 68;
+    drawVectorUpiQr(doc, upiUri, qrBoxX, bankBoxY + 2.2, 18);
 
     // BOTTOM-RIGHT Company Stamp & Signature on FINAL PAGE of each copy
     drawBottomRightStampAndSign(doc, assets, M + cw, bankBoxY + 5, 29, 16.5);
@@ -759,7 +874,7 @@ function buildLR3CopyDoc(
 
   copies.forEach((copyLabel, idx) => {
     if (idx > 0) doc.addPage();
-    drawDiagonalWatermark(doc, 'DOLPHIN ROAD CARRIER');
+    drawCenteredWatermark(doc, assets, company.companyName || 'DOLPHIN ROAD CARRIER');
 
     const x0 = SAFE_MARGIN;
     const y0 = SAFE_MARGIN;
@@ -1144,7 +1259,7 @@ function buildQuotationDoc(
   const ph = doc.internal.pageSize.getHeight();
   const cw = pw - SAFE_MARGIN * 2;
 
-  drawDiagonalWatermark(doc, 'D.R.C QUOTATION');
+  drawCenteredWatermark(doc, assets, 'D.R.C QUOTATION');
 
   // TOP-LEFT Triangular DRC Logo
   drawTopLeftLogo(doc, assets, SAFE_MARGIN, SAFE_MARGIN, 23, 23);
@@ -1196,7 +1311,8 @@ function buildQuotationDoc(
 
   const rows: Array<[string, string]> = [
     ['Vehicle Type', quote.vehicleType],
-    ['Freight', `Rs. ${formatINR(quote.freight)}`],
+    ...(quote.goodsType ? [['Goods Type', quote.goodsType] as [string, string]] : []),
+    ['Freight', `Rs. ${formatINR(quote.freight)}${quote.rateMode ? ` (${quote.rateMode})` : ''}`],
     ['Loading Charges', quote.loadingCharge || 'NO Extra Charges'],
     ['Unloading Charges', quote.unloadingCharge || 'YES Extra Charges'],
     ['Parking', quote.parkingCharge || 'YES Extra Charges'],
@@ -1207,10 +1323,10 @@ function buildQuotationDoc(
     ['Entry Point', quote.entryPoint || 'As Applicable'],
   ];
 
-  let ty = SAFE_MARGIN + 80;
+  let ty = SAFE_MARGIN + 78;
   const labelW = cw * 0.28;
   const valW = cw - labelW;
-  const rowH = orientation === 'l' ? 5.8 : 7;
+  const rowH = orientation === 'l' ? 5.5 : 6.4;
   doc.setLineWidth(0.3);
 
   rows.forEach(([k, v]) => {
@@ -1291,7 +1407,7 @@ function buildDeclaration194CDoc(
   const cw = pw - SAFE_MARGIN * 2;
   const fy = decl.financialYear || getDynamicFinancialYear(decl.declarationDate);
 
-  drawDiagonalWatermark(doc, 'Dolphin Road Carrier');
+  drawCenteredWatermark(doc, assets, company.companyName || 'DOLPHIN ROAD CARRIER');
 
   // TOP-LEFT Triangular DRC Logo ONLY
   drawTopLeftLogo(doc, assets, SAFE_MARGIN, SAFE_MARGIN, 24, 24);
@@ -1436,7 +1552,7 @@ function buildTableReportDoc(params: {
 
   for (let p = 0; p < totalPages; p++) {
     if (p > 0) doc.addPage();
-    drawDiagonalWatermark(doc, 'DOLPHIN ROAD CARRIER');
+    drawCenteredWatermark(doc, assets, company.companyName || 'DOLPHIN ROAD CARRIER');
 
     drawTopLeftLogo(doc, assets, SAFE_MARGIN, 8, 15, 15);
 
@@ -1526,8 +1642,8 @@ function buildGstRegisterDoc(
   const colX = (i: number) => M + cw * colEdges[i];
 
   const drawHeader = () => {
-    drawDiagonalWatermark(doc, 'DOLPHIN ROAD CARRIER');
-    doc.setDrawColor(15, 23, 42);
+    drawCenteredWatermark(doc, assets, company.companyName || 'DOLPHIN ROAD CARRIER');
+    doc.setDrawColor(0, 0, 0);
     doc.setLineWidth(0.5);
     doc.rect(M, M, cw, ch);
 
@@ -1784,8 +1900,8 @@ function buildFoxproStatementDoc(
   const colX = (i: number) => M + cw * edges[i];
 
   const drawHeader = () => {
-    drawDiagonalWatermark(doc, 'DOLPHIN ROAD CARRIER');
-    doc.setDrawColor(15, 23, 42);
+    drawCenteredWatermark(doc, assets, company.companyName || 'DOLPHIN ROAD CARRIER');
+    doc.setDrawColor(0, 0, 0);
     doc.setLineWidth(0.5);
     doc.rect(M, M, cw, ch);
 

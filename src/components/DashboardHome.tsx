@@ -623,7 +623,7 @@ const DashboardHomeInner: React.FC<DashboardHomeProps> = ({
             </p>
           </div>
 
-          <div className="relative z-10 p-3 bg-slate-900/75 backdrop-blur-[2px] text-white flex flex-wrap items-center justify-between gap-2">
+          <div className="relative z-10 p-3 bg-slate-900 text-white flex flex-wrap items-center justify-between gap-2">
             <span className="text-xs font-medium text-blue-100">
               Scan Physical LR or Build GST Invoice
             </span>

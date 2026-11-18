@@ -27,7 +27,7 @@ async function renderTwinDolphinWatermarkOffscreen(): Promise<string | undefined
   if (typeof OffscreenCanvas === 'undefined') return undefined;
 
   try {
-    const canvas = new OffscreenCanvas(520, 320);
+    const canvas = new OffscreenCanvas(520, 520);
     const ctx = canvas.getContext('2d');
     if (!ctx) return undefined;
 
@@ -35,34 +35,40 @@ async function renderTwinDolphinWatermarkOffscreen(): Promise<string | undefined
     ctx.fillRect(0, 0, canvas.width, canvas.height);
 
     ctx.save();
-    ctx.globalAlpha = 0.14;
-    ctx.strokeStyle = '#1D4ED8';
+    ctx.globalAlpha = 0.095;
+    ctx.strokeStyle = '#1E40AF';
     ctx.fillStyle = '#60A5FA';
-    ctx.lineWidth = 5;
+    ctx.lineWidth = 4;
 
+    // Symmetrical 1:1 outer crest ring
     ctx.beginPath();
-    ctx.moveTo(110, 235);
-    ctx.bezierCurveTo(100, 120, 175, 55, 248, 88);
-    ctx.bezierCurveTo(212, 110, 180, 165, 172, 240);
+    ctx.arc(260, 260, 224, 0, Math.PI * 2);
+    ctx.stroke();
+
+    // Twin dolphins inside circular crest (1:1 aspect)
+    ctx.beginPath();
+    ctx.moveTo(116, 295);
+    ctx.bezierCurveTo(106, 180, 178, 118, 248, 150);
+    ctx.bezierCurveTo(212, 172, 182, 225, 174, 300);
     ctx.closePath();
     ctx.fill();
 
     ctx.beginPath();
-    ctx.moveTo(410, 235);
-    ctx.bezierCurveTo(420, 120, 345, 55, 272, 88);
-    ctx.bezierCurveTo(308, 110, 340, 165, 348, 240);
+    ctx.moveTo(404, 295);
+    ctx.bezierCurveTo(414, 180, 342, 118, 272, 150);
+    ctx.bezierCurveTo(308, 172, 338, 225, 346, 300);
     ctx.closePath();
     ctx.fill();
 
-    ctx.font = 'bold 58px Arial, sans-serif';
+    ctx.font = '900 58px Arial, sans-serif';
     ctx.textAlign = 'center';
-    ctx.fillStyle = '#2563EB';
-    ctx.fillText('D.R.C', 260, 198);
-    ctx.font = 'bold 16px Arial, sans-serif';
-    ctx.fillText('DOLPHIN ROAD CARRIER', 260, 224);
+    ctx.fillStyle = '#1E3A8A';
+    ctx.fillText('D.R.C', 260, 338);
+    ctx.font = 'bold 20px Arial, sans-serif';
+    ctx.fillText('DOLPHIN ROAD CARRIERS', 260, 370);
     ctx.restore();
 
-    const blob = await canvas.convertToBlob({ type: 'image/jpeg', quality: 0.65 });
+    const blob = await canvas.convertToBlob({ type: 'image/jpeg', quality: 0.85 });
     cachedWatermarkDataUrl = await blobToDataUrl(blob);
     return cachedWatermarkDataUrl;
   } catch {

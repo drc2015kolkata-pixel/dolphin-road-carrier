@@ -5,9 +5,11 @@ import {
   CheckCircle2,
   Download,
   Eye,
+  Mail,
   Printer,
   Save,
   Search,
+  ShieldCheck,
   Trash2,
   Truck,
   UserCheck,
@@ -24,6 +26,7 @@ import {
 } from '../types/erp';
 import { daysUntilDate, formatDateDDMMYYYY, formatINR, makeSafeDocId, todayISO } from '../lib/formatters';
 import { removeDocument, upsertDocument } from '../lib/firestoreStore';
+import { scanPartiesForContactIssues, validateAndNormalizeContact } from '../lib/selfHealing';
 import {
   downloadPdfDirect,
   GeneratedPdfResult,
@@ -37,6 +40,7 @@ export type MasterTabId = 'parties' | 'owners' | 'brokers' | 'vehicles' | 'drive
 
 interface MasterModuleProps {
   ownerUid: string;
+  readOnly?: boolean;
   parties: Party[];
   vehicles: Vehicle[];
   drivers: Driver[];
@@ -80,6 +84,7 @@ const renderExpiryStatus = (dateStr?: string, label?: string) => {
 
 const MasterModuleInner: React.FC<MasterModuleProps> = ({
   ownerUid,
+  readOnly = false,
   parties,
   vehicles,
   drivers,
@@ -108,8 +113,13 @@ const MasterModuleInner: React.FC<MasterModuleProps> = ({
   const [pGstin, setPGstin] = useState('');
   const [pPan, setPPan] = useState('');
   const [pPhone, setPPhone] = useState('');
+  const [pEmail, setPEmail] = useState('');
+  const [pPreferredChannel, setPPreferredChannel] = useState<'WhatsApp Only' | 'Email Only' | 'Both'>('WhatsApp Only');
+  const [pContactWarn, setPContactWarn] = useState<string | null>(null);
   const [pOpening, setPOpening] = useState('0');
   const [pBalType, setPBalType] = useState<'Dr' | 'Cr'>('Dr');
+
+  const contactHealth = useMemo(() => scanPartiesForContactIssues(parties), [parties]);
 
   // Lorry Owner form (stored in parties as TruckOwner with full KYC)
   const [oName, setOName] = useState('');
@@ -218,7 +228,18 @@ const MasterModuleInner: React.FC<MasterModuleProps> = ({
 
   const handleSaveParty = async (e: React.FormEvent) => {
     e.preventDefault();
-    if (!pName.trim()) return;
+    if (!pName.trim() || readOnly) return;
+    const guard = validateAndNormalizeContact({
+      phone: pPhone,
+      email: pEmail,
+      gstin: pGstin,
+      pan: pPan,
+    });
+    if (!guard.isClean) {
+      setPContactWarn(guard.warnings.join(' · '));
+      return;
+    }
+    setPContactWarn(null);
     const op = Number(pOpening) || 0;
     await upsertDocument(
       'parties',
@@ -227,10 +248,11 @@ const MasterModuleInner: React.FC<MasterModuleProps> = ({
         name: pName.trim(),
         partyType: pType,
         address: pAddr.trim(),
-        gstin: pGstin.trim().toUpperCase(),
-        pan: pPan.trim().toUpperCase(),
-        phone: pPhone.trim(),
-        email: '',
+        gstin: guard.normalizedGstin,
+        pan: guard.normalizedPan,
+        phone: guard.normalizedPhone,
+        email: guard.normalizedEmail,
+        preferredChannel: pPreferredChannel,
         openingBalance: op,
         currentBalance: op,
         balanceType: pBalType,
@@ -243,6 +265,7 @@ const MasterModuleInner: React.FC<MasterModuleProps> = ({
     setPGstin('');
     setPPan('');
     setPPhone('');
+    setPEmail('');
     setPOpening('0');
   };
 
@@ -1012,9 +1035,19 @@ const MasterModuleInner: React.FC<MasterModuleProps> = ({
             onSubmit={handleSaveParty}
             className="bg-white rounded-xl border border-slate-200 shadow-sm overflow-hidden"
           >
-            <div className="bg-gradient-to-r from-[#0D47A1] to-[#1976D2] text-white px-4 py-2.5 text-sm font-bold">
-              Add Party / Customer / Consignor / Consignee
+            <div className="bg-gradient-to-r from-[#0D47A1] to-[#1976D2] text-white px-4 py-2.5 flex flex-wrap items-center justify-between gap-2 text-sm font-bold">
+              <span>Add Party / Customer / Consignor / Consignee</span>
+              <span className="inline-flex items-center gap-1.5 text-[11px] bg-white/15 px-2.5 py-0.5 rounded">
+                <ShieldCheck className="w-3.5 h-3.5 text-emerald-300" />
+                Auto-Stable Contact Guard: {Math.max(0, parties.length - contactHealth.length)} Verified · {contactHealth.length} Flagged
+              </span>
             </div>
+            {pContactWarn && (
+              <div className="mx-4 mt-3 px-3 py-2 rounded-lg bg-red-50 border border-red-300 text-xs font-bold text-red-800 flex items-center gap-2">
+                <AlertTriangle className="w-4 h-4 shrink-0" />
+                <span>{pContactWarn}</span>
+              </div>
+            )}
             <div className="p-4 grid grid-cols-1 md:grid-cols-4 gap-3 text-xs">
               <div className="md:col-span-2">
                 <label className="block font-semibold text-slate-700 mb-1">Party Name *</label>
@@ -1042,16 +1075,63 @@ const MasterModuleInner: React.FC<MasterModuleProps> = ({
                 </select>
               </div>
               <div>
-                <label className="block font-semibold text-slate-700 mb-1">Phone</label>
+                <label className="block font-semibold text-slate-700 mb-1">WhatsApp / Mobile No</label>
                 <input
                   type="text"
                   value={pPhone}
-                  onChange={(e) => setPPhone(e.target.value)}
+                  onChange={(e) => {
+                    setPPhone(e.target.value);
+                    const g = validateAndNormalizeContact({
+                      phone: e.target.value,
+                      email: pEmail,
+                      gstin: pGstin,
+                      pan: pPan,
+                    });
+                    setPContactWarn(g.warnings.length > 0 ? g.warnings.join(' · ') : null);
+                  }}
+                  placeholder="10-digit WhatsApp mobile"
                   className="w-full px-2.5 py-1.5 rounded border border-slate-300 font-mono-num"
                 />
               </div>
+              <div>
+                <label className="block font-semibold text-slate-700 mb-1">Party Email Address</label>
+                <div className="relative">
+                  <Mail className="w-3.5 h-3.5 text-slate-400 absolute left-2.5 top-2" />
+                  <input
+                    type="email"
+                    value={pEmail}
+                    onChange={(e) => {
+                      setPEmail(e.target.value);
+                      const g = validateAndNormalizeContact({
+                        phone: pPhone,
+                        email: e.target.value,
+                        gstin: pGstin,
+                        pan: pPan,
+                      });
+                      setPContactWarn(g.warnings.length > 0 ? g.warnings.join(' · ') : null);
+                    }}
+                    placeholder="accounts@party.com"
+                    className="w-full pl-8 pr-2.5 py-1.5 rounded border border-slate-300"
+                  />
+                </div>
+              </div>
+              <div>
+                <label className="block font-semibold text-slate-700 mb-1">Follow-Up Channel</label>
+                <select
+                  aria-label="Preferred Follow-Up Channel"
+                  value={pPreferredChannel}
+                  onChange={(e) =>
+                    setPPreferredChannel(e.target.value as 'WhatsApp Only' | 'Email Only' | 'Both')
+                  }
+                  className="w-full px-2.5 py-1.5 rounded border border-slate-300 bg-white font-semibold"
+                >
+                  <option value="WhatsApp Only">WhatsApp Only</option>
+                  <option value="Email Only">Email Only</option>
+                  <option value="Both">Both (WhatsApp + Email)</option>
+                </select>
+              </div>
               <div className="md:col-span-2">
-                <label className="block font-semibold text-slate-700 mb-1">Address</label>
+                <label className="block font-semibold text-slate-700 mb-1">Address (Region / State / Export Country)</label>
                 <input
                   type="text"
                   value={pAddr}
@@ -1065,6 +1145,15 @@ const MasterModuleInner: React.FC<MasterModuleProps> = ({
                   type="text"
                   value={pGstin}
                   onChange={(e) => setPGstin(e.target.value)}
+                  className="w-full px-2.5 py-1.5 rounded border border-slate-300 font-mono-num uppercase"
+                />
+              </div>
+              <div>
+                <label className="block font-semibold text-slate-700 mb-1">PAN Number</label>
+                <input
+                  type="text"
+                  value={pPan}
+                  onChange={(e) => setPPan(e.target.value.toUpperCase())}
                   className="w-full px-2.5 py-1.5 rounded border border-slate-300 font-mono-num uppercase"
                 />
               </div>
@@ -1091,7 +1180,8 @@ const MasterModuleInner: React.FC<MasterModuleProps> = ({
             <div className="px-4 py-3 bg-slate-50 border-t border-slate-200 flex justify-end">
               <button
                 type="submit"
-                className="inline-flex items-center gap-1.5 px-4 py-1.5 rounded-md bg-blue-700 hover:bg-blue-800 text-white text-xs font-bold cursor-pointer"
+                disabled={readOnly}
+                className="inline-flex items-center gap-1.5 px-4 py-1.5 rounded-md bg-blue-700 hover:bg-blue-800 text-white text-xs font-bold cursor-pointer disabled:opacity-50"
               >
                 <Save className="w-3.5 h-3.5" />
                 Save Party

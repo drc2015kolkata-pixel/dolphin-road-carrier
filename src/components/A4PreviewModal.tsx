@@ -1,21 +1,31 @@
-import React, { useState } from 'react';
+import React, { useEffect, useState } from 'react';
 import {
   CheckCircle2,
   CloudUpload,
   Download,
   FileText,
+  Mail,
+  MessageCircle,
   Printer,
   RotateCw,
   X,
 } from 'lucide-react';
 import { GeneratedPdfResult } from '../lib/pdfEngine';
 import { PdfOrientation } from '../lib/pdfBuilders';
-import { BillCopyCount, DriveFolderName } from '../types/erp';
+import {
+  buildEmailShareHref,
+  buildWhatsAppShareHref,
+  sendViaWhatsAppCloudApi,
+  triggerExternalShareLink,
+} from '../lib/shareUtils';
+import { BillCopyCount, CompanySettings, DriveFolderName, Party } from '../types/erp';
 
 interface A4PreviewModalProps {
   pdf: GeneratedPdfResult | null;
   driveFolder: DriveFolderName;
   hasDriveToken: boolean;
+  parties?: Party[];
+  company?: CompanySettings;
   onClose: () => void;
   onSaveToDrive: (pdf: GeneratedPdfResult, folder: DriveFolderName) => Promise<void>;
   onConnectDrive: () => Promise<void>;
@@ -26,6 +36,8 @@ export const A4PreviewModal: React.FC<A4PreviewModalProps> = ({
   pdf,
   driveFolder,
   hasDriveToken,
+  parties = [],
+  company,
   onClose,
   onSaveToDrive,
   onConnectDrive,
@@ -35,6 +47,18 @@ export const A4PreviewModal: React.FC<A4PreviewModalProps> = ({
   const [switchingOrientation, setSwitchingOrientation] = useState(false);
   const [switchingCopies, setSwitchingCopies] = useState(false);
   const [uploadMsg, setUploadMsg] = useState<string | null>(null);
+  const [sharePhone, setSharePhone] = useState('');
+  const [shareEmail, setShareEmail] = useState('');
+
+  useEffect(() => {
+    if (!pdf) return;
+    const partyName = pdf.shareMeta?.partyName || '';
+    const matchedParty = parties.find(
+      (p) => p.name.trim().toLowerCase() === partyName.trim().toLowerCase()
+    );
+    setSharePhone(pdf.shareMeta?.phone || matchedParty?.phone || '');
+    setShareEmail(pdf.shareMeta?.email || matchedParty?.email || '');
+  }, [pdf, parties]);
 
   if (!pdf) return null;
 
@@ -84,7 +108,7 @@ export const A4PreviewModal: React.FC<A4PreviewModalProps> = ({
     setUploadMsg(null);
     try {
       await onSaveToDrive(pdf, driveFolder);
-      setUploadMsg(`Saved to Google Drive / ${driveFolder} (${pdf.sizeKB} KB)`);
+      setUploadMsg(`Saved to Google Drive / DOLPHIN_ROAD_CARRIERS_MASTER / ${driveFolder} (${pdf.sizeKB} KB)`);
     } catch (err) {
       setUploadMsg(err instanceof Error ? err.message : 'Drive upload failed');
     } finally {
@@ -92,19 +116,51 @@ export const A4PreviewModal: React.FC<A4PreviewModalProps> = ({
     }
   };
 
+  const shareText = [
+    pdf.shareMeta?.summaryText || pdf.title,
+    `Document File: ${pdf.fileName}`,
+    company?.companyName ? `Sent by: ${company.companyName} (${company.phones})` : '',
+  ]
+    .filter(Boolean)
+    .join('\n');
+
+  const handleShareWhatsApp = async () => {
+    if (company?.whatsappCloud?.enabled && sharePhone) {
+      const apiRes = await sendViaWhatsAppCloudApi({
+        company,
+        toPhone: sharePhone,
+        message: shareText,
+      });
+      if (apiRes.ok) {
+        setUploadMsg(`Sent directly via WhatsApp Cloud API to ${sharePhone}.`);
+        return;
+      }
+    }
+    triggerExternalShareLink(buildWhatsAppShareHref({ phone: sharePhone, message: shareText }));
+  };
+
+  const handleShareEmail = () => {
+    triggerExternalShareLink(
+      buildEmailShareHref({
+        email: shareEmail,
+        subject: `${pdf.title} — ${company?.companyName || 'Dolphin Road Carriers'}`,
+        body: `${shareText}\n\nNote: Please find the attached PDF (${pdf.fileName}) downloaded from Dolphin Road Carriers ERP.`,
+      })
+    );
+  };
+
   return (
-    <div className="fixed inset-0 z-50 flex items-center justify-center bg-slate-900/65 p-1.5 sm:p-3 md:p-6">
-      <div className="w-full max-w-5xl h-[94vh] sm:h-[92vh] bg-white rounded-xl border border-slate-200 shadow-2xl flex flex-col overflow-hidden">
+    <div className="fixed inset-0 z-50 flex items-center justify-center bg-slate-900/70 p-1.5 sm:p-3 md:p-6">
+      <div className="w-full max-w-6xl h-[95vh] sm:h-[92vh] bg-white rounded-xl border border-slate-200 shadow-2xl flex flex-col overflow-hidden">
         <div className="flex flex-wrap items-center justify-between gap-2.5 px-3.5 sm:px-5 py-3 bg-gradient-to-r from-[#0D47A1] to-[#1565C0] text-white">
           <div className="min-w-0">
             <h3 className="text-sm sm:text-base font-bold truncate">{pdf.title}</h3>
             <p className="text-[11px] sm:text-xs text-blue-100 truncate">
               {pdf.fileName} · {pdf.sizeKB} KB · A4{' '}
-              {pdf.orientation === 'l' ? 'Landscape (297×210mm)' : 'Portrait (210×297mm)'} · Single Combined PDF
+              {pdf.orientation === 'l' ? 'Landscape (297×210mm)' : 'Portrait (210×297mm)'} · 300-DPI Print PDF
             </p>
           </div>
           <div className="flex flex-wrap items-center gap-1.5 sm:gap-2 shrink-0">
-            {/* Bill Copy Selector (1 to 4 Copies Combined PDF) */}
             {pdf.rebuildWithCopyCount && onReplacePdf && (
               <select
                 aria-label="Bill Copy Selector"
@@ -120,7 +176,6 @@ export const A4PreviewModal: React.FC<A4PreviewModalProps> = ({
               </select>
             )}
 
-            {/* Dynamic Portrait / Landscape Switcher */}
             {pdf.rebuildWithOrientation && onReplacePdf && (
               <div className="inline-flex items-center rounded-lg bg-white/15 p-0.5 text-[11px] font-bold">
                 <button
@@ -132,7 +187,6 @@ export const A4PreviewModal: React.FC<A4PreviewModalProps> = ({
                       ? 'bg-white text-[#0D47A1]'
                       : 'text-white hover:bg-white/15'
                   }`}
-                  title="Switch to A4 Portrait"
                 >
                   <FileText className="w-3 h-3" />
                   Portrait
@@ -146,7 +200,6 @@ export const A4PreviewModal: React.FC<A4PreviewModalProps> = ({
                       ? 'bg-white text-[#0D47A1]'
                       : 'text-white hover:bg-white/15'
                   }`}
-                  title="Switch to A4 Landscape"
                 >
                   <RotateCw className={`w-3 h-3 ${switchingOrientation ? 'animate-spin' : ''}`} />
                   Landscape
@@ -169,6 +222,24 @@ export const A4PreviewModal: React.FC<A4PreviewModalProps> = ({
             >
               <Download className="w-3.5 h-3.5" />
               Download PDF
+            </button>
+            <button
+              type="button"
+              onClick={() => void handleShareWhatsApp()}
+              className="inline-flex items-center gap-1.5 px-3 py-1.5 rounded-lg bg-green-600 hover:bg-green-700 text-white text-xs font-semibold transition-colors whitespace-nowrap cursor-pointer"
+              title="Share on WhatsApp (wa.me or Cloud API)"
+            >
+              <MessageCircle className="w-3.5 h-3.5" />
+              Share on WhatsApp
+            </button>
+            <button
+              type="button"
+              onClick={handleShareEmail}
+              className="inline-flex items-center gap-1.5 px-3 py-1.5 rounded-lg bg-sky-600 hover:bg-sky-700 text-white text-xs font-semibold transition-colors whitespace-nowrap cursor-pointer"
+              title="Send via Email"
+            >
+              <Mail className="w-3.5 h-3.5" />
+              Send via Email
             </button>
             {hasDriveToken ? (
               <button
@@ -201,6 +272,30 @@ export const A4PreviewModal: React.FC<A4PreviewModalProps> = ({
           </div>
         </div>
 
+        {/* Optional Quick Recipient Strip for WhatsApp / Email */}
+        <div className="px-4 py-2 bg-slate-50 border-b border-slate-200 flex flex-wrap items-center gap-3 text-xs">
+          <span className="font-bold text-slate-700">Quick Share Recipient:</span>
+          <input
+            type="text"
+            value={sharePhone}
+            onChange={(e) => setSharePhone(e.target.value)}
+            placeholder="WhatsApp Phone (e.g. 9062167077)"
+            className="px-2.5 py-1 rounded border border-slate-300 bg-white text-xs w-48"
+          />
+          <input
+            type="email"
+            value={shareEmail}
+            onChange={(e) => setShareEmail(e.target.value)}
+            placeholder="Recipient Email"
+            className="px-2.5 py-1 rounded border border-slate-300 bg-white text-xs w-56"
+          />
+          {pdf.shareMeta?.preferredChannel && (
+            <span className="text-[11px] font-semibold text-blue-700">
+              Party Prefers: {pdf.shareMeta.preferredChannel}
+            </span>
+          )}
+        </div>
+
         {uploadMsg && (
           <div className="px-5 py-2 bg-emerald-50 border-b border-emerald-200 text-emerald-800 text-xs font-medium flex items-center gap-2">
             <CheckCircle2 className="w-4 h-4 shrink-0" />
@@ -208,7 +303,7 @@ export const A4PreviewModal: React.FC<A4PreviewModalProps> = ({
           </div>
         )}
 
-        <div className="flex-1 bg-slate-200 p-3">
+        <div className="flex-1 bg-slate-200 p-2 sm:p-3">
           <iframe
             id="drc-a4-preview-frame"
             src={pdf.blobUrl}

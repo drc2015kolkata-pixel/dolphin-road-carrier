@@ -28,7 +28,8 @@ async function loadImageToCompressedDataUrl(
   url: string,
   maxWidth: number,
   quality: number,
-  cropRect?: { sx: number; sy: number; sw: number; sh: number }
+  cropRect?: { sx: number; sy: number; sw: number; sh: number },
+  preferPng = false
 ): Promise<string | undefined> {
   try {
     const img = await new Promise<HTMLImageElement>((resolve, reject) => {
@@ -56,7 +57,7 @@ async function loadImageToCompressedDataUrl(
     ctx.fillStyle = '#ffffff';
     ctx.fillRect(0, 0, dw, dh);
     ctx.drawImage(img, sx, sy, sw || dw, sh || dh, 0, 0, dw, dh);
-    return canvas.toDataURL('image/jpeg', quality);
+    return preferPng ? canvas.toDataURL('image/png') : canvas.toDataURL('image/jpeg', quality);
   } catch {
     return undefined;
   }
@@ -66,7 +67,7 @@ function createFallbackTwinDolphinWatermarkDataUrl(): string | undefined {
   try {
     const canvas = document.createElement('canvas');
     canvas.width = 520;
-    canvas.height = 320;
+    canvas.height = 520;
     const ctx = canvas.getContext('2d');
     if (!ctx) return undefined;
 
@@ -74,34 +75,38 @@ function createFallbackTwinDolphinWatermarkDataUrl(): string | undefined {
     ctx.fillRect(0, 0, canvas.width, canvas.height);
 
     ctx.save();
-    ctx.globalAlpha = 0.14;
-    ctx.strokeStyle = '#1D4ED8';
+    ctx.globalAlpha = 0.095;
+    ctx.strokeStyle = '#1E40AF';
     ctx.fillStyle = '#60A5FA';
-    ctx.lineWidth = 5;
+    ctx.lineWidth = 4;
 
     ctx.beginPath();
-    ctx.moveTo(110, 235);
-    ctx.bezierCurveTo(100, 120, 175, 55, 248, 88);
-    ctx.bezierCurveTo(212, 110, 180, 165, 172, 240);
+    ctx.arc(260, 260, 224, 0, Math.PI * 2);
+    ctx.stroke();
+
+    ctx.beginPath();
+    ctx.moveTo(116, 295);
+    ctx.bezierCurveTo(106, 180, 178, 118, 248, 150);
+    ctx.bezierCurveTo(212, 172, 182, 225, 174, 300);
     ctx.closePath();
     ctx.fill();
 
     ctx.beginPath();
-    ctx.moveTo(410, 235);
-    ctx.bezierCurveTo(420, 120, 345, 55, 272, 88);
-    ctx.bezierCurveTo(308, 110, 340, 165, 348, 240);
+    ctx.moveTo(404, 295);
+    ctx.bezierCurveTo(414, 180, 342, 118, 272, 150);
+    ctx.bezierCurveTo(308, 172, 338, 225, 346, 300);
     ctx.closePath();
     ctx.fill();
 
-    ctx.font = 'bold 58px Arial, sans-serif';
+    ctx.font = '900 58px Arial, sans-serif';
     ctx.textAlign = 'center';
-    ctx.fillStyle = '#2563EB';
-    ctx.fillText('D.R.C', 260, 198);
-    ctx.font = 'bold 16px Arial, sans-serif';
-    ctx.fillText('DOLPHIN ROAD CARRIER', 260, 224);
+    ctx.fillStyle = '#1E3A8A';
+    ctx.fillText('D.R.C', 260, 338);
+    ctx.font = 'bold 20px Arial, sans-serif';
+    ctx.fillText('DOLPHIN ROAD CARRIERS', 260, 370);
     ctx.restore();
 
-    return canvas.toDataURL('image/jpeg', 0.65);
+    return canvas.toDataURL('image/jpeg', 0.85);
   } catch {
     return undefined;
   }
@@ -110,24 +115,29 @@ function createFallbackTwinDolphinWatermarkDataUrl(): string | undefined {
 async function getAssets(company?: CompanySettings): Promise<PdfAssets> {
   if (!cachedLogoDataUrl) {
     cachedLogoDataUrl =
-      (await loadImageToCompressedDataUrl(DRC_TRIANGLE_LOGO_URL, 260, 0.85)) ||
-      (await loadImageToCompressedDataUrl(FALLBACK_LOGO_PNG, 260, 0.85));
+      (await loadImageToCompressedDataUrl(DRC_TRIANGLE_LOGO_URL, 640, 1.0, undefined, true)) ||
+      (await loadImageToCompressedDataUrl(FALLBACK_LOGO_PNG, 512, 1.0, undefined, true));
   }
   if (!cachedDefaultStampDataUrl) {
-    cachedDefaultStampDataUrl = await loadImageToCompressedDataUrl(DRC_STAMP_URL, 260, 0.78);
+    cachedDefaultStampDataUrl = await loadImageToCompressedDataUrl(DRC_STAMP_URL, 540, 0.94);
   }
   if (!cachedPanCropDataUrl) {
-    cachedPanCropDataUrl = await loadImageToCompressedDataUrl(DRC_194C_REF_URL, 320, 0.75, {
-      sx: 0.11,
-      sy: 0.715,
-      sw: 0.27,
-      sh: 0.085,
-    });
+    cachedPanCropDataUrl = await loadImageToCompressedDataUrl(
+      DRC_194C_REF_URL,
+      640,
+      0.92,
+      {
+        sx: 0.11,
+        sy: 0.715,
+        sw: 0.27,
+        sh: 0.085,
+      }
+    );
   }
 
   let stampDataUrl = cachedDefaultStampDataUrl;
   if (company?.customStampDataUrl) {
-    const normalizedCustom = await loadImageToCompressedDataUrl(company.customStampDataUrl, 320, 0.82);
+    const normalizedCustom = await loadImageToCompressedDataUrl(company.customStampDataUrl, 540, 0.94);
     if (normalizedCustom) {
       stampDataUrl = normalizedCustom;
     }
@@ -146,6 +156,15 @@ async function getAssets(company?: CompanySettings): Promise<PdfAssets> {
   };
 }
 
+export interface PdfShareMeta {
+  partyName?: string;
+  phone?: string;
+  email?: string;
+  preferredChannel?: string;
+  docNo?: string;
+  summaryText?: string;
+}
+
 export interface GeneratedPdfResult {
   blob: Blob;
   blobUrl: string;
@@ -154,6 +173,7 @@ export interface GeneratedPdfResult {
   title: string;
   orientation: PdfOrientation;
   copyCount?: BillCopyCount;
+  shareMeta?: PdfShareMeta;
   rebuildWithOrientation?: (nextOrientation: PdfOrientation) => Promise<GeneratedPdfResult>;
   rebuildWithCopyCount?: (nextCopyCount: BillCopyCount) => Promise<GeneratedPdfResult>;
 }
@@ -286,10 +306,11 @@ export async function generateInvoicePDF(
   company: CompanySettings,
   includeAnnexure = true,
   orientation: PdfOrientation = 'p',
-  copyCount?: BillCopyCount
+  copyCount?: BillCopyCount,
+  shareMeta?: PdfShareMeta
 ): Promise<GeneratedPdfResult> {
   const assets = await getAssets(company);
-  return runPdfTask({
+  const res = await runPdfTask({
     kind: 'invoice',
     invoice,
     company,
@@ -298,51 +319,88 @@ export async function generateInvoicePDF(
     copyCount: copyCount || invoice.copyCount || 1,
     assets: { ...assets },
   });
+  return {
+    ...res,
+    shareMeta: shareMeta || {
+      partyName: invoice.partyName,
+      docNo: invoice.invoiceNo,
+      summaryText: `Tax Invoice ${invoice.invoiceNo} | Date: ${invoice.invoiceDate} | Party: ${invoice.partyName} | Grand Total: Rs. ${Number(invoice.grandTotal || 0).toLocaleString('en-IN')}`,
+    },
+  };
 }
 
 export async function generateLR3CopyPDF(
   cn: ConsignmentNote,
   company: CompanySettings,
-  orientation: PdfOrientation = 'l'
+  orientation: PdfOrientation = 'l',
+  shareMeta?: PdfShareMeta
 ): Promise<GeneratedPdfResult> {
   const assets = await getAssets(company);
-  return runPdfTask({
+  const res = await runPdfTask({
     kind: 'lr3copy',
     cn,
     company,
     orientation,
     assets: { ...assets },
   });
+  return {
+    ...res,
+    shareMeta: shareMeta || {
+      partyName: cn.billingPartyName || cn.consignorName,
+      docNo: cn.cnNo,
+      summaryText: `Consignment Note (LR) ${cn.cnNo} | Date: ${cn.cnDate} | ${cn.fromCity} -> ${cn.toCity} | Truck: ${cn.truckNo} | Freight: Rs. ${Number(cn.totalFreight || 0).toLocaleString('en-IN')}`,
+    },
+  };
 }
 
 export async function generateQuotationPDF(
   quote: Quotation,
   company: CompanySettings,
-  orientation: PdfOrientation = 'p'
+  orientation: PdfOrientation = 'p',
+  shareMeta?: PdfShareMeta
 ): Promise<GeneratedPdfResult> {
   const assets = await getAssets(company);
-  return runPdfTask({
+  const res = await runPdfTask({
     kind: 'quotation',
     quote,
     company,
     orientation,
     assets: { ...assets },
   });
+  return {
+    ...res,
+    shareMeta: shareMeta || {
+      partyName: quote.partyName,
+      phone: quote.partyPhone,
+      email: quote.partyEmail,
+      docNo: quote.quotationNo,
+      summaryText: `Rate Quotation ${quote.quotationNo} | Party: ${quote.partyName} | Route: ${quote.destination} | Vehicle: ${quote.vehicleType} | Freight: Rs. ${Number(quote.freight || 0).toLocaleString('en-IN')}`,
+    },
+  };
 }
 
 export async function generateDeclaration194CPDF(
   decl: Declaration194C,
   company: CompanySettings,
-  orientation: PdfOrientation = 'p'
+  orientation: PdfOrientation = 'p',
+  shareMeta?: PdfShareMeta
 ): Promise<GeneratedPdfResult> {
   const assets = await getAssets(company);
-  return runPdfTask({
+  const res = await runPdfTask({
     kind: 'declaration194c',
     decl,
     company,
     orientation,
     assets: { ...assets },
   });
+  return {
+    ...res,
+    shareMeta: shareMeta || {
+      partyName: decl.partyName,
+      docNo: `194C-${decl.financialYear}`,
+      summaryText: `Section 194C TDS Exemption Declaration (${decl.financialYear}) for ${decl.partyName} — ${company.companyName} (PAN: ${company.pan})`,
+    },
+  };
 }
 
 export async function generateTableReportPDF(params: {

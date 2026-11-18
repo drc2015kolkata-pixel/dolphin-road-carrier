@@ -3,6 +3,7 @@ import { User } from 'firebase/auth';
 import {
   Activity,
   AlertTriangle,
+  ArrowLeft,
   ArrowLeftRight,
   Bell,
   BookOpen,
@@ -10,21 +11,27 @@ import {
   Calendar,
   CalendarClock,
   CheckCircle2,
+  Cloud,
+  Coins,
   DatabaseBackup,
   Download,
   FileBarChart2,
   FileSpreadsheet,
   GitBranch,
   Info,
+  KeyRound,
+  Landmark,
   LayoutDashboard,
   Lock,
   LogOut,
   MapPin,
   Menu,
   PieChart,
+  Power,
   Radio,
   RefreshCw,
   ScanLine,
+  Search,
   Settings,
   ShieldAlert,
   ShieldCheck,
@@ -37,6 +44,7 @@ import {
 } from 'lucide-react';
 import {
   ActivityLog,
+  BankReceiptRecord,
   BRANCH_OPTIONS,
   CompanySettings,
   ConsignmentNote,
@@ -49,8 +57,10 @@ import {
   Party,
   PermissionKey,
   Quotation,
+  SheetPermissionKey,
   SheetTabId,
   StaffAccount,
+  StaffCommissionEntry,
   StaffPresence,
   TransactionRecord,
   Vehicle,
@@ -65,6 +75,7 @@ import {
 import {
   clearErpSession,
   CustomAuthSession,
+  getStaffSheetAccess,
   loadSavedErpSession,
   loginWithCredentials,
   resetAdminToDefaultAndLogin,
@@ -80,9 +91,27 @@ import {
   normalizeFyLabel,
   PRECREATED_FYS,
 } from './lib/formatters';
-import { uploadBlobToDriveFolder } from './lib/driveBackup';
-import { GeneratedPdfResult } from './lib/pdfEngine';
+import { runDailyDrive8FileCleanup, uploadBlobToDriveFolder } from './lib/driveBackup';
+import {
+  GeneratedPdfResult,
+  generateInvoicePDF,
+  generateLR3CopyPDF,
+  generateQuotationPDF,
+} from './lib/pdfEngine';
+import {
+  flushOfflineSyncQueue,
+  getOfflineSyncStatus,
+  OfflineSyncSnapshot,
+  subscribeOfflineSyncStatus,
+} from './lib/offlineSyncQueue';
+import {
+  registerManagedBlobUrl,
+  revokeThermalMemoryCooledUrls,
+  runSystemAutoFixAndClean,
+  shouldRun90DayMaintenance,
+} from './lib/selfHealing';
 import { useOnlineStatus, usePWAInstall } from './hooks/usePWAInstall';
+import { ErrorBoundary } from './components/ErrorBoundary';
 import { DrcTriangleLogo } from './components/DrcTriangleLogo';
 import { SignInScreen } from './components/SignInScreen';
 import { ConfirmModal } from './components/ConfirmModal';
@@ -94,6 +123,9 @@ import { BillingQuotesModule } from './components/BillingQuotesModule';
 import { LorryHirePodModule } from './components/LorryHirePodModule';
 import { ReportsMisModule, ReportTab } from './components/ReportsMisModule';
 import { BackupSettingsModule } from './components/BackupSettingsModule';
+import { StaffAccessMatrixModule } from './components/StaffAccessMatrixModule';
+import { StaffCommissionModule } from './components/StaffCommissionModule';
+import { BankReceiptImportModule } from './components/BankReceiptImportModule';
 
 type SidebarNavId = SheetTabId | 'transactions';
 
@@ -108,9 +140,12 @@ const TAB_LABELS: Record<SheetTabId, string> = {
   lr: 'Consignment / LR',
   billing: 'Billing & Quotes',
   lorryHire: 'Lorry Hire & POD',
+  commission: 'Staff Commission',
+  bankImport: 'Bank & TDS Import',
   accounts: 'Accounts',
   reports: 'Reports',
   mis: 'MIS Reports',
+  staffAccess: 'Staff Sheet Access Control',
   backup: 'Backup / Restore',
   settings: 'Settings',
   about: 'About DRC',
@@ -159,6 +194,8 @@ export default function App() {
   const [transactions, setTransactions] = useState<TransactionRecord[]>([]);
   const [declarations, setDeclarations] = useState<Declaration194C[]>([]);
   const [staffAccounts, setStaffAccounts] = useState<StaffAccount[]>([]);
+  const [staffCommissions, setStaffCommissions] = useState<StaffCommissionEntry[]>([]);
+  const [bankReceipts, setBankReceipts] = useState<BankReceiptRecord[]>([]);
   const [presenceList, setPresenceList] = useState<StaffPresence[]>([]);
   const [activityLogs, setActivityLogs] = useState<ActivityLog[]>([]);
   const [settingsDocs, setSettingsDocs] = useState<Array<CompanySettings & { id?: string }>>([]);
@@ -186,17 +223,31 @@ export default function App() {
   const [unlocking, setUnlocking] = useState(false);
   const lastActivityRef = useRef<number>(Date.now());
 
-  // Multi-tab Sheet Bar + Sidebar UI
+  // Multi-tab Sheet Bar + Back Navigation History + Sidebar UI
   const [openTabs, setOpenTabs] = useState<SheetTabDef[]>([{ id: 'dashboard', label: 'Dashboard' }]);
   const [activeTab, setActiveTab] = useState<SheetTabId>('dashboard');
+  const [tabHistory, setTabHistory] = useState<SheetTabId[]>([]);
   const [mobileMenuOpen, setMobileMenuOpen] = useState(false);
   const [notifOpen, setNotifOpen] = useState(false);
   const [liveMonitorOpen, setLiveMonitorOpen] = useState(false);
   const [iosGuideOpen, setIosGuideOpen] = useState(false);
+  const [appClosedOverlay, setAppClosedOverlay] = useState(false);
 
-  // Deep-link sub-tabs for Master Alerts and Reports
+  // Universal Search (Ctrl+K)
+  const [globalSearch, setGlobalSearch] = useState('');
+  const [searchDropdownOpen, setSearchDropdownOpen] = useState(false);
+  const globalSearchInputRef = useRef<HTMLInputElement | null>(null);
+
+  // Offline Sync Queue Status
+  const [offlineSyncStatus, setOfflineSyncStatus] = useState<OfflineSyncSnapshot>(() =>
+    getOfflineSyncStatus()
+  );
+
+  // Deep-link sub-tabs for Master Alerts, Billing & Reports
   const [masterInitialTab, setMasterInitialTab] = useState<MasterTabId>('parties');
   const [masterFocusNonce, setMasterFocusNonce] = useState(0);
+  const [billingInitialSubTab, setBillingInitialSubTab] = useState<'invoice' | 'quotation' | '194c'>('invoice');
+  const [billingFocusNonce, setBillingFocusNonce] = useState(0);
   const [reportInitialTab, setReportInitialTab] = useState<ReportTab>('invoiceRegister');
   const [reportFocusNonce, setReportFocusNonce] = useState(0);
 
@@ -235,6 +286,56 @@ export default function App() {
     return () => clearInterval(timer);
   }, []);
 
+  useEffect(() => {
+    const unsub = subscribeOfflineSyncStatus(setOfflineSyncStatus);
+    return () => unsub();
+  }, []);
+
+  useEffect(() => {
+    if (isOnline && erpSession) {
+      void flushOfflineSyncQueue();
+    }
+  }, [isOnline, erpSession]);
+
+  // 90-day self-healing maintenance & Ctrl+K global search shortcut
+  useEffect(() => {
+    if (erpSession && shouldRun90DayMaintenance()) {
+      runSystemAutoFixAndClean({
+        parties,
+        consignmentCount: consignments.length,
+        invoiceCount: invoices.length,
+        lorryHireCount: lorryHires.length,
+      });
+    }
+    const onKeyDown = (e: KeyboardEvent) => {
+      if ((e.ctrlKey || e.metaKey) && e.key.toLowerCase() === 'k') {
+        e.preventDefault();
+        setSearchDropdownOpen(true);
+        globalSearchInputRef.current?.focus();
+      }
+    };
+    window.addEventListener('keydown', onKeyDown);
+    return () => window.removeEventListener('keydown', onKeyDown);
+  }, [erpSession]);
+
+  // Daily 8-File Google Drive auto-cleanup once per day when Drive token is active
+  useEffect(() => {
+    if (!erpSession || !driveAccessToken) return;
+    const todayKey = new Date().toISOString().slice(0, 10);
+    try {
+      if (localStorage.getItem('drc_last_drive_cleanup_day') === todayKey) return;
+      void runDailyDrive8FileCleanup(driveAccessToken).then(() => {
+        try {
+          localStorage.setItem('drc_last_drive_cleanup_day', todayKey);
+        } catch {
+          // ignore
+        }
+      });
+    } catch {
+      // ignore
+    }
+  }, [erpSession, driveAccessToken]);
+
   // Passive listener for optional Google Drive OAuth connection
   useEffect(() => {
     const unsub = initAuth((nextUser, token) => {
@@ -262,6 +363,8 @@ export default function App() {
       subscribeCollection<TransactionRecord>('transactions', ownerUid, email, setTransactions),
       subscribeCollection<Declaration194C>('declarations', ownerUid, email, setDeclarations),
       subscribeCollection<StaffAccount>('staff_accounts', ownerUid, email, setStaffAccounts),
+      subscribeCollection<StaffCommissionEntry>('staff_commissions', ownerUid, email, setStaffCommissions),
+      subscribeCollection<BankReceiptRecord>('bank_receipts', ownerUid, email, setBankReceipts),
       subscribeCollection<StaffPresence>('presence', ownerUid, email, setPresenceList),
       subscribeCollection<ActivityLog>('activity_logs', ownerUid, email, setActivityLogs),
       subscribeCollection<CompanySettings & { id?: string }>(
@@ -373,6 +476,10 @@ export default function App() {
     () => normalizeFyLabel(selectedFy || companySettings.currentFy || 'FY 2026-27'),
     [selectedFy, companySettings.currentFy]
   );
+
+  useEffect(() => {
+    document.title = `Dolphin Road Carriers ERP | ACTIVE SEASON: ${activeFy}`;
+  }, [activeFy]);
 
   const fyChoices = useMemo(() => {
     const set = new Set<string>([
@@ -493,15 +600,57 @@ export default function App() {
     };
   }, [vehicles, drivers, visibleInvoices]);
 
-  const hasPermission = useCallback(
-    (perm: PermissionKey): boolean => {
-      if (!erpSession) return false;
-      if (!isEffectiveMasterAdmin && (perm === 'settings' || perm === 'mis')) return false;
-      if (!activeStaffSession) return isEffectiveMasterAdmin;
-      if (activeStaffSession.role === 'Admin') return true;
-      return (activeStaffSession.permissions || []).includes(perm);
+  const getSheetAccess = useCallback(
+    (sheetKey: SheetPermissionKey) => {
+      if (activeStaffSession && !isEffectiveMasterAdmin) {
+        return getStaffSheetAccess(
+          {
+            userId: activeStaffSession.staffCode,
+            displayName: activeStaffSession.displayName,
+            role: activeStaffSession.role,
+            isMasterAdmin: false,
+            workspaceUid,
+            branchCode: activeStaffSession.branchCode || 'ALL',
+            staffAccount: activeStaffSession,
+            loggedInAt: erpSession?.loggedInAt || Date.now(),
+          },
+          staffAccounts,
+          sheetKey
+        );
+      }
+      return getStaffSheetAccess(erpSession, staffAccounts, sheetKey);
     },
-    [erpSession, isEffectiveMasterAdmin, activeStaffSession]
+    [erpSession, activeStaffSession, isEffectiveMasterAdmin, staffAccounts, workspaceUid]
+  );
+
+  const hasPermission = useCallback(
+    (perm: SheetTabId): boolean => {
+      if (!erpSession) return false;
+      if (perm === 'dashboard' || perm === 'about') return true;
+      if (perm === 'staffAccess') return isEffectiveMasterAdmin;
+      if (!isEffectiveMasterAdmin && (perm === 'settings' || perm === 'mis')) return false;
+      if (isEffectiveMasterAdmin || activeStaffSession?.role === 'Admin') return true;
+      if (perm === 'backup') {
+        return (activeStaffSession?.permissions || []).includes('backup');
+      }
+      const sheetMap: Partial<Record<SheetTabId, SheetPermissionKey>> = {
+        master: 'master',
+        lr: 'lr',
+        billing: 'billing',
+        lorryHire: 'lorryHire',
+        commission: 'commission',
+        bankImport: 'bankImport',
+        accounts: 'accounts',
+        reports: 'reports',
+        settings: 'settings',
+      };
+      const sk = sheetMap[perm];
+      if (sk) {
+        return getSheetAccess(sk) !== 'blocked';
+      }
+      return (activeStaffSession?.permissions || []).includes(perm as PermissionKey);
+    },
+    [erpSession, isEffectiveMasterAdmin, activeStaffSession, getSheetAccess]
   );
 
   // Strict route guard: redirect non-admin staff away from restricted tabs immediately
@@ -581,14 +730,34 @@ export default function App() {
     };
   }, [erpSession, companySettings.lockSourceInspection]);
 
-  const openOrSwitchTab = useCallback((tabId: SheetTabId) => {
-    setOpenTabs((prev) => {
-      if (prev.some((t) => t.id === tabId)) return prev;
-      return [...prev, { id: tabId, label: TAB_LABELS[tabId] }];
+  const openOrSwitchTab = useCallback(
+    (tabId: SheetTabId) => {
+      setTabHistory((prev) => {
+        if (activeTab === tabId) return prev;
+        return [...prev.slice(-19), activeTab];
+      });
+      setOpenTabs((prev) => {
+        if (prev.some((t) => t.id === tabId)) return prev;
+        return [...prev, { id: tabId, label: TAB_LABELS[tabId] }];
+      });
+      setActiveTab(tabId);
+      setMobileMenuOpen(false);
+    },
+    [activeTab]
+  );
+
+  const handleGoBack = useCallback(() => {
+    setTabHistory((prev) => {
+      if (prev.length === 0) {
+        if (activeTab !== 'dashboard') setActiveTab('dashboard');
+        return prev;
+      }
+      const nextStack = [...prev];
+      const target = nextStack.pop() || 'dashboard';
+      setActiveTab(target);
+      return nextStack;
     });
-    setActiveTab(tabId);
-    setMobileMenuOpen(false);
-  }, []);
+  }, [activeTab]);
 
   const closeTab = (tabId: SheetTabId, e: React.MouseEvent) => {
     e.stopPropagation();
@@ -682,6 +851,7 @@ export default function App() {
   };
 
   const handlePreviewPdf = useCallback((pdf: GeneratedPdfResult, folder: DriveFolderName) => {
+    if (pdf.blobUrl) registerManagedBlobUrl(pdf.blobUrl);
     setPreviewPdf((prev) => {
       if (prev?.pdf.blobUrl) URL.revokeObjectURL(prev.pdf.blobUrl);
       return { pdf, folder };
@@ -693,6 +863,7 @@ export default function App() {
       if (prev?.pdf.blobUrl) URL.revokeObjectURL(prev.pdf.blobUrl);
       return null;
     });
+    revokeThermalMemoryCooledUrls();
   }, []);
 
   const handleSavePdfToDrive = async (pdf: GeneratedPdfResult, folder: DriveFolderName) => {
@@ -734,7 +905,7 @@ export default function App() {
       setReportInitialTab('accountBook');
       setReportFocusNonce((n) => n + 1);
     } else if (navId === 'reports') {
-      setReportInitialTab('invoiceRegister');
+      setReportInitialTab('gstRegister');
       setReportFocusNonce((n) => n + 1);
     } else if (navId === 'mis') {
       setReportInitialTab('finalResults');
@@ -742,9 +913,150 @@ export default function App() {
     } else if (navId === 'master') {
       setMasterInitialTab('parties');
       setMasterFocusNonce((n) => n + 1);
+    } else if (navId === 'billing') {
+      setBillingInitialSubTab('invoice');
+      setBillingFocusNonce((n) => n + 1);
     }
     openOrSwitchTab(navId);
   };
+
+  // Universal Search (Ctrl+K) matching Pages, Bills, CNs, Quotations, Lorries
+  const universalSearchResults = useMemo(() => {
+    const q = globalSearch.trim().toLowerCase();
+    if (!q) return [];
+    const results: Array<{
+      id: string;
+      badge: string;
+      title: string;
+      subtitle: string;
+      onSelect: () => Promise<void> | void;
+    }> = [];
+
+    const pageShortcuts: Array<{
+      id: string;
+      title: string;
+      keywords: string;
+      action: () => void;
+    }> = [
+      { id: 'pg-lr', title: 'Consignment / LR (Bilty Entry)', keywords: 'cn lr bilty consignment', action: () => openOrSwitchTab('lr') },
+      {
+        id: 'pg-bill',
+        title: 'Tax Invoice / Billing Builder',
+        keywords: 'bill tax invoice billing gst',
+        action: () => {
+          setBillingInitialSubTab('invoice');
+          setBillingFocusNonce((n) => n + 1);
+          openOrSwitchTab('billing');
+        },
+      },
+      {
+        id: 'pg-qtn',
+        title: 'Proforma Rate Quotation (10-Sec Auto-Fill)',
+        keywords: 'quotation quote rate proforma',
+        action: () => {
+          setBillingInitialSubTab('quotation');
+          setBillingFocusNonce((n) => n + 1);
+          openOrSwitchTab('billing');
+        },
+      },
+      {
+        id: 'pg-194c',
+        title: 'Section 194C Non-Deduction Declaration',
+        keywords: 'declaration 194c tds pan',
+        action: () => {
+          setBillingInitialSubTab('194c');
+          setBillingFocusNonce((n) => n + 1);
+          openOrSwitchTab('billing');
+        },
+      },
+      { id: 'pg-lh', title: 'Lorry Hire & POD Reconciliation', keywords: 'lorry hire pod shortage challan', action: () => openOrSwitchTab('lorryHire') },
+      { id: 'pg-comm', title: 'Staff Commission & Advance Ledger', keywords: 'commission advance wheeler staff', action: () => openOrSwitchTab('commission') },
+      { id: 'pg-bank', title: 'Bank Receipt & 194C TDS Import', keywords: 'bank statement excel import tds credit', action: () => openOrSwitchTab('bankImport') },
+      { id: 'pg-rep', title: 'FoxPro GST Register & 6 Statements', keywords: 'gst register report statement foxpro', action: () => openOrSwitchTab('reports') },
+      { id: 'pg-master', title: 'Party, Owner, Broker, Lorry & Driver Master', keywords: 'party master owner broker lorry vehicle driver', action: () => openOrSwitchTab('master') },
+      { id: 'pg-access', title: 'Staff Sheet Access Control (Matrix)', keywords: 'staff sheet access control permission', action: () => openOrSwitchTab('staffAccess') },
+      { id: 'pg-set', title: 'Settings, Multi-Bank & UPI QR', keywords: 'settings bank upi branch backup drive', action: () => openOrSwitchTab('settings') },
+    ];
+
+    pageShortcuts.forEach((p) => {
+      if (p.title.toLowerCase().includes(q) || p.keywords.includes(q)) {
+        results.push({
+          id: p.id,
+          badge: 'SCREEN',
+          title: p.title,
+          subtitle: 'Jump directly to module',
+          onSelect: p.action,
+        });
+      }
+    });
+
+    invoices
+      .filter((inv) => `${inv.invoiceNo} ${inv.partyName}`.toLowerCase().includes(q))
+      .slice(0, 6)
+      .forEach((inv) => {
+        results.push({
+          id: `inv-${inv.id}`,
+          badge: 'BILL',
+          title: `${inv.invoiceNo} — ${inv.partyName}`,
+          subtitle: `₹${formatINR(inv.grandTotal)} · ${inv.status} · Click to Preview PDF`,
+          onSelect: async () => {
+            const pdf = await generateInvoicePDF(inv, companySettings, true, 'p', inv.copyCount || 1);
+            handlePreviewPdf(pdf, 'Bills_Invoices');
+          },
+        });
+      });
+
+    consignments
+      .filter((cn) => `${cn.cnNo} ${cn.truckNo} ${cn.consignorName} ${cn.billingPartyName || ''}`.toLowerCase().includes(q))
+      .slice(0, 6)
+      .forEach((cn) => {
+        results.push({
+          id: `cn-${cn.id}`,
+          badge: 'CN/LR',
+          title: `${cn.cnNo} · ${cn.truckNo}`,
+          subtitle: `${cn.billingPartyName || cn.consignorName} · ${cn.fromCity}→${cn.toCity} · Preview 4-Copy LR`,
+          onSelect: async () => {
+            const pdf = await generateLR3CopyPDF(cn, companySettings);
+            handlePreviewPdf(pdf, 'LR Copy');
+          },
+        });
+      });
+
+    quotations
+      .filter((qt) => `${qt.quotationNo} ${qt.partyName} ${qt.destination}`.toLowerCase().includes(q))
+      .slice(0, 4)
+      .forEach((qt) => {
+        results.push({
+          id: `qt-${qt.id}`,
+          badge: 'QUOTE',
+          title: `${qt.quotationNo} — ${qt.partyName}`,
+          subtitle: `${qt.destination} · ₹${formatINR(qt.freight)} · Preview PDF`,
+          onSelect: async () => {
+            const pdf = await generateQuotationPDF(qt, companySettings);
+            handlePreviewPdf(pdf, 'Quotations');
+          },
+        });
+      });
+
+    vehicles
+      .filter((v) => `${v.truckNo} ${v.ownerName}`.toLowerCase().includes(q))
+      .slice(0, 4)
+      .forEach((v) => {
+        results.push({
+          id: `veh-${v.id}`,
+          badge: 'TRUCK',
+          title: `${v.truckNo} (${v.ownerName})`,
+          subtitle: `${v.vehicleType || 'Fleet'} · Open Lorry Register`,
+          onSelect: () => {
+            setMasterInitialTab('vehicles');
+            setMasterFocusNonce((n) => n + 1);
+            openOrSwitchTab('master');
+          },
+        });
+      });
+
+    return results.slice(0, 14);
+  }, [globalSearch, invoices, consignments, quotations, vehicles, companySettings, handlePreviewPdf, openOrSwitchTab]);
 
   const formattedClock = useMemo(() => {
     const dateStr = now.toLocaleDateString('en-GB', {
@@ -775,17 +1087,27 @@ export default function App() {
     id: SidebarNavId;
     label: string;
     icon: React.ComponentType<{ className?: string }>;
-    perm?: PermissionKey;
+    perm?: SheetTabId;
+    highlightClass?: string;
   }> = [
     { id: 'dashboard', label: 'Dashboard', icon: LayoutDashboard, perm: 'dashboard' },
     { id: 'master', label: 'Master', icon: Building2, perm: 'master' },
     { id: 'lr', label: 'Consignment / LR', icon: ScanLine, perm: 'lr' },
     { id: 'billing', label: 'Billing & Quotes', icon: FileSpreadsheet, perm: 'billing' },
     { id: 'lorryHire', label: 'Lorry Hire & POD', icon: Truck, perm: 'lorryHire' },
+    { id: 'commission', label: 'Staff Commission', icon: Coins, perm: 'commission' },
+    { id: 'bankImport', label: 'Bank & TDS Import', icon: Landmark, perm: 'bankImport' },
     { id: 'accounts', label: 'Accounts', icon: BookOpen, perm: 'accounts' },
     { id: 'transactions', label: 'Transactions', icon: ArrowLeftRight, perm: 'accounts' },
     { id: 'reports', label: 'Reports', icon: FileBarChart2, perm: 'reports' },
     { id: 'mis', label: 'MIS Reports', icon: PieChart, perm: 'mis' },
+    {
+      id: 'staffAccess',
+      label: 'Staff Sheet Access Control',
+      icon: KeyRound,
+      perm: 'staffAccess',
+      highlightClass: 'bg-amber-500/20 border border-amber-300/40 text-amber-100',
+    },
     { id: 'settings', label: 'Settings', icon: Settings, perm: 'settings' },
     { id: 'backup', label: 'Backup / Restore', icon: DatabaseBackup, perm: 'backup' },
     { id: 'about', label: 'About', icon: Info },
@@ -796,33 +1118,51 @@ export default function App() {
     : `${erpSession.displayName} (${erpSession.userId})`;
 
   return (
-    <div className="min-h-screen flex flex-col bg-[#E2E8F0] text-slate-900 select-none">
-      {/* Desktop ERP Top Window Title Strip */}
-      <div className="bg-[#EFF6FF] border-b border-blue-200 px-3 py-1 flex items-center justify-between text-[11px] text-slate-700 font-medium no-print">
+    <ErrorBoundary>
+      <div className="min-h-screen flex flex-col bg-[#E2E8F0] text-slate-900 select-none">
+      {/* Desktop ERP Top Window Title Strip with Active Season & Cloud Sync Pill */}
+      <div className="bg-[#EFF6FF] border-b border-blue-200 px-3 py-1 flex flex-wrap items-center justify-between gap-2 text-[11px] text-slate-800 font-semibold no-print">
         <div className="flex items-center gap-2 truncate">
           <Truck className="w-3.5 h-3.5 text-[#0D47A1] shrink-0" />
-          <span className="truncate">
-            Cargo And Logistics Administration System — {companySettings.companyName}
+          <span className="truncate font-bold text-[#0D47A1]">
+            ACTIVE SEASON: {activeFy}
+          </span>
+          <span className="hidden sm:inline text-slate-500">
+            · Cargo &amp; Logistics ERP — {companySettings.companyName}
           </span>
         </div>
-        <div className="flex items-center gap-3 shrink-0">
-          {!isOnline && (
+        <div className="flex items-center gap-2.5 shrink-0">
+          {!isOnline ? (
             <span className="inline-flex items-center gap-1 px-2 py-0.5 rounded bg-red-600 text-white font-bold">
               <WifiOff className="w-3 h-3" />
-              Offline Mode (IndexedDB Sync Pending)
+              Offline Saved — Queued ({offlineSyncStatus.pendingCount})
+            </span>
+          ) : offlineSyncStatus.pendingCount > 0 ? (
+            <button
+              type="button"
+              onClick={() => void flushOfflineSyncQueue()}
+              className="inline-flex items-center gap-1 px-2 py-0.5 rounded bg-amber-600 text-white font-bold cursor-pointer"
+            >
+              <RefreshCw className="w-3 h-3 animate-spin" />
+              Syncing {offlineSyncStatus.pendingCount} Offline Record(s)...
+            </button>
+          ) : (
+            <span className="inline-flex items-center gap-1 px-2 py-0.5 rounded bg-emerald-100 text-emerald-900 font-bold">
+              <Cloud className="w-3 h-3 text-emerald-700" />
+              Cloud &amp; Drive Live Synced
             </span>
           )}
-          <span className="hidden sm:inline text-slate-500">
+          <span className="hidden md:inline text-slate-600">
             PAN: {companySettings.pan} · GSTIN: {companySettings.gstin}
           </span>
         </div>
       </div>
 
-      {/* Main White/Blue Header Matching Reference Dashboard */}
-      <header className="bg-white border-b border-slate-200 px-3 md:px-5 py-2.5 shadow-sm no-print">
+      {/* Main White/Blue Unified Master Header */}
+      <header className="bg-white border-b border-slate-200 px-3 md:px-5 py-2.5 shadow-sm no-print space-y-2">
         <div className="flex flex-wrap items-center justify-between gap-3">
-          {/* Left Brand Block */}
-          <div className="flex items-center gap-3">
+          {/* Left: Back Button, Menu & 24K Gold Triangular DRC Brand */}
+          <div className="flex items-center gap-2.5">
             <button
               type="button"
               onClick={() => setMobileMenuOpen((v) => !v)}
@@ -831,15 +1171,91 @@ export default function App() {
             >
               <Menu className="w-5 h-5" />
             </button>
-            <DrcTriangleLogo className="w-11 h-11 shrink-0 drop-shadow-sm" />
+            <button
+              type="button"
+              onClick={handleGoBack}
+              disabled={tabHistory.length === 0 && activeTab === 'dashboard'}
+              className="inline-flex items-center gap-1 px-2.5 py-1.5 rounded-lg border border-slate-300 bg-slate-50 hover:bg-slate-200 text-slate-800 text-xs font-extrabold cursor-pointer disabled:opacity-40"
+              title="Go Back to Previous Screen"
+            >
+              <ArrowLeft className="w-3.5 h-3.5" />
+              <span>Back</span>
+            </button>
+            <DrcTriangleLogo className="w-10 h-10 shrink-0" />
             <div>
-              <h1 className="text-xl md:text-2xl font-extrabold tracking-tight text-[#0B3B8C] leading-none">
+              <h1 className="text-lg md:text-xl font-extrabold tracking-tight text-[#0B3B8C] leading-none">
                 DOLPHIN ROAD CARRIERS
               </h1>
-              <p className="text-xs md:text-sm font-bold italic text-[#1565C0] mt-0.5">
-                Fast &bull; Safe &bull; Reliable
+              <p className="text-[11px] md:text-xs font-bold italic text-[#1565C0] mt-0.5">
+                {companySettings.tagline || 'Fast · Safe · Reliable'}
               </p>
             </div>
+          </div>
+
+          {/* Center: Universal Dropdown Search (Ctrl+K) */}
+          <div className="relative flex-1 min-w-[240px] max-w-md order-last lg:order-none">
+            <div className="relative">
+              <Search className="w-4 h-4 text-slate-500 absolute left-3 top-2.5" />
+              <input
+                ref={globalSearchInputRef}
+                type="text"
+                value={globalSearch}
+                onFocus={() => setSearchDropdownOpen(true)}
+                onBlur={() => setTimeout(() => setSearchDropdownOpen(false), 180)}
+                onChange={(e) => {
+                  setGlobalSearch(e.target.value);
+                  setSearchDropdownOpen(true);
+                }}
+                placeholder="Universal Search (Ctrl+K): Bill 101, CN, Quotation, Truck..."
+                className="w-full pl-9 pr-14 py-2 rounded-lg border border-slate-300 bg-slate-50 focus:bg-white text-xs font-semibold text-slate-900 focus:outline-none focus:ring-2 focus:ring-blue-600"
+              />
+              {globalSearch ? (
+                <button
+                  type="button"
+                  onClick={() => setGlobalSearch('')}
+                  className="absolute right-2.5 top-2 text-slate-500 hover:text-slate-800 cursor-pointer"
+                  aria-label="Clear search"
+                >
+                  <X className="w-4 h-4" />
+                </button>
+              ) : (
+                <kbd className="hidden sm:inline-block absolute right-2.5 top-2 px-1.5 py-0.5 rounded bg-white border border-slate-300 text-[10px] font-mono-num text-slate-600">
+                  Ctrl+K
+                </kbd>
+              )}
+            </div>
+
+            {searchDropdownOpen && globalSearch.trim().length > 0 && (
+              <div className="absolute left-0 right-0 mt-1.5 bg-white rounded-xl border border-slate-300 shadow-2xl z-50 max-h-80 overflow-y-auto divide-y divide-slate-100">
+                {universalSearchResults.length === 0 ? (
+                  <p className="p-3.5 text-xs text-slate-500 text-center">
+                    No matching Bills, CNs, Quotations, Vehicles, or Screens for &ldquo;{globalSearch}&rdquo;.
+                  </p>
+                ) : (
+                  universalSearchResults.map((item) => (
+                    <button
+                      key={item.id}
+                      type="button"
+                      onMouseDown={(e) => {
+                        e.preventDefault();
+                        setSearchDropdownOpen(false);
+                        setGlobalSearch('');
+                        void item.onSelect();
+                      }}
+                      className="w-full text-left px-3.5 py-2.5 hover:bg-blue-50 flex items-center justify-between gap-2 cursor-pointer"
+                    >
+                      <div className="min-w-0">
+                        <p className="text-xs font-bold text-slate-900 truncate">{item.title}</p>
+                        <p className="text-[11px] text-slate-600 truncate">{item.subtitle}</p>
+                      </div>
+                      <span className="px-2 py-0.5 rounded bg-[#0D47A1] text-white text-[10px] font-extrabold shrink-0">
+                        {item.badge}
+                      </span>
+                    </button>
+                  ))
+                )}
+              </div>
+            )}
           </div>
 
           {/* Right Utility Strip */}
@@ -1129,6 +1545,82 @@ export default function App() {
             )}
           </div>
         </div>
+
+        {/* Quick Jump & Rectify Navigation Bar */}
+        <div className="flex flex-wrap items-center gap-1.5 pt-1.5 border-t border-slate-100 text-[11px] font-bold">
+          <span className="text-slate-500 mr-1">Quick Jump:</span>
+          {hasPermission('lr') && (
+            <button
+              type="button"
+              onClick={() => openOrSwitchTab('lr')}
+              className="px-2.5 py-1 rounded bg-blue-50 hover:bg-blue-100 text-[#0D47A1] cursor-pointer"
+            >
+              + CN / LR
+            </button>
+          )}
+          {hasPermission('billing') && (
+            <button
+              type="button"
+              onClick={() => {
+                setBillingInitialSubTab('invoice');
+                setBillingFocusNonce((n) => n + 1);
+                openOrSwitchTab('billing');
+              }}
+              className="px-2.5 py-1 rounded bg-emerald-50 hover:bg-emerald-100 text-emerald-800 cursor-pointer"
+            >
+              + Tax Invoice
+            </button>
+          )}
+          {hasPermission('lorryHire') && (
+            <button
+              type="button"
+              onClick={() => openOrSwitchTab('lorryHire')}
+              className="px-2.5 py-1 rounded bg-amber-50 hover:bg-amber-100 text-amber-900 cursor-pointer"
+            >
+              Lorry Hire &amp; POD
+            </button>
+          )}
+          {hasPermission('commission') && (
+            <button
+              type="button"
+              onClick={() => openOrSwitchTab('commission')}
+              className="px-2.5 py-1 rounded bg-indigo-50 hover:bg-indigo-100 text-indigo-800 cursor-pointer"
+            >
+              Commission &amp; Advance
+            </button>
+          )}
+          {hasPermission('bankImport') && (
+            <button
+              type="button"
+              onClick={() => openOrSwitchTab('bankImport')}
+              className="px-2.5 py-1 rounded bg-teal-50 hover:bg-teal-100 text-teal-800 cursor-pointer"
+            >
+              Bank &amp; 194C Import
+            </button>
+          )}
+          {hasPermission('reports') && (
+            <button
+              type="button"
+              onClick={() => {
+                setReportInitialTab('partyFollowUp');
+                setReportFocusNonce((n) => n + 1);
+                openOrSwitchTab('reports');
+              }}
+              className="px-2.5 py-1 rounded bg-red-50 hover:bg-red-100 text-red-800 cursor-pointer"
+            >
+              15/30d Alerts &amp; Load Follow-Up
+            </button>
+          )}
+          {isEffectiveMasterAdmin && (
+            <button
+              type="button"
+              onClick={() => openOrSwitchTab('staffAccess')}
+              className="px-2.5 py-1 rounded bg-amber-500 text-white hover:bg-amber-600 cursor-pointer"
+            >
+              Staff Access Control
+            </button>
+          )}
+        </div>
       </header>
 
       {/* Main Body: Left Royal Blue Sidebar + Multi-Tab Workspace */}
@@ -1168,6 +1660,8 @@ export default function App() {
                     className={`w-full flex items-center gap-2.5 px-3 py-2 rounded-lg text-xs font-semibold transition-all cursor-pointer ${
                       isActive
                         ? 'bg-gradient-to-r from-[#2563EB] to-[#1D4ED8] text-white shadow-sm ring-1 ring-white/25'
+                        : item.highlightClass
+                        ? `${item.highlightClass} hover:bg-amber-500/35`
                         : 'text-blue-100 hover:bg-white/10 hover:text-white'
                     }`}
                   >
@@ -1177,38 +1671,57 @@ export default function App() {
                 );
               })}
 
-            <button
-              type="button"
-              onClick={() =>
-                handleShowConfirm({
-                  title: 'Sign Out of Dolphin Road Carriers ERP?',
-                  description: `Sign out of ${activeOperatorLabel}? Unsaved form drafts will be cleared.`,
-                  confirmLabel: 'Sign Out',
-                  variant: 'danger',
-                  onConfirm: async () => {
-                    await upsertStaffPresence({
-                      ownerUid: workspaceUid,
-                      staffCode: activeStaffCode,
-                      displayName: activeStaffName,
-                      role: activeStaffRole,
-                      branchCode: activeOperationalBranch,
-                      activeModule: TAB_LABELS[activeTab] || activeTab,
-                      deviceType: detectDeviceType(),
-                      status: 'offline',
-                    });
-                    clearErpSession();
-                    setErpSession(null);
-                    setActiveStaffSession(null);
-                    setOpenTabs([{ id: 'dashboard', label: 'Dashboard' }]);
-                    setActiveTab('dashboard');
-                  },
-                })
-              }
-              className="w-full flex items-center gap-2.5 px-3 py-2 rounded-lg text-xs font-semibold text-blue-100 hover:bg-red-600/80 hover:text-white transition-all cursor-pointer"
-            >
-              <LogOut className="w-4 h-4 shrink-0" />
-              <span>Exit</span>
-            </button>
+            <div className="pt-2 mt-2 border-t border-white/15 space-y-1.5">
+              <button
+                type="button"
+                onClick={() =>
+                  handleShowConfirm({
+                    title: 'Log Out of Dolphin Road Carriers ERP?',
+                    description: `Sign out of ${activeOperatorLabel}? You will return to the Login screen.`,
+                    confirmLabel: 'Log Out',
+                    variant: 'danger',
+                    onConfirm: async () => {
+                      await upsertStaffPresence({
+                        ownerUid: workspaceUid,
+                        staffCode: activeStaffCode,
+                        displayName: activeStaffName,
+                        role: activeStaffRole,
+                        branchCode: activeOperationalBranch,
+                        activeModule: TAB_LABELS[activeTab] || activeTab,
+                        deviceType: detectDeviceType(),
+                        status: 'offline',
+                      });
+                      clearErpSession();
+                      setErpSession(null);
+                      setActiveStaffSession(null);
+                      setOpenTabs([{ id: 'dashboard', label: 'Dashboard' }]);
+                      setActiveTab('dashboard');
+                    },
+                  })
+                }
+                className="w-full flex items-center gap-2.5 px-3 py-2 rounded-lg text-xs font-semibold text-blue-100 hover:bg-blue-800 hover:text-white transition-all cursor-pointer"
+              >
+                <LogOut className="w-4 h-4 shrink-0" />
+                <span>Log Out</span>
+              </button>
+
+              <button
+                type="button"
+                onClick={() => {
+                  try {
+                    window.close();
+                  } catch {
+                    // ignore if browser blocks programmatic window close
+                  }
+                  setAppClosedOverlay(true);
+                }}
+                className="w-full flex items-center gap-2.5 px-3 py-2 rounded-lg text-xs font-extrabold bg-red-600 hover:bg-red-700 text-white shadow-sm transition-all cursor-pointer"
+                title="Close App Window without signing out"
+              >
+                <Power className="w-4 h-4 shrink-0" />
+                <span>Close App</span>
+              </button>
+            </div>
           </div>
 
           {/* Sidebar Bottom "Grow Your Business With Us..." Card */}
@@ -1309,6 +1822,7 @@ export default function App() {
               <MasterModule
                 key={`master_${masterInitialTab}_${masterFocusNonce}`}
                 ownerUid={workspaceUid}
+                readOnly={getSheetAccess('master') === 'view'}
                 parties={parties}
                 vehicles={vehicles}
                 drivers={drivers}
@@ -1327,6 +1841,7 @@ export default function App() {
                 activeBranchCode={activeOperationalBranch}
                 activeFy={activeFy}
                 isMasterAdmin={isEffectiveMasterAdmin}
+                readOnly={getSheetAccess('lr') === 'view'}
                 consignments={visibleConsignments}
                 parties={parties}
                 vehicles={vehicles}
@@ -1344,12 +1859,15 @@ export default function App() {
 
             {activeTab === 'billing' && (
               <BillingQuotesModule
+                key={`billing_${billingInitialSubTab}_${billingFocusNonce}`}
                 ownerUid={workspaceUid}
                 activeStaffCode={activeStaffCode}
                 activeStaffName={activeStaffName}
                 activeBranchCode={activeOperationalBranch}
                 activeFy={activeFy}
                 isMasterAdmin={isEffectiveMasterAdmin}
+                readOnly={getSheetAccess('billing') === 'view'}
+                initialSubTab={billingInitialSubTab}
                 invoices={visibleInvoices}
                 quotations={visibleQuotations}
                 declarations={visibleDeclarations}
@@ -1371,14 +1889,55 @@ export default function App() {
                 activeBranchCode={activeOperationalBranch}
                 activeFy={activeFy}
                 isMasterAdmin={isEffectiveMasterAdmin}
+                readOnly={getSheetAccess('lorryHire') === 'view'}
                 lorryHires={visibleLorryHires}
                 consignments={visibleConsignments}
                 parties={parties}
+                staffAccounts={staffAccounts}
+                staffCommissions={staffCommissions}
                 company={companySettings}
                 driveAccessToken={driveAccessToken}
                 onConnectDrive={() => handleGoogleDriveConnect(true)}
                 onPreviewPdf={handlePreviewPdf}
                 onShowConfirm={handleShowConfirm}
+              />
+            )}
+
+            {activeTab === 'commission' && (
+              <StaffCommissionModule
+                commissions={staffCommissions}
+                staffAccounts={staffAccounts}
+                company={companySettings}
+                activeFy={activeFy}
+                ownerUid={workspaceUid}
+                currentStaffCode={activeStaffCode}
+                currentBranchCode={activeOperationalBranch}
+                readOnly={getSheetAccess('commission') === 'view'}
+                onOpenPreview={(pdf) => handlePreviewPdf(pdf, 'Reports_Ledgers')}
+              />
+            )}
+
+            {activeTab === 'bankImport' && (
+              <BankReceiptImportModule
+                bankReceipts={bankReceipts}
+                invoices={visibleInvoices}
+                company={companySettings}
+                activeFy={activeFy}
+                ownerUid={workspaceUid}
+                currentStaffCode={activeStaffCode}
+                currentBranchCode={activeOperationalBranch}
+                driveAccessToken={driveAccessToken}
+                readOnly={getSheetAccess('bankImport') === 'view'}
+                onOpenPreview={(pdf) => handlePreviewPdf(pdf, 'Reports_Ledgers')}
+              />
+            )}
+
+            {activeTab === 'staffAccess' && (
+              <StaffAccessMatrixModule
+                staffAccounts={staffAccounts}
+                ownerUid={workspaceUid}
+                currentStaffCode={activeStaffCode}
+                currentBranchCode={activeOperationalBranch}
               />
             )}
 
@@ -1613,11 +2172,13 @@ export default function App() {
         </div>
       )}
 
-      {/* Live A4 PDF Preview Modal with Dynamic Portrait / Landscape Rebuild */}
+      {/* Live A4 PDF Preview Modal with Dynamic Portrait / Landscape Rebuild & Share Actions */}
       <A4PreviewModal
         pdf={previewPdf?.pdf || null}
         driveFolder={previewPdf?.folder || 'Bills_Invoices'}
         hasDriveToken={Boolean(driveAccessToken)}
+        parties={parties}
+        company={companySettings}
         onClose={handleClosePreviewPdf}
         onSaveToDrive={handleSavePdfToDrive}
         onConnectDrive={() => handleGoogleDriveConnect(true)}
@@ -1649,7 +2210,7 @@ export default function App() {
 
       {/* Configurable Auto-Lock Security Overlay */}
       {isScreenLocked && (
-        <div className="fixed inset-0 z-[100] flex items-center justify-center bg-slate-900/90 backdrop-blur-md p-4 no-print">
+        <div className="fixed inset-0 z-[100] flex items-center justify-center bg-slate-900/95 p-4 no-print">
           <div className="w-full max-w-sm bg-white rounded-2xl border border-slate-200 shadow-2xl overflow-hidden">
             <div className="bg-gradient-to-r from-[#0D47A1] to-[#1565C0] text-white px-5 py-4 flex items-center gap-3">
               <DrcTriangleLogo className="w-10 h-10 shrink-0" />
@@ -1785,6 +2346,31 @@ export default function App() {
           </div>
         </div>
       )}
+
+      {/* Close App Overlay (Closes workspace without signing out) */}
+      {appClosedOverlay && (
+        <div className="fixed inset-0 z-[110] flex items-center justify-center bg-slate-950/95 p-4 no-print">
+          <div className="w-full max-w-sm bg-white rounded-2xl border border-slate-300 shadow-2xl p-6 text-center space-y-4">
+            <DrcTriangleLogo className="w-16 h-16 mx-auto" />
+            <div>
+              <h3 className="text-base font-extrabold text-slate-900">
+                DRC ERP Workspace Closed
+              </h3>
+              <p className="text-xs text-slate-600 mt-1">
+                Session preserved safely for {activeOperatorLabel} ({activeFy}). Close this browser tab or click below to reopen immediately.
+              </p>
+            </div>
+            <button
+              type="button"
+              onClick={() => setAppClosedOverlay(false)}
+              className="w-full px-4 py-2.5 rounded-lg bg-[#0D47A1] hover:bg-[#0A3882] text-white text-xs font-bold cursor-pointer"
+            >
+              Reopen ERP Workspace
+            </button>
+          </div>
+        </div>
+      )}
     </div>
+    </ErrorBoundary>
   );
 }

@@ -1,11 +1,15 @@
 import React, { useMemo, useState } from 'react';
 import {
+  AlertTriangle,
   BrainCircuit,
   Calculator,
   Download,
   Eye,
   FileSpreadsheet,
   Lock,
+  Mail,
+  MessageSquare,
+  PhoneCall,
   Printer,
   RefreshCw,
   Search,
@@ -33,6 +37,15 @@ import {
   printPdfDirect,
 } from '../lib/pdfEngine';
 import { FoxproStatementSpec } from '../lib/pdfBuilders';
+import {
+  PRIORITY_CORRIDOR_REGIONS,
+  buildEmailShareHref,
+  buildOverdueBillMessage,
+  buildPartyLoadFollowUpMessage,
+  buildWhatsAppShareHref,
+  getInvoicePendingDays,
+  triggerExternalShareLink,
+} from '../lib/shareUtils';
 import { useDebouncedValue } from '../hooks/useDebounce';
 import { PaginatedDataTable, TableColumn } from './PaginatedDataTable';
 
@@ -66,6 +79,7 @@ export type ReportTab =
   | 'cnWise'
   | 'lorryWise'
   | 'aging'
+  | 'partyFollowUp'
   | 'accountBook'
   | 'finalResults'
   | 'aiAdvisor';
@@ -93,6 +107,7 @@ const ReportsMisModuleInner: React.FC<ReportsMisModuleProps> = ({
   onShowConfirm,
 }) => {
   const [tab, setTab] = useState<ReportTab>(initialSubTab);
+  const [corridorFilter, setCorridorFilter] = useState<string>('ALL');
   const [statementKind, setStatementKind] = useState<FoxproStatementKind>('party');
   const [statementFilter, setStatementFilter] = useState('');
   const [tripDateFilter, setTripDateFilter] = useState('');
@@ -983,6 +998,62 @@ const ReportsMisModuleInner: React.FC<ReportsMisModuleProps> = ({
     []
   );
 
+  const overdue15And30List = useMemo(
+    () =>
+      invoices
+        .filter((inv) => inv.status !== 'Paid' && getInvoicePendingDays(inv) >= 15)
+        .map((inv) => {
+          const days = getInvoicePendingDays(inv);
+          const p = parties.find(
+            (x) => x.name.trim().toLowerCase() === (inv.partyName || '').trim().toLowerCase()
+          );
+          return { inv, days, party: p };
+        })
+        .sort((a, b) => b.days - a.days),
+    [invoices, parties]
+  );
+
+  const followUpParties = useMemo(() => {
+    const baseParties = parties.filter(
+      (p) => p.partyType === 'Customer' || p.partyType === 'Consignor' || p.partyType === 'Consignee'
+    );
+    return baseParties
+      .map((p) => {
+        const partyCns = consignments
+          .filter(
+            (cn) =>
+              cn.billingPartyName?.toLowerCase() === p.name.toLowerCase() ||
+              cn.consignorName?.toLowerCase() === p.name.toLowerCase()
+          )
+          .sort((a, b) => (b.cnDate || '').localeCompare(a.cnDate || ''));
+        const lastCn = partyCns[0];
+        const daysSinceLast = lastCn?.cnDate ? daysSinceDate(lastCn.cnDate) : 99;
+        const routeText = `${p.address || ''} ${lastCn?.toState || ''} ${lastCn?.toCity || ''} ${lastCn?.fromCity || ''}`;
+        return {
+          party: p,
+          lastCn,
+          daysSinceLast,
+          routeText,
+          dueForFollowUp: daysSinceLast >= 3,
+        };
+      })
+      .filter((row) => {
+        if (corridorFilter !== 'ALL') {
+          if (!row.routeText.toLowerCase().includes(corridorFilter.toLowerCase())) {
+            return false;
+          }
+        }
+        const q = debouncedSearch.trim().toLowerCase();
+        if (q) {
+          return `${row.party.name} ${row.routeText} ${row.party.phone || ''}`
+            .toLowerCase()
+            .includes(q);
+        }
+        return true;
+      })
+      .sort((a, b) => b.daysSinceLast - a.daysSinceLast);
+  }, [parties, consignments, corridorFilter, debouncedSearch]);
+
   const tabs: Array<{ id: ReportTab; label: string; adminOnly?: boolean }> = [
     { id: 'gstRegister', label: 'G-S-T R-E-G-I-S-T-E-R' },
     { id: 'foxproStatements', label: 'FoxPro Statements (6)' },
@@ -991,6 +1062,7 @@ const ReportsMisModuleInner: React.FC<ReportsMisModuleProps> = ({
     { id: 'cnWise', label: 'CN-Wise P&L' },
     { id: 'lorryWise', label: 'Lorry-Wise P&L' },
     { id: 'aging', label: 'Payment Aging' },
+    { id: 'partyFollowUp', label: '15/30d Alerts & Party Load' },
     { id: 'accountBook', label: 'Account Book' },
     { id: 'finalResults', label: 'Final Results (P&L / BS)', adminOnly: true },
     { id: 'aiAdvisor', label: 'AI MIS Advisor', adminOnly: true },
@@ -998,7 +1070,8 @@ const ReportsMisModuleInner: React.FC<ReportsMisModuleProps> = ({
 
   const visibleTabs = tabs.filter((t) => isMasterAdmin || !t.adminOnly);
 
-  const isTableTab = tab !== 'finalResults' && tab !== 'aiAdvisor';
+  const isTableTab =
+    tab !== 'finalResults' && tab !== 'aiAdvisor' && tab !== 'partyFollowUp';
 
   return (
     <div className="space-y-4">
@@ -1387,14 +1460,246 @@ const ReportsMisModuleInner: React.FC<ReportsMisModuleProps> = ({
       )}
 
       {tab === 'aging' && (
-        <div className="bg-white rounded-xl border border-slate-200 shadow-sm overflow-hidden">
-          <PaginatedDataTable
-            data={filteredAging}
-            columns={agingCols}
-            getRowId={(a) => a.invoiceNo}
-            defaultPageSize={50}
-            emptyMessage="No outstanding invoices."
-          />
+        <div className="space-y-3">
+          {overdue15And30List.length > 0 && (
+            <div className="bg-amber-50 border border-amber-300 rounded-xl p-3 flex flex-wrap items-center justify-between gap-2 text-xs">
+              <div className="flex items-center gap-2 font-bold text-amber-950">
+                <AlertTriangle className="w-4 h-4 text-red-600 shrink-0" />
+                <span>
+                  {overdue15And30List.length} Unpaid Invoice(s) Reached 15d / 30d+ Alert Threshold
+                </span>
+              </div>
+              <button
+                type="button"
+                onClick={() => setTab('partyFollowUp')}
+                className="px-3 py-1.5 rounded-lg bg-[#0D47A1] hover:bg-[#0A3882] text-white font-bold cursor-pointer"
+              >
+                Open 15/30d Alert &amp; WhatsApp/Email Desk
+              </button>
+            </div>
+          )}
+          <div className="bg-white rounded-xl border border-slate-200 shadow-sm overflow-hidden">
+            <PaginatedDataTable
+              data={filteredAging}
+              columns={agingCols}
+              getRowId={(a) => a.invoiceNo}
+              defaultPageSize={50}
+              emptyMessage="No outstanding invoices."
+            />
+          </div>
+        </div>
+      )}
+
+      {tab === 'partyFollowUp' && (
+        <div className="space-y-4">
+          {/* 15 & 30-Day Due Payment Alerts (Manual User Trigger Only) */}
+          <div className="bg-white rounded-xl border border-slate-200 shadow-sm overflow-hidden">
+            <div className="bg-gradient-to-r from-red-700 to-amber-700 text-white px-4 py-2.5 flex flex-wrap items-center justify-between gap-2">
+              <span className="text-sm font-bold flex items-center gap-2">
+                <AlertTriangle className="w-4 h-4" />
+                15-Day &amp; 30-Day Pending Bill Payment Alerts ({overdue15And30List.length})
+              </span>
+              <span className="text-[11px] text-amber-100">
+                Manual 1-click WhatsApp or Email reminder — never sends automatically
+              </span>
+            </div>
+            <div className="divide-y divide-slate-200">
+              {overdue15And30List.length === 0 ? (
+                <p className="p-5 text-center text-xs text-slate-500">
+                  No pending bills have crossed 15 or 30 days.
+                </p>
+              ) : (
+                overdue15And30List.map(({ inv, days, party }) => {
+                  const balance = Math.max(0, Number(inv.grandTotal || 0) - Number(inv.paidAmount || 0));
+                  const msg = buildOverdueBillMessage({
+                    invoice: inv,
+                    companyName: company.companyName,
+                    pendingDays: days,
+                  });
+                  return (
+                    <div
+                      key={inv.id}
+                      className="p-3 flex flex-wrap items-center justify-between gap-3 text-xs hover:bg-slate-50"
+                    >
+                      <div>
+                        <div className="flex items-center gap-2">
+                          <span className="font-mono-num font-extrabold text-blue-900">
+                            {inv.invoiceNo}
+                          </span>
+                          <span
+                            className={`px-2 py-0.5 rounded text-[10px] font-extrabold text-white ${
+                              days >= 30 ? 'bg-red-600' : 'bg-amber-600'
+                            }`}
+                          >
+                            {days >= 30 ? `30d+ OVERDUE (${days}d)` : `15d+ ALERT (${days}d)`}
+                          </span>
+                        </div>
+                        <p className="font-bold text-slate-900 mt-0.5">{inv.partyName}</p>
+                        <p className="text-[11px] text-slate-600 font-mono-num">
+                          Balance: ₹{formatINR(balance)} · Bill Date: {formatDateDDMMYYYY(inv.invoiceDate)} ·
+                          Prefers: {party?.preferredChannel || 'WhatsApp Only'}
+                        </p>
+                      </div>
+                      <div className="flex flex-wrap items-center gap-2">
+                        <button
+                          type="button"
+                          onClick={() =>
+                            triggerExternalShareLink(
+                              buildWhatsAppShareHref({ phone: party?.phone || '', message: msg })
+                            )
+                          }
+                          className="inline-flex items-center gap-1.5 px-3 py-1.5 rounded-lg bg-emerald-700 hover:bg-emerald-800 text-white font-bold cursor-pointer"
+                        >
+                          <MessageSquare className="w-3.5 h-3.5" />
+                          WhatsApp Alert
+                        </button>
+                        <button
+                          type="button"
+                          onClick={() =>
+                            triggerExternalShareLink(
+                              buildEmailShareHref({
+                                email: party?.email || '',
+                                subject: `Payment Reminder: Bill ${inv.invoiceNo} (${days} Days)`,
+                                body: msg,
+                              })
+                            )
+                          }
+                          className="inline-flex items-center gap-1.5 px-3 py-1.5 rounded-lg bg-indigo-700 hover:bg-indigo-800 text-white font-bold cursor-pointer"
+                        >
+                          <Mail className="w-3.5 h-3.5" />
+                          Email Alert
+                        </button>
+                      </div>
+                    </div>
+                  );
+                })
+              )}
+            </div>
+          </div>
+
+          {/* 3-4 Day User-Selected Priority Corridor Party Load Follow-Up */}
+          <div className="bg-white rounded-xl border border-slate-200 shadow-sm overflow-hidden">
+            <div className="bg-gradient-to-r from-[#0D47A1] to-[#1976D2] text-white px-4 py-2.5 flex flex-wrap items-center justify-between gap-2">
+              <span className="text-sm font-bold flex items-center gap-2">
+                <PhoneCall className="w-4 h-4 text-amber-300" />
+                3–4 Day Party Load Inquiry &amp; Corridor Follow-Up ({followUpParties.length} parties)
+              </span>
+              <div className="relative">
+                <Search className="w-3.5 h-3.5 text-slate-400 absolute left-2.5 top-2" />
+                <input
+                  type="text"
+                  value={search}
+                  onChange={(e) => setSearch(e.target.value)}
+                  placeholder="Search party, city, phone..."
+                  className="pl-8 pr-3 py-1 rounded bg-white text-slate-900 text-xs w-52 focus:outline-none"
+                />
+              </div>
+            </div>
+            <div className="p-3 bg-slate-50 border-b border-slate-200 flex flex-wrap items-center gap-1.5 text-[11px]">
+              <button
+                type="button"
+                onClick={() => setCorridorFilter('ALL')}
+                className={`px-2.5 py-1 rounded font-bold cursor-pointer ${
+                  corridorFilter === 'ALL'
+                    ? 'bg-[#0D47A1] text-white'
+                    : 'bg-white border border-slate-300 text-slate-700'
+                }`}
+              >
+                All Regions
+              </button>
+              {PRIORITY_CORRIDOR_REGIONS.map((region) => (
+                <button
+                  key={region}
+                  type="button"
+                  onClick={() => setCorridorFilter(region)}
+                  className={`px-2.5 py-1 rounded font-bold cursor-pointer ${
+                    corridorFilter === region
+                      ? 'bg-[#0D47A1] text-white'
+                      : 'bg-white border border-slate-300 text-slate-700 hover:bg-blue-50'
+                  }`}
+                >
+                  {region}
+                </button>
+              ))}
+            </div>
+            <div className="divide-y divide-slate-200 max-h-[420px] overflow-y-auto">
+              {followUpParties.length === 0 ? (
+                <p className="p-6 text-center text-xs text-slate-500">
+                  No parties match this corridor filter.
+                </p>
+              ) : (
+                followUpParties.slice(0, 80).map(({ party, lastCn, daysSinceLast, dueForFollowUp }) => {
+                  const regionLabel = corridorFilter !== 'ALL' ? corridorFilter : (lastCn?.toCity || party.address || 'All-India');
+                  const followMsg = buildPartyLoadFollowUpMessage({
+                    party,
+                    companyName: company.companyName,
+                    corridorHint: regionLabel,
+                    phones: company.phones,
+                  });
+                  const pref = party.preferredChannel || 'WhatsApp Only';
+                  return (
+                    <div
+                      key={party.id}
+                      className="p-3 flex flex-wrap items-center justify-between gap-3 text-xs hover:bg-slate-50"
+                    >
+                      <div>
+                        <div className="flex flex-wrap items-center gap-2">
+                          <span className="font-bold text-slate-900">{party.name}</span>
+                          {dueForFollowUp && (
+                            <span className="px-2 py-0.5 rounded bg-blue-100 text-blue-900 text-[10px] font-extrabold">
+                              {lastCn ? `${daysSinceLast}d since last load` : '3-4d Follow-Up Ready'}
+                            </span>
+                          )}
+                          <span className="px-2 py-0.5 rounded bg-slate-100 text-slate-700 text-[10px] font-semibold">
+                            Channel: {pref}
+                          </span>
+                        </div>
+                        <p className="text-[11px] text-slate-600 mt-0.5">
+                          {party.phone ? `Tel: ${party.phone}` : 'No phone'} ·{' '}
+                          {party.email ? party.email : 'No email'} ·{' '}
+                          {lastCn ? `Last Dispatch: ${lastCn.cnNo} (${lastCn.fromCity} → ${lastCn.toCity})` : party.address || 'Registered Party'}
+                        </p>
+                      </div>
+                      <div className="flex flex-wrap items-center gap-1.5">
+                        {(pref === 'WhatsApp Only' || pref === 'Both' || !party.email) && (
+                          <button
+                            type="button"
+                            onClick={() =>
+                              triggerExternalShareLink(
+                                buildWhatsAppShareHref({ phone: party.phone || '', message: followMsg })
+                              )
+                            }
+                            className="inline-flex items-center gap-1 px-2.5 py-1.5 rounded bg-emerald-700 hover:bg-emerald-800 text-white font-bold cursor-pointer"
+                          >
+                            <MessageSquare className="w-3.5 h-3.5" />
+                            WhatsApp Load Check
+                          </button>
+                        )}
+                        {(pref === 'Email Only' || pref === 'Both' || Boolean(party.email)) && (
+                          <button
+                            type="button"
+                            onClick={() =>
+                              triggerExternalShareLink(
+                                buildEmailShareHref({
+                                  email: party.email || '',
+                                  subject: 'Vehicle Requirement Check — Dolphin Road Carriers',
+                                  body: followMsg,
+                                })
+                              )
+                            }
+                            className="inline-flex items-center gap-1 px-2.5 py-1.5 rounded bg-indigo-700 hover:bg-indigo-800 text-white font-bold cursor-pointer"
+                          >
+                            <Mail className="w-3.5 h-3.5" />
+                            Email Load Check
+                          </button>
+                        )}
+                      </div>
+                    </div>
+                  );
+                })
+              )}
+            </div>
+          </div>
         </div>
       )}
 

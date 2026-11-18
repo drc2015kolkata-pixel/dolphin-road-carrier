@@ -21,7 +21,12 @@ import {
   saveAllCollectionsToIdb,
   saveCollectionToIdb,
 } from './indexedDbStore';
-import { StaffAccount } from '../types/erp';
+import {
+  enqueueOfflineOp,
+  flushOfflineSyncQueue,
+  markCloudSyncedNow,
+} from './offlineSyncQueue';
+import { SheetAccessLevel, SheetPermissionKey, StaffAccount } from '../types/erp';
 
 export type CounterSerialType = 'cn' | 'invoice' | 'quotation' | 'tx';
 
@@ -118,7 +123,10 @@ function buildAdminSession(userId: string): CustomAuthSession {
 
 export function loadSavedErpSession(): CustomAuthSession | null {
   try {
-    const raw = localStorage.getItem(SESSION_STORAGE_KEY);
+    // Enforce mandatory Login Lock across fresh Windows/Android/Tablet launches:
+    // keep active session strictly in sessionStorage and clear legacy persistent token.
+    localStorage.removeItem(SESSION_STORAGE_KEY);
+    const raw = sessionStorage.getItem(SESSION_STORAGE_KEY);
     if (!raw) return null;
     const parsed = JSON.parse(raw) as CustomAuthSession;
     if (!parsed || !parsed.userId || !parsed.workspaceUid) return null;
@@ -130,7 +138,7 @@ export function loadSavedErpSession(): CustomAuthSession | null {
 
 export function saveErpSession(session: CustomAuthSession): void {
   try {
-    localStorage.setItem(SESSION_STORAGE_KEY, JSON.stringify(session));
+    sessionStorage.setItem(SESSION_STORAGE_KEY, JSON.stringify(session));
   } catch {
     // Ignore storage quota issues
   }
@@ -138,10 +146,53 @@ export function saveErpSession(session: CustomAuthSession): void {
 
 export function clearErpSession(): void {
   try {
+    sessionStorage.removeItem(SESSION_STORAGE_KEY);
     localStorage.removeItem(SESSION_STORAGE_KEY);
   } catch {
     // Ignore
   }
+}
+
+export function getStaffSheetAccess(
+  session: CustomAuthSession | null,
+  staffList: StaffAccount[],
+  sheetKey: SheetPermissionKey
+): SheetAccessLevel {
+  if (!session) return 'blocked';
+  if (session.isMasterAdmin || session.role === 'Admin') return 'edit';
+
+  const latestStaff =
+    staffList.find(
+      (s) =>
+        s.id === session.staffAccount?.id ||
+        s.staffCode.toLowerCase() === session.userId.toLowerCase()
+    ) || session.staffAccount;
+
+  if (!latestStaff || latestStaff.active === false) return 'blocked';
+
+  if (latestStaff.sheetPermissions && latestStaff.sheetPermissions[sheetKey]) {
+    return latestStaff.sheetPermissions[sheetKey] as SheetAccessLevel;
+  }
+
+  // Backward-compatible fallback to legacy permissions[] when granular matrix wasn't explicitly customized yet
+  const legacyMap: Record<SheetPermissionKey, string> = {
+    lr: 'lr',
+    billing: 'billing',
+    lorryHire: 'lorryHire',
+    commission: 'lorryHire',
+    accounts: 'accounts',
+    master: 'master',
+    bankImport: 'accounts',
+    reports: 'reports',
+    quotations: 'billing',
+    declarations: 'billing',
+    settings: 'settings',
+  };
+  const legacyKey = legacyMap[sheetKey];
+  if (latestStaff.permissions?.includes(legacyKey as never)) {
+    return latestStaff.role === 'Viewer' ? 'view' : 'edit';
+  }
+  return 'blocked';
 }
 
 export async function loginWithCredentials(
@@ -469,6 +520,8 @@ async function ensureServerSyncStarted(): Promise<void> {
         if (json.state) {
           serverLoaded = true;
           applyFullState(json.state);
+          markCloudSyncedNow();
+          void flushOfflineSyncQueue();
         }
       })
       .catch(() => {
@@ -622,11 +675,37 @@ export async function upsertDocument(
       if (!res.ok && res.status === 400) {
         throw new Error(json.error || `Failed to save ${collectionName}/${safeId}`);
       }
+      if (res.ok) {
+        markCloudSyncedNow();
+      } else {
+        enqueueOfflineOp({
+          opType: 'upsert',
+          collectionName,
+          docId: safeId,
+          payload,
+          isNew,
+        });
+      }
+    } else if (!res.ok) {
+      enqueueOfflineOp({
+        opType: 'upsert',
+        collectionName,
+        docId: safeId,
+        payload,
+        isNew,
+      });
     }
   } catch (err) {
-    if (err instanceof Error && !/Failed to fetch|NetworkError|Load failed/i.test(err.message)) {
+    if (err instanceof Error && !/Failed to fetch|NetworkError|Load failed|fetch/i.test(err.message)) {
       throw err;
     }
+    enqueueOfflineOp({
+      opType: 'upsert',
+      collectionName,
+      docId: safeId,
+      payload,
+      isNew,
+    });
   }
 
   // Optional Firestore mirror if user connected verified Google account
@@ -694,10 +773,12 @@ export async function bulkUpsertDocuments(
     });
     if (res.ok) {
       const json = (await res.json().catch(() => ({}))) as { count?: number };
+      markCloudSyncedNow();
       return json.count ?? items.length;
     }
+    enqueueOfflineOp({ opType: 'bulk-upsert', collectionName, items });
   } catch {
-    // Offline/static environment already persisted locally
+    enqueueOfflineOp({ opType: 'bulk-upsert', collectionName, items });
   }
   return items.length;
 }
@@ -721,13 +802,18 @@ export async function saveSettingsDocument(
   notifyCollection('settings', currentSettings);
 
   try {
-    await fetch('/api/erp/settings', {
+    const res = await fetch('/api/erp/settings', {
       method: 'POST',
       headers: { 'Content-Type': 'application/json' },
       body: JSON.stringify({ settingId: safeId, payload }),
     });
+    if (res.ok) {
+      markCloudSyncedNow();
+    } else {
+      enqueueOfflineOp({ opType: 'settings', collectionName: 'settings', docId: safeId, payload });
+    }
   } catch {
-    // Offline fallback already persisted locally
+    enqueueOfflineOp({ opType: 'settings', collectionName: 'settings', docId: safeId, payload });
   }
 
   if (auth.currentUser?.emailVerified) {
@@ -761,13 +847,18 @@ export async function removeDocument(collectionName: string, id: string) {
   );
 
   try {
-    await fetch('/api/erp/delete', {
+    const res = await fetch('/api/erp/delete', {
       method: 'POST',
       headers: { 'Content-Type': 'application/json' },
       body: JSON.stringify({ collection: collectionName, id }),
     });
+    if (res.ok) {
+      markCloudSyncedNow();
+    } else {
+      enqueueOfflineOp({ opType: 'delete', collectionName, docId: id });
+    }
   } catch {
-    // Offline persistence already updated
+    enqueueOfflineOp({ opType: 'delete', collectionName, docId: id });
   }
 
   if (auth.currentUser?.emailVerified) {

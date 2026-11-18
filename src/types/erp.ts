@@ -26,6 +26,40 @@ export const BRANCH_OPTIONS = [
 
 export type BranchCode = (typeof BRANCH_OPTIONS)[number] | string;
 
+export type SheetAccessLevel = 'blocked' | 'view' | 'edit';
+
+export type SheetPermissionKey =
+  | 'lr'
+  | 'billing'
+  | 'lorryHire'
+  | 'commission'
+  | 'accounts'
+  | 'master'
+  | 'bankImport'
+  | 'reports'
+  | 'quotations'
+  | 'declarations'
+  | 'settings';
+
+export const SHEET_PERMISSION_DEFINITIONS: Array<{
+  key: SheetPermissionKey;
+  label: string;
+  shortLabel: string;
+  mappedTab: SheetTabId;
+}> = [
+  { key: 'lr', label: 'CN / Bilty Entry & Register', shortLabel: 'CN / Bilty', mappedTab: 'lr' },
+  { key: 'billing', label: 'Billing & Tax Invoice', shortLabel: 'Tax Invoice', mappedTab: 'billing' },
+  { key: 'lorryHire', label: 'Lorry Hire & POD Reconciliation', shortLabel: 'Lorry Hire', mappedTab: 'lorryHire' },
+  { key: 'commission', label: 'Staff Commission & Advance Ledger', shortLabel: 'Staff Comm.', mappedTab: 'commission' },
+  { key: 'accounts', label: 'Party Ledger & Daybook', shortLabel: 'Party Ledger', mappedTab: 'accounts' },
+  { key: 'master', label: 'Drivers, Lorry Owners, Brokers & Parties', shortLabel: 'Masters', mappedTab: 'master' },
+  { key: 'bankImport', label: 'Bank Receipt & TDS Auto-Import', shortLabel: 'Bank Import', mappedTab: 'bankImport' },
+  { key: 'reports', label: 'FoxPro GST Register & Statements', shortLabel: 'GST Register', mappedTab: 'reports' },
+  { key: 'quotations', label: '10-Sec Rate Quotations', shortLabel: 'Quotation', mappedTab: 'billing' },
+  { key: 'declarations', label: '194C Exemption Declarations', shortLabel: '194C Decl.', mappedTab: 'billing' },
+  { key: 'settings', label: 'Master Parameters & Drive Backup', shortLabel: 'Settings', mappedTab: 'settings' },
+];
+
 export interface StaffAccount {
   id: string;
   staffCode: string;
@@ -35,6 +69,7 @@ export interface StaffAccount {
   pinHash: string;
   active: boolean;
   permissions: PermissionKey[];
+  sheetPermissions?: Partial<Record<SheetPermissionKey, SheetAccessLevel>>;
   ownerUid: string;
   createdAt?: unknown;
   updatedAt?: unknown;
@@ -54,6 +89,7 @@ export interface Party {
   bankIfsc?: string;
   phone?: string;
   email?: string;
+  preferredChannel?: 'WhatsApp Only' | 'Email Only' | 'Both' | string;
   openingBalance: number;
   currentBalance: number;
   balanceType: 'Dr' | 'Cr';
@@ -224,6 +260,8 @@ export interface Invoice {
   copyCount?: BillCopyCount;
   consignmentRows: InvoiceConsignmentRow[];
   annexureLorries?: InvoiceAnnexureLorry[];
+  selectedBankId?: string;
+  branchOfficeId?: string;
   branchCode?: string;
   createdByStaff?: string;
   ownerUid: string;
@@ -239,6 +277,10 @@ export interface Quotation {
   partyName: string;
   partyAddress?: string;
   partyGstin?: string;
+  partyPhone?: string;
+  partyEmail?: string;
+  goodsType?: string;
+  rateMode?: 'Fixed' | 'Per Ton' | string;
   subject?: string;
   validityText?: string;
   vehicleType: string;
@@ -383,6 +425,81 @@ export interface FyOpeningBalanceEntry {
   balanceType: 'Dr' | 'Cr';
 }
 
+export interface StaffCommissionEntry {
+  id: string;
+  entryDate: string;
+  financialYear?: string;
+  staffName: string;
+  challanNo: string;
+  truckNo?: string;
+  wheelType:
+    | '4-Wheeler'
+    | '6-Wheeler'
+    | '10-Wheeler'
+    | '12-Wheeler'
+    | '14-Wheeler'
+    | '16-Wheeler'
+    | '18-Wheeler'
+    | '22-Wheeler Trailer'
+    | string;
+  entryType: 'Commission' | 'Advance Taken' | 'Paid';
+  commissionRate?: number;
+  amount: number;
+  paymentMode?: string;
+  remarks?: string;
+  branchCode?: string;
+  createdByStaff?: string;
+  ownerUid: string;
+  createdAt?: unknown;
+  updatedAt?: unknown;
+}
+
+export interface BankReceiptRecord {
+  id: string;
+  financialYear: string;
+  receiptDate: string;
+  bankAccountName: string;
+  partyName: string;
+  referenceNo: string;
+  description: string;
+  creditAmount: number;
+  tdsRatePct: number;
+  tdsAmount: number;
+  grossSettled: number;
+  matchedInvoiceId?: string;
+  matchedInvoiceNo?: string;
+  billAmount?: number;
+  balanceRemaining?: number;
+  appliedToInvoice: boolean;
+  sourceFileName?: string;
+  branchCode?: string;
+  createdByStaff?: string;
+  ownerUid: string;
+  createdAt?: unknown;
+  updatedAt?: unknown;
+}
+
+export interface CompanyBankAccount {
+  id: string;
+  bankName: string;
+  accountName: string;
+  accountNo: string;
+  ifsc: string;
+  branch: string;
+  upiId?: string;
+  swift?: string;
+  isDefault?: boolean;
+}
+
+export interface CompanyBranchOffice {
+  id: string;
+  branchName: string;
+  branchCode: string;
+  address: string;
+  phone?: string;
+  gstin?: string;
+}
+
 export interface DropdownMasterConfig {
   goodsTypes?: string[];
   packageModes?: string[];
@@ -391,6 +508,7 @@ export interface DropdownMasterConfig {
   states?: string[];
   districtsByState?: Record<string, string[]>;
   creditDayPresets?: number[];
+  wheelCommissionRates?: Record<string, number>;
 }
 
 export interface CompanySettings {
@@ -409,6 +527,15 @@ export interface CompanySettings {
   accountNo: string;
   ifsc: string;
   swift: string;
+  upiId?: string;
+  bankAccounts?: CompanyBankAccount[];
+  branches?: CompanyBranchOffice[];
+  whatsappCloud?: {
+    enabled?: boolean;
+    phoneNumberId?: string;
+    accessToken?: string;
+    templateName?: string;
+  };
   currentFy: string;
   availableFys?: string[];
   fyOpeningBalances?: Record<string, Record<string, FyOpeningBalanceEntry>>;
@@ -416,6 +543,7 @@ export interface CompanySettings {
   customStampDataUrl?: string;
   autoLockMinutes?: number;
   lockSourceInspection?: boolean;
+  last90DayAutoFixAt?: number;
   ownerUid: string;
   updatedAt?: unknown;
 }
@@ -426,10 +554,13 @@ export type SheetTabId =
   | 'lr'
   | 'billing'
   | 'lorryHire'
+  | 'commission'
+  | 'bankImport'
   | 'accounts'
   | 'reports'
   | 'mis'
   | 'backup'
+  | 'staffAccess'
   | 'settings'
   | 'about';
 
@@ -439,7 +570,8 @@ export type DriveFolderName =
   | 'Quotations'
   | 'POD_Scans'
   | 'Declarations'
-  | 'Reports_Ledgers';
+  | 'Reports_Ledgers'
+  | 'Bank_Statements';
 
 export const DEFAULT_COMPANY_SETTINGS: Omit<CompanySettings, 'ownerUid' | 'updatedAt'> = {
   companyName: 'DOLPHIN ROAD CARRIER',

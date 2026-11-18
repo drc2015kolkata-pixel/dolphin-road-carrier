@@ -1,19 +1,26 @@
-<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 512 512" width="512" height="512" role="img" aria-label="Dolphin Road Carriers DRC Play-Store Triangular Logo">
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 512 512" width="512" height="512" role="img" aria-label="Dolphin Road Carriers 24K Gold Triangular DRC Logo">
   <defs>
     <linearGradient id="drcBgGrad" x1="15%" y1="5%" x2="85%" y2="95%">
-      <stop offset="0%" stop-color="#1E88E5" />
-      <stop offset="50%" stop-color="#0D47A1" />
-      <stop offset="100%" stop-color="#06215A" />
+      <stop offset="0%" stop-color="#1E40AF" />
+      <stop offset="50%" stop-color="#0F2D75" />
+      <stop offset="100%" stop-color="#051336" />
     </linearGradient>
     <linearGradient id="drcInnerGlow" x1="0%" y1="0%" x2="100%" y2="100%">
-      <stop offset="0%" stop-color="#38BDF8" stop-opacity="0.32" />
-      <stop offset="55%" stop-color="#1D4ED8" stop-opacity="0.06" />
-      <stop offset="100%" stop-color="#0284C7" stop-opacity="0.25" />
+      <stop offset="0%" stop-color="#FDE047" stop-opacity="0.18" />
+      <stop offset="50%" stop-color="#38BDF8" stop-opacity="0.08" />
+      <stop offset="100%" stop-color="#F59E0B" stop-opacity="0.22" />
     </linearGradient>
-    <linearGradient id="drcGoldTrim" x1="0%" y1="0%" x2="100%" y2="100%">
-      <stop offset="0%" stop-color="#FDE047" />
-      <stop offset="50%" stop-color="#F59E0B" />
-      <stop offset="100%" stop-color="#FEF08A" />
+    <linearGradient id="drcGold24k" x1="0%" y1="0%" x2="100%" y2="100%">
+      <stop offset="0%" stop-color="#92400E" />
+      <stop offset="22%" stop-color="#FDE047" />
+      <stop offset="50%" stop-color="#D97706" />
+      <stop offset="78%" stop-color="#FEF08A" />
+      <stop offset="100%" stop-color="#B45309" />
+    </linearGradient>
+    <linearGradient id="drcGoldText" x1="0%" y1="0%" x2="0%" y2="100%">
+      <stop offset="0%" stop-color="#FEF9C3" />
+      <stop offset="55%" stop-color="#FDE047" />
+      <stop offset="100%" stop-color="#D97706" />
     </linearGradient>
     <linearGradient id="dolphinBody" x1="0%" y1="0%" x2="100%" y2="100%">
       <stop offset="0%" stop-color="#FFFFFF" />
@@ -25,44 +32,44 @@
   <!-- Crisp Play-Store Style Rounded Square Backing -->
   <rect x="0" y="0" width="512" height="512" rx="112" fill="#FFFFFF" />
 
-  <!-- Outer Rounded Play-Store Shield Triangle -->
+  <!-- Outer 24K Gold Beveled Shield Triangle -->
   <path
-    d="M 256 32
-       C 276 32, 294 42, 305 60
-       L 468 354
-       C 482 379, 476 412, 452 428
-       C 441 436, 427 440, 412 440
-       L 100 440
-       C 70 440, 46 416, 46 386
-       C 46 375, 50 363, 56 354
-       L 207 60
-       C 218 42, 236 32, 256 32 Z"
+    d="M 256 28
+       C 278 28, 297 39, 309 58
+       L 472 356
+       C 487 383, 480 418, 454 434
+       C 442 442, 428 446, 412 446
+       L 100 446
+       C 68 446, 42 420, 42 388
+       C 42 376, 46 364, 53 356
+       L 203 58
+       C 215 39, 234 28, 256 28 Z"
     fill="url(#drcBgGrad)"
-    stroke="url(#drcGoldTrim)"
-    stroke-width="10"
+    stroke="url(#drcGold24k)"
+    stroke-width="14"
   />
 
-  <!-- Inner Specular Highlight Triangle -->
+  <!-- Inner Double-Beveled 24K Gold Accent Trim -->
   <path
-    d="M 256 58
-       L 442 370
-       C 448 380, 444 396, 430 404
-       L 82 404
-       C 68 396, 64 380, 70 370 Z"
+    d="M 256 54
+       L 446 372
+       C 453 383, 448 400, 434 409
+       L 78 409
+       C 64 400, 59 383, 66 372 Z"
     fill="url(#drcInnerGlow)"
-    stroke="#FFFFFF"
-    stroke-opacity="0.3"
-    stroke-width="3"
+    stroke="url(#drcGold24k)"
+    stroke-opacity="0.72"
+    stroke-width="3.5"
   />
 
-  <!-- Dynamic Ocean Wave Speed Arc inside Triangle -->
+  <!-- Dynamic Wave Speed Arc inside Triangle -->
   <path
     d="M 122 302
        C 178 278, 236 276, 296 292
        C 330 301, 362 294, 388 281
        C 358 310, 316 321, 274 312
        C 218 300, 168 302, 122 302 Z"
-    fill="#38BDF8"
+    fill="url(#drcGold24k)"
     opacity="0.92"
   />
 
@@ -87,9 +94,9 @@
   />
 
   <!-- Dolphin Eye Accent -->
-  <circle cx="301" cy="181" r="4.2" fill="#0D47A1" />
+  <circle cx="301" cy="181" r="4.2" fill="#0F2D75" />
 
-  <!-- Bold Triangular-Aligned DRC Typography -->
+  <!-- Bold 24K Gold-Infused DRC Typography -->
   <text
     x="256"
     y="386"
@@ -98,11 +105,11 @@
     font-weight="900"
     font-size="86"
     letter-spacing="8"
-    fill="#FFFFFF"
+    fill="url(#drcGoldText)"
   >
     DRC
   </text>
 
-  <!-- Subtle Gold Underline -->
-  <rect x="148" y="400" width="216" height="6" rx="3" fill="url(#drcGoldTrim)" />
+  <!-- Subtle 24K Gold Underline -->
+  <rect x="148" y="400" width="216" height="6" rx="3" fill="url(#drcGold24k)" />
 </svg>

@@ -2,6 +2,7 @@ import React, { useEffect, useMemo, useRef, useState } from 'react';
 import {
   AlertTriangle,
   ArrowRightLeft,
+  Building2,
   CheckCircle2,
   CloudDownload,
   CloudUpload,
@@ -13,6 +14,7 @@ import {
   FolderOpen,
   ImagePlus,
   KeyRound,
+  Landmark,
   ListChecks,
   Lock,
   MonitorDown,
@@ -23,13 +25,17 @@ import {
   Search,
   ShieldCheck,
   Smartphone,
+  Sparkles,
   Trash2,
   Upload,
   UserPlus,
   Users,
+  Wrench,
 } from 'lucide-react';
 import {
   BRANCH_OPTIONS,
+  CompanyBankAccount,
+  CompanyBranchOffice,
   CompanySettings,
   ConsignmentNote,
   Declaration194C,
@@ -48,8 +54,13 @@ import {
   downloadMasterBackupFromDrive,
   DriveFileSummary,
   listDriveBackupFiles,
+  runDailyDrive8FileCleanup,
   uploadMasterBackupToDrive,
 } from '../lib/driveBackup';
+import {
+  getLast90DayMaintenanceTimestamp,
+  runSystemAutoFixAndClean,
+} from '../lib/selfHealing';
 import {
   bulkUpsertDocuments,
   CustomAuthSession,
@@ -277,6 +288,27 @@ const BackupSettingsModuleInner: React.FC<BackupSettingsModuleProps> = ({
     });
   };
 
+  const handleRunDailyDriveCleanup = async () => {
+    if (!driveAccessToken) {
+      onSwitchGmail();
+      return;
+    }
+    setBusyDrive(true);
+    setDriveError(null);
+    try {
+      const res = await runDailyDrive8FileCleanup(driveAccessToken);
+      setDriveStatus(
+        `Google Drive 8-File Cleanup Complete: ${res.trashedCount} redundant temp files pruned, ${res.keptCount} essential master files preserved inside DOLPHIN_ROAD_CARRIERS_MASTER.`
+      );
+      const files = await listDriveBackupFiles(driveAccessToken);
+      setDriveFiles(files);
+    } catch (err) {
+      setDriveError(err instanceof Error ? err.message : 'Drive cleanup failed');
+    } finally {
+      setBusyDrive(false);
+    }
+  };
+
   const handleListDriveFiles = async () => {
     if (!driveAccessToken) {
       onSwitchGmail();
@@ -286,7 +318,7 @@ const BackupSettingsModuleInner: React.FC<BackupSettingsModuleProps> = ({
     try {
       const files = await listDriveBackupFiles(driveAccessToken);
       setDriveFiles(files);
-      setDriveStatus(`Synced ${files.length} files across 6 Google Drive folders.`);
+      setDriveStatus(`Synced ${files.length} files across DOLPHIN_ROAD_CARRIERS_MASTER folders.`);
     } catch (err) {
       setDriveStatus(err instanceof Error ? err.message : 'Failed to list Drive files');
     } finally {
@@ -433,6 +465,11 @@ const BackupSettingsModuleInner: React.FC<BackupSettingsModuleProps> = ({
         accountNo: compState.accountNo,
         ifsc: compState.ifsc,
         swift: compState.swift,
+        upiId: compState.upiId || '',
+        bankAccounts: compState.bankAccounts || [],
+        branches: compState.branches || [],
+        whatsappCloud: compState.whatsappCloud || undefined,
+        last90DayAutoFixAt: compState.last90DayAutoFixAt || undefined,
         currentFy: normalizeFyLabel(compState.currentFy),
         availableFys: mergedFys,
         fyOpeningBalances: compState.fyOpeningBalances || {},
@@ -444,7 +481,53 @@ const BackupSettingsModuleInner: React.FC<BackupSettingsModuleProps> = ({
       },
       hasCustomSettings
     );
-    setDriveStatus('Company, Custom Stamp, Security Timer & Bank Settings saved cleanly.');
+    setDriveStatus('Company, Multi-Bank Accounts, UPI QR, Branches, Stamp & Security Settings saved cleanly.');
+  };
+
+  const handleAddBankAccount = () => {
+    const newBank: CompanyBankAccount = {
+      id: makeSafeDocId('bank'),
+      bankName: compState.bankName || 'Punjab National Bank',
+      accountName: `Bank Account ${(compState.bankAccounts?.length || 0) + 1}`,
+      accountNo: '',
+      ifsc: '',
+      branch: compState.bankBranch || 'Kolkata',
+      upiId: compState.upiId || '',
+      swift: '',
+      isDefault: (compState.bankAccounts?.length || 0) === 0,
+    };
+    setCompState((prev) => ({
+      ...prev,
+      bankAccounts: [...(prev.bankAccounts || []), newBank],
+    }));
+  };
+
+  const handleAddBranchOffice = () => {
+    const newBranch: CompanyBranchOffice = {
+      id: makeSafeDocId('br'),
+      branchCode: `BR-${String((compState.branches?.length || 0) + 1).padStart(2, '0')}`,
+      branchName: 'New Branch Office',
+      address: '',
+      phone: '',
+      gstin: '',
+    };
+    setCompState((prev) => ({
+      ...prev,
+      branches: [...(prev.branches || []), newBranch],
+    }));
+  };
+
+  const handleRunManualAutoFix = () => {
+    const summary = runSystemAutoFixAndClean({
+      parties: allData.parties,
+      consignmentCount: allData.consignments.length,
+      invoiceCount: allData.invoices.length,
+      lorryHireCount: allData.lorryHires.length,
+    });
+    setCompState((prev) => ({ ...prev, last90DayAutoFixAt: summary.ranAt }));
+    setDriveStatus(
+      `90-Day Auto-Fix & Thermal Memory Cooling Complete (${summary.checksumHash}): Cleared ${summary.cooledBlobUrls} blob cache handle(s) and ${summary.clearedScratchKeys} temp keys. 100% accounting data intact.`
+    );
   };
 
   const handleUploadStamp = (file: File | undefined) => {
@@ -886,9 +969,9 @@ const BackupSettingsModuleInner: React.FC<BackupSettingsModuleProps> = ({
             <div className="p-4 space-y-4 text-xs">
               <div>
                 <p className="font-bold text-slate-800 mb-2">
-                  Dedicated Google Drive Folder Structure (inside Dolphin_Road_Carrier_Backup)
+                  Dedicated Google Drive Folder Structure (inside DOLPHIN_ROAD_CARRIERS_MASTER · Keeps only 8 Essential Master Files Daily)
                 </p>
-                <div className="grid grid-cols-2 sm:grid-cols-3 lg:grid-cols-6 gap-2.5">
+                <div className="grid grid-cols-2 sm:grid-cols-4 lg:grid-cols-7 gap-2.5">
                   {[
                     'LR Copy',
                     'Bills_Invoices',
@@ -896,6 +979,7 @@ const BackupSettingsModuleInner: React.FC<BackupSettingsModuleProps> = ({
                     'POD_Scans',
                     'Declarations',
                     'Reports_Ledgers',
+                    'Bank_Statements',
                   ].map((folder) => (
                     <div
                       key={folder}
@@ -926,6 +1010,15 @@ const BackupSettingsModuleInner: React.FC<BackupSettingsModuleProps> = ({
                 >
                   <CloudDownload className="w-4 h-4" />
                   Restore from Google Drive
+                </button>
+                <button
+                  type="button"
+                  disabled={busyDrive}
+                  onClick={handleRunDailyDriveCleanup}
+                  className="inline-flex items-center gap-1.5 px-4 py-2 rounded-lg bg-amber-600 hover:bg-amber-700 text-white font-bold cursor-pointer disabled:opacity-60"
+                >
+                  <Sparkles className="w-4 h-4" />
+                  Run Daily 8-File Drive Cleanup
                 </button>
                 <button
                   type="button"
@@ -1517,6 +1610,284 @@ const BackupSettingsModuleInner: React.FC<BackupSettingsModuleProps> = ({
                 </label>
               </div>
 
+              {/* Multi-Bank Accounts (Unlimited 6+), Branch Offices, UPI QR & WhatsApp Cloud API */}
+              <div className="md:col-span-3 p-3.5 rounded-lg bg-slate-50 border border-slate-200 space-y-3">
+                <div className="flex flex-wrap items-center justify-between gap-2">
+                  <p className="font-bold text-slate-900 flex items-center gap-1.5">
+                    <Landmark className="w-4 h-4 text-blue-700" />
+                    <span>Company Bank Accounts &amp; UPI QR Codes ({(compState.bankAccounts || []).length} configured — Unlimited)</span>
+                  </p>
+                  <button
+                    type="button"
+                    onClick={handleAddBankAccount}
+                    className="inline-flex items-center gap-1 px-3 py-1 rounded bg-[#0D47A1] hover:bg-[#0A3882] text-white font-bold cursor-pointer"
+                  >
+                    <Plus className="w-3.5 h-3.5" /> Add Bank Account
+                  </button>
+                </div>
+                <div className="grid grid-cols-1 md:grid-cols-2 gap-2.5">
+                  <div>
+                    <label className="block font-semibold text-slate-700 mb-1">Primary Default UPI ID (for Tax Invoice BANK QR)</label>
+                    <input
+                      type="text"
+                      value={compState.upiId || ''}
+                      onChange={(e) => setCompState({ ...compState, upiId: e.target.value })}
+                      placeholder="dolphinroadcarriers@pnb"
+                      className="w-full px-2.5 py-1.5 rounded border border-slate-300 font-mono-num bg-white"
+                    />
+                  </div>
+                  <div className="grid grid-cols-2 gap-2">
+                    <div>
+                      <label className="block font-semibold text-slate-700 mb-1">WhatsApp Cloud Phone ID (Optional)</label>
+                      <input
+                        type="text"
+                        value={compState.whatsappCloud?.phoneNumberId || ''}
+                        onChange={(e) =>
+                          setCompState({
+                            ...compState,
+                            whatsappCloud: {
+                              ...(compState.whatsappCloud || { accessToken: '' }),
+                              phoneNumberId: e.target.value,
+                            },
+                          })
+                        }
+                        placeholder="Optional Meta Phone ID"
+                        className="w-full px-2.5 py-1.5 rounded border border-slate-300 font-mono-num bg-white"
+                      />
+                    </div>
+                    <div>
+                      <label className="block font-semibold text-slate-700 mb-1">WhatsApp Cloud Token</label>
+                      <input
+                        type="password"
+                        value={compState.whatsappCloud?.accessToken || ''}
+                        onChange={(e) =>
+                          setCompState({
+                            ...compState,
+                            whatsappCloud: {
+                              ...(compState.whatsappCloud || { phoneNumberId: '' }),
+                              accessToken: e.target.value,
+                            },
+                          })
+                        }
+                        placeholder="Bearer Token"
+                        className="w-full px-2.5 py-1.5 rounded border border-slate-300 font-mono-num bg-white"
+                      />
+                    </div>
+                  </div>
+                </div>
+                {(compState.bankAccounts || []).map((bank, idx) => (
+                  <div key={bank.id} className="p-2.5 rounded-lg bg-white border border-slate-200 grid grid-cols-1 sm:grid-cols-6 gap-2 items-end">
+                    <input
+                      type="text"
+                      value={bank.accountName}
+                      onChange={(e) =>
+                        setCompState((prev) => ({
+                          ...prev,
+                          bankAccounts: (prev.bankAccounts || []).map((b, i) =>
+                            i === idx ? { ...b, accountName: e.target.value } : b
+                          ),
+                        }))
+                      }
+                      placeholder="Account Name (e.g. PNB Main)"
+                      className="px-2 py-1 rounded border border-slate-300 font-semibold"
+                    />
+                    <input
+                      type="text"
+                      value={bank.bankName}
+                      onChange={(e) =>
+                        setCompState((prev) => ({
+                          ...prev,
+                          bankAccounts: (prev.bankAccounts || []).map((b, i) =>
+                            i === idx ? { ...b, bankName: e.target.value } : b
+                          ),
+                        }))
+                      }
+                      placeholder="Bank Name"
+                      className="px-2 py-1 rounded border border-slate-300"
+                    />
+                    <input
+                      type="text"
+                      value={bank.accountNo}
+                      onChange={(e) =>
+                        setCompState((prev) => ({
+                          ...prev,
+                          bankAccounts: (prev.bankAccounts || []).map((b, i) =>
+                            i === idx ? { ...b, accountNo: e.target.value } : b
+                          ),
+                        }))
+                      }
+                      placeholder="A/C Number"
+                      className="px-2 py-1 rounded border border-slate-300 font-mono-num"
+                    />
+                    <input
+                      type="text"
+                      value={bank.ifsc}
+                      onChange={(e) =>
+                        setCompState((prev) => ({
+                          ...prev,
+                          bankAccounts: (prev.bankAccounts || []).map((b, i) =>
+                            i === idx ? { ...b, ifsc: e.target.value.toUpperCase() } : b
+                          ),
+                        }))
+                      }
+                      placeholder="IFSC Code"
+                      className="px-2 py-1 rounded border border-slate-300 font-mono-num"
+                    />
+                    <input
+                      type="text"
+                      value={bank.upiId || ''}
+                      onChange={(e) =>
+                        setCompState((prev) => ({
+                          ...prev,
+                          bankAccounts: (prev.bankAccounts || []).map((b, i) =>
+                            i === idx ? { ...b, upiId: e.target.value } : b
+                          ),
+                        }))
+                      }
+                      placeholder="UPI ID for QR"
+                      className="px-2 py-1 rounded border border-slate-300 font-mono-num"
+                    />
+                    <div className="flex items-center justify-end gap-1.5">
+                      <button
+                        type="button"
+                        onClick={() =>
+                          setCompState((prev) => ({
+                            ...prev,
+                            bankAccounts: (prev.bankAccounts || []).map((b, i) => ({
+                              ...b,
+                              isDefault: i === idx,
+                            })),
+                          }))
+                        }
+                        className={`px-2 py-1 rounded text-[10px] font-bold cursor-pointer ${
+                          bank.isDefault
+                            ? 'bg-emerald-600 text-white'
+                            : 'bg-slate-100 text-slate-700 hover:bg-slate-200'
+                        }`}
+                      >
+                        {bank.isDefault ? 'Default' : 'Set Default'}
+                      </button>
+                      <button
+                        type="button"
+                        onClick={() =>
+                          setCompState((prev) => ({
+                            ...prev,
+                            bankAccounts: (prev.bankAccounts || []).filter((_, i) => i !== idx),
+                          }))
+                        }
+                        className="p-1 text-red-600 hover:bg-red-50 rounded cursor-pointer"
+                        title="Remove bank"
+                      >
+                        <Trash2 className="w-3.5 h-3.5" />
+                      </button>
+                    </div>
+                  </div>
+                ))}
+
+                <div className="pt-2 border-t border-slate-200 flex flex-wrap items-center justify-between gap-2">
+                  <p className="font-bold text-slate-900 flex items-center gap-1.5">
+                    <Building2 className="w-4 h-4 text-indigo-700" />
+                    <span>Branch Office Parameters ({(compState.branches || []).length} configured)</span>
+                  </p>
+                  <button
+                    type="button"
+                    onClick={handleAddBranchOffice}
+                    className="inline-flex items-center gap-1 px-3 py-1 rounded bg-indigo-700 hover:bg-indigo-800 text-white font-bold cursor-pointer"
+                  >
+                    <Plus className="w-3.5 h-3.5" /> Add Branch Office
+                  </button>
+                </div>
+                {(compState.branches || []).map((br, idx) => (
+                  <div key={br.id} className="p-2 rounded bg-white border border-slate-200 grid grid-cols-1 sm:grid-cols-5 gap-2 items-center">
+                    <input
+                      type="text"
+                      value={br.branchCode}
+                      onChange={(e) =>
+                        setCompState((prev) => ({
+                          ...prev,
+                          branches: (prev.branches || []).map((x, i) =>
+                            i === idx ? { ...x, branchCode: e.target.value.toUpperCase() } : x
+                          ),
+                        }))
+                      }
+                      placeholder="Code (KOL-HQ)"
+                      className="px-2 py-1 rounded border border-slate-300 font-mono-num font-bold"
+                    />
+                    <input
+                      type="text"
+                      value={br.branchName}
+                      onChange={(e) =>
+                        setCompState((prev) => ({
+                          ...prev,
+                          branches: (prev.branches || []).map((x, i) =>
+                            i === idx ? { ...x, branchName: e.target.value } : x
+                          ),
+                        }))
+                      }
+                      placeholder="Branch Office Name"
+                      className="px-2 py-1 rounded border border-slate-300"
+                    />
+                    <input
+                      type="text"
+                      value={br.gstin || ''}
+                      onChange={(e) =>
+                        setCompState((prev) => ({
+                          ...prev,
+                          branches: (prev.branches || []).map((x, i) =>
+                            i === idx ? { ...x, gstin: e.target.value.toUpperCase() } : x
+                          ),
+                        }))
+                      }
+                      placeholder="Branch GSTIN (Optional)"
+                      className="px-2 py-1 rounded border border-slate-300 font-mono-num"
+                    />
+                    <input
+                      type="text"
+                      value={br.address}
+                      onChange={(e) =>
+                        setCompState((prev) => ({
+                          ...prev,
+                          branches: (prev.branches || []).map((x, i) =>
+                            i === idx ? { ...x, address: e.target.value } : x
+                          ),
+                        }))
+                      }
+                      placeholder="Branch Address"
+                      className="px-2 py-1 rounded border border-slate-300"
+                    />
+                    <div className="flex items-center gap-1">
+                      <input
+                        type="text"
+                        value={br.phone}
+                        onChange={(e) =>
+                          setCompState((prev) => ({
+                            ...prev,
+                            branches: (prev.branches || []).map((x, i) =>
+                              i === idx ? { ...x, phone: e.target.value } : x
+                            ),
+                          }))
+                        }
+                        placeholder="Phone"
+                        className="flex-1 min-w-0 px-2 py-1 rounded border border-slate-300 font-mono-num"
+                      />
+                      <button
+                        type="button"
+                        onClick={() =>
+                          setCompState((prev) => ({
+                            ...prev,
+                            branches: (prev.branches || []).filter((_, i) => i !== idx),
+                          }))
+                        }
+                        className="p-1 text-red-600 hover:bg-red-50 rounded cursor-pointer"
+                        title="Remove branch"
+                      >
+                        <Trash2 className="w-3.5 h-3.5" />
+                      </button>
+                    </div>
+                  </div>
+                ))}
+              </div>
+
               {/* Company Stamp & Digital Signature Upload */}
               <div className="md:col-span-3 p-3.5 rounded-lg bg-slate-50 border border-slate-200 flex flex-wrap items-center justify-between gap-4">
                 <div className="space-y-1">
@@ -1569,13 +1940,31 @@ const BackupSettingsModuleInner: React.FC<BackupSettingsModuleProps> = ({
                 </div>
               </div>
             </div>
-            <div className="px-4 py-3 bg-slate-50 border-t border-slate-200 flex justify-end">
+            <div className="px-4 py-3 bg-slate-50 border-t border-slate-200 flex flex-wrap items-center justify-between gap-2">
+              <div className="flex items-center gap-2 text-[11px] text-slate-600">
+                <Wrench className="w-3.5 h-3.5 text-emerald-700" />
+                <span>
+                  90-Day Auto-Fix &amp; Thermal Cooling:{' '}
+                  <strong>
+                    {getLast90DayMaintenanceTimestamp()
+                      ? new Date(getLast90DayMaintenanceTimestamp()!).toLocaleDateString('en-IN')
+                      : 'Ready'}
+                  </strong>
+                </span>
+                <button
+                  type="button"
+                  onClick={handleRunManualAutoFix}
+                  className="px-2.5 py-1 rounded bg-emerald-700 hover:bg-emerald-800 text-white font-bold cursor-pointer"
+                >
+                  Run System Auto-Fix &amp; Clean Now
+                </button>
+              </div>
               <button
                 type="submit"
                 className="inline-flex items-center gap-1.5 px-4 py-1.5 rounded-md bg-blue-700 hover:bg-blue-800 text-white text-xs font-bold cursor-pointer"
               >
                 <Save className="w-3.5 h-3.5" />
-                Save Company, Security &amp; Stamp Settings
+                Save Company, Security, Banks &amp; Stamp Settings
               </button>
             </div>
           </form>

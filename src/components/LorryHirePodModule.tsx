@@ -3,6 +3,8 @@ import {
   AlertTriangle,
   Camera,
   CheckCircle2,
+  ChevronDown,
+  ChevronUp,
   CloudUpload,
   Edit3,
   Lock,
@@ -24,6 +26,8 @@ import {
   LorryAdvanceRow,
   LorryHire,
   Party,
+  StaffAccount,
+  StaffCommissionEntry,
 } from '../types/erp';
 import { formatDateDDMMYYYY, formatINR, makeSafeDocId, normalizeFyLabel, todayISO } from '../lib/formatters';
 import { scanPODDocument } from '../lib/ocrEngine';
@@ -32,6 +36,7 @@ import { uploadBlobToDriveFolder } from '../lib/driveBackup';
 import { GeneratedPdfResult, generateFoxproStatementPDF } from '../lib/pdfEngine';
 import { useDebouncedValue } from '../hooks/useDebounce';
 import { PaginatedDataTable, TableColumn } from './PaginatedDataTable';
+import { StaffCommissionModule } from './StaffCommissionModule';
 
 interface LorryHirePodModuleProps {
   ownerUid: string;
@@ -40,9 +45,12 @@ interface LorryHirePodModuleProps {
   activeBranchCode: string;
   activeFy: string;
   isMasterAdmin: boolean;
+  readOnly?: boolean;
   lorryHires: LorryHire[];
   consignments: ConsignmentNote[];
   parties?: Party[];
+  staffAccounts?: StaffAccount[];
+  staffCommissions?: StaffCommissionEntry[];
   company?: CompanySettings;
   driveAccessToken: string | null;
   onConnectDrive: () => Promise<void>;
@@ -105,15 +113,19 @@ const LorryHirePodModuleInner: React.FC<LorryHirePodModuleProps> = ({
   activeBranchCode,
   activeFy,
   isMasterAdmin,
+  readOnly = false,
   lorryHires,
   consignments,
   parties = [],
+  staffAccounts = [],
+  staffCommissions = [],
   company,
   driveAccessToken,
   onConnectDrive,
   onPreviewPdf,
   onShowConfirm,
 }) => {
+  const [showCommissionLedger, setShowCommissionLedger] = useState(false);
   const podFileRef = useRef<HTMLInputElement | null>(null);
   const podCamRef = useRef<HTMLInputElement | null>(null);
 
@@ -768,11 +780,12 @@ const LorryHirePodModuleInner: React.FC<LorryHirePodModuleProps> = ({
               ) : isUnlocked ? (
                 <button
                   type="button"
+                  disabled={readOnly}
                   onClick={() => {
                     setPayTarget(h);
                     setPayDate(todayISO());
                   }}
-                  className="inline-flex items-center gap-1 px-2.5 py-1 rounded bg-emerald-600 hover:bg-emerald-700 text-white font-bold cursor-pointer"
+                  className="inline-flex items-center gap-1 px-2.5 py-1 rounded bg-emerald-600 hover:bg-emerald-700 text-white font-bold cursor-pointer disabled:opacity-40"
                 >
                   <Unlock className="w-3.5 h-3.5" />
                   Pay ₹{formatINR(h.balancePayable)}
@@ -786,7 +799,7 @@ const LorryHirePodModuleInner: React.FC<LorryHirePodModuleProps> = ({
                   POD Locked
                 </span>
               )}
-              {!h.balancePaid && (
+              {!h.balancePaid && !readOnly && (
                 <button
                   type="button"
                   onClick={() => handleLoadForEdit(h)}
@@ -796,10 +809,10 @@ const LorryHirePodModuleInner: React.FC<LorryHirePodModuleProps> = ({
                   <Edit3 className="w-3.5 h-3.5" />
                 </button>
               )}
-              {!isMasterAdmin && h.balancePaid ? (
+              {readOnly || (!isMasterAdmin && h.balancePaid) ? (
                 <span className="inline-flex items-center gap-0.5 px-1.5 py-0.5 rounded bg-slate-100 text-slate-500 text-[10px] font-bold">
                   <Lock className="w-3 h-3" />
-                  Locked
+                  {readOnly ? 'View' : 'Locked'}
                 </span>
               ) : (
                 <button
@@ -1298,8 +1311,8 @@ const LorryHirePodModuleInner: React.FC<LorryHirePodModuleProps> = ({
         <div className="px-4 py-3 bg-slate-50 border-t border-slate-200 flex justify-end">
           <button
             type="submit"
-            disabled={saving}
-            className="inline-flex items-center gap-1.5 px-4 py-1.5 rounded-md bg-blue-700 hover:bg-blue-800 text-white text-xs font-bold cursor-pointer"
+            disabled={saving || readOnly}
+            className="inline-flex items-center gap-1.5 px-4 py-1.5 rounded-md bg-blue-700 hover:bg-blue-800 text-white text-xs font-bold cursor-pointer disabled:opacity-50"
           >
             <Save className="w-3.5 h-3.5" />
             {saving
@@ -1333,6 +1346,42 @@ const LorryHirePodModuleInner: React.FC<LorryHirePodModuleProps> = ({
           defaultPageSize={50}
           emptyMessage="No lorry hire entries recorded yet."
         />
+      </div>
+
+      {/* Collapsible Linked Staff Commission & Advance Ledger */}
+      <div className="bg-white rounded-xl border border-slate-200 shadow-sm overflow-hidden">
+        <button
+          type="button"
+          onClick={() => setShowCommissionLedger((v) => !v)}
+          className="w-full px-4 py-2.5 bg-slate-800 hover:bg-slate-900 text-white flex items-center justify-between text-xs font-bold cursor-pointer"
+        >
+          <span>
+            Linked Staff Commission &amp; Advance Ledger ({staffCommissions.length} entries · Wheel Rates 4-Wh to 22-Wh)
+          </span>
+          {showCommissionLedger ? (
+            <ChevronUp className="w-4 h-4" />
+          ) : (
+            <ChevronDown className="w-4 h-4" />
+          )}
+        </button>
+        {showCommissionLedger && (
+          <div className="p-3 bg-slate-50">
+            <StaffCommissionModule
+              commissions={staffCommissions}
+              staffAccounts={staffAccounts}
+              company={company || { ...DEFAULT_COMPANY_SETTINGS, ownerUid }}
+              activeFy={activeFy}
+              ownerUid={ownerUid}
+              currentStaffCode={activeStaffCode}
+              currentBranchCode={activeBranchCode}
+              readOnly={readOnly}
+              compact
+              prefillChallanNo={cnNo}
+              prefillTruckNo={truckNo}
+              onOpenPreview={(pdf) => onPreviewPdf?.(pdf, 'Reports_Ledgers')}
+            />
+          </div>
+        )}
       </div>
 
       {/* POD Scanner & Shortage/Damage Reconciliation Modal */}

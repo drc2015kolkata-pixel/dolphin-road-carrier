@@ -7,13 +7,13 @@ interface DrcTriangleLogoProps {
 
 export const DrcTriangleLogo: React.FC<DrcTriangleLogoProps> = ({
   className = 'w-12 h-12',
-  alt = 'Dolphin Road Carriers DRC Official Logo',
+  alt = 'Dolphin Road Carriers 24K Gold DRC Official Logo',
 }) => {
   return (
     <img
       src="/drc-triangle-logo.svg"
       alt={alt}
-      className={`object-contain select-none ${className}`}
+      className={`aspect-square object-contain select-none shrink-0 ${className}`}
     />
   );
 };

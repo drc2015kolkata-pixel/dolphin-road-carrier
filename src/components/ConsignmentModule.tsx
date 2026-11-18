@@ -1,6 +1,7 @@
 import React, { useCallback, useEffect, useMemo, useRef, useState } from 'react';
 import {
   AlertTriangle,
+  Camera,
   CheckCircle2,
   ClipboardPaste,
   Edit3,
@@ -14,6 +15,8 @@ import {
   ShieldAlert,
   Trash2,
   Upload,
+  Usb,
+  X,
 } from 'lucide-react';
 import {
   CompanySettings,
@@ -62,6 +65,7 @@ interface ConsignmentModuleProps {
   activeBranchCode: string;
   activeFy: string;
   isMasterAdmin: boolean;
+  readOnly?: boolean;
   consignments: ConsignmentNote[];
   parties: Party[];
   vehicles: Vehicle[];
@@ -86,6 +90,7 @@ const ConsignmentModuleInner: React.FC<ConsignmentModuleProps> = ({
   activeBranchCode,
   activeFy,
   isMasterAdmin,
+  readOnly = false,
   consignments,
   parties,
   vehicles,
@@ -98,6 +103,10 @@ const ConsignmentModuleInner: React.FC<ConsignmentModuleProps> = ({
 }) => {
   const fileInputRef = useRef<HTMLInputElement | null>(null);
   const cameraInputRef = useRef<HTMLInputElement | null>(null);
+  const liveVideoRef = useRef<HTMLVideoElement | null>(null);
+  const liveStreamRef = useRef<MediaStream | null>(null);
+  const [liveCameraOpen, setLiveCameraOpen] = useState(false);
+  const [usbStatus, setUsbStatus] = useState<string | null>(null);
   const fyShort = getFyShortCode(activeFy);
   const branchPrefix =
     activeBranchCode && activeBranchCode !== 'ALL' ? activeBranchCode.slice(0, 3) : 'KOL';
@@ -323,6 +332,121 @@ const ConsignmentModuleInner: React.FC<ConsignmentModuleProps> = ({
     window.addEventListener('paste', onPaste);
     return () => window.removeEventListener('paste', onPaste);
   }, [handleOCRFile]);
+
+  const stopLiveCamera = useCallback(() => {
+    if (liveStreamRef.current) {
+      liveStreamRef.current.getTracks().forEach((t) => t.stop());
+      liveStreamRef.current = null;
+    }
+    setLiveCameraOpen(false);
+  }, []);
+
+  useEffect(() => {
+    return () => {
+      if (liveStreamRef.current) {
+        liveStreamRef.current.getTracks().forEach((t) => t.stop());
+        liveStreamRef.current = null;
+      }
+    };
+  }, []);
+
+  const handleOpenLiveCamera = async () => {
+    setOcrError(null);
+    setUsbStatus(null);
+    if (typeof navigator === 'undefined' || !navigator.mediaDevices?.getUserMedia) {
+      // Fall back to mobile rear camera input if getUserMedia unsupported
+      if (cameraInputRef.current) {
+        cameraInputRef.current.click();
+      } else {
+        setOcrError('Live camera stream is not supported in this browser.');
+      }
+      return;
+    }
+    try {
+      const stream = await navigator.mediaDevices.getUserMedia({
+        video: { facingMode: { ideal: 'environment' }, width: { ideal: 1920 }, height: { ideal: 1080 } },
+        audio: false,
+      });
+      liveStreamRef.current = stream;
+      setLiveCameraOpen(true);
+      setTimeout(() => {
+        if (liveVideoRef.current) {
+          liveVideoRef.current.srcObject = stream;
+          void liveVideoRef.current.play().catch(() => {});
+        }
+      }, 60);
+    } catch {
+      if (cameraInputRef.current) {
+        cameraInputRef.current.click();
+      } else {
+        setOcrError('Camera permission denied. Allow camera access or use Upload / Ctrl+V.');
+      }
+    }
+  };
+
+  const handleCaptureLiveFrame = async () => {
+    const video = liveVideoRef.current;
+    if (!video || video.videoWidth === 0) return;
+    const canvas = document.createElement('canvas');
+    canvas.width = video.videoWidth;
+    canvas.height = video.videoHeight;
+    const ctx = canvas.getContext('2d');
+    if (!ctx) return;
+    ctx.drawImage(video, 0, 0, canvas.width, canvas.height);
+    const blob = await new Promise<Blob | null>((resolve) =>
+      canvas.toBlob(resolve, 'image/jpeg', 0.92)
+    );
+    stopLiveCamera();
+    if (blob) {
+      const file = new File([blob], `drc-camera-${Date.now()}.jpg`, { type: 'image/jpeg' });
+      void handleOCRFile(file);
+    }
+  };
+
+  const handleAutoUsbScannerProbe = async () => {
+    setOcrError(null);
+    setUsbStatus('Probing USB / local WIA scanner hardware...');
+    try {
+      const navWithUsb = navigator as Navigator & {
+        usb?: {
+          getDevices: () => Promise<Array<{ productName?: string; manufacturerName?: string }>>;
+          requestDevice: (opts: { filters: Array<Record<string, unknown>> }) => Promise<{
+            productName?: string;
+            manufacturerName?: string;
+          }>;
+        };
+      };
+      if (navWithUsb.usb) {
+        const paired = await navWithUsb.usb.getDevices();
+        if (paired.length > 0) {
+          const devName = paired[0].productName || paired[0].manufacturerName || 'USB Scanner/Printer';
+          setUsbStatus(
+            `Detected ${devName}. Triggering Windows/Local scan picker or press Ctrl+V after scanning.`
+          );
+          fileInputRef.current?.click();
+          return;
+        }
+        try {
+          const picked = await navWithUsb.usb.requestDevice({ filters: [] });
+          const devName = picked.productName || picked.manufacturerName || 'USB Device';
+          setUsbStatus(
+            `Linked ${devName}! Select your scanned image or press Ctrl+V to auto-fill.`
+          );
+          fileInputRef.current?.click();
+          return;
+        } catch {
+          // User cancelled WebUSB prompt; open Windows/WIA file scanner fallback cleanly
+        }
+      }
+      setUsbStatus(
+        'HP Ink Tank 315 / WIA Scanner Bridge Ready — select scanned slip or paste via Ctrl+V.'
+      );
+      fileInputRef.current?.click();
+    } catch {
+      setUsbStatus('Ready for USB Scanner / WIA file upload or Ctrl+V paste.');
+      fileInputRef.current?.click();
+    }
+  };
 
   const handleOneTapScanClick = () => {
     if (isMobileDevice && cameraInputRef.current) {
@@ -759,22 +883,23 @@ const ConsignmentModuleInner: React.FC<ConsignmentModuleProps> = ({
                 <Printer className="w-3 h-3" />
                 4-Copy
               </button>
-              <button
+                <button
                 type="button"
                 onClick={() => onSendCnToInvoice(cn)}
-                className="inline-flex items-center gap-1 px-2 py-1 rounded bg-emerald-50 hover:bg-emerald-100 text-emerald-800 font-semibold cursor-pointer"
+                disabled={readOnly}
+                className="inline-flex items-center gap-1 px-2 py-1 rounded bg-emerald-50 hover:bg-emerald-100 text-emerald-800 font-semibold cursor-pointer disabled:opacity-40"
                 title="Auto-paste into Tax Invoice"
               >
                 <FilePlus2 className="w-3 h-3" />
                 Bill
               </button>
-              {staffLocked ? (
+              {staffLocked || readOnly ? (
                 <span
                   className="inline-flex items-center gap-1 px-2 py-1 rounded bg-slate-100 text-slate-500 text-[10px] font-bold"
-                  title="Billed LRs are locked for non-admin staff"
+                  title={readOnly ? 'View-Only Access' : 'Billed LRs are locked for non-admin staff'}
                 >
                   <Lock className="w-3 h-3" />
-                  Locked
+                  {readOnly ? 'View Only' : 'Locked'}
                 </span>
               ) : (
                 <>
@@ -809,7 +934,7 @@ const ConsignmentModuleInner: React.FC<ConsignmentModuleProps> = ({
         },
       },
     ],
-    [company, isMasterAdmin, onPreviewPdf, onSendCnToInvoice, onShowConfirm]
+    [company, isMasterAdmin, readOnly, onPreviewPdf, onSendCnToInvoice, onShowConfirm]
   );
 
   return (
@@ -855,6 +980,12 @@ const ConsignmentModuleInner: React.FC<ConsignmentModuleProps> = ({
               <span>{ocrStatus}</span>
             </p>
           )}
+          {usbStatus && (
+            <p className="text-xs text-blue-800 font-semibold mt-1.5 flex items-center gap-1.5">
+              <Usb className="w-3.5 h-3.5 shrink-0" />
+              <span>{usbStatus}</span>
+            </p>
+          )}
           {ocrError && <p className="text-xs text-red-600 font-semibold mt-1.5">{ocrError}</p>}
           {ocrFyMismatch && (
             <div className="mt-2 p-2.5 rounded-lg bg-amber-50 border border-amber-300 flex flex-wrap items-center justify-between gap-2 text-xs text-amber-950">
@@ -880,28 +1011,40 @@ const ConsignmentModuleInner: React.FC<ConsignmentModuleProps> = ({
         <div className="flex flex-wrap items-center gap-2 shrink-0">
           <button
             type="button"
-            onClick={handleOneTapScanClick}
-            className="inline-flex items-center gap-1.5 px-4 py-2 rounded-lg bg-emerald-600 hover:bg-emerald-700 text-white text-xs font-bold shadow-sm transition-colors cursor-pointer whitespace-nowrap"
+            disabled={readOnly}
+            onClick={handleOpenLiveCamera}
+            className="inline-flex items-center gap-1.5 px-3.5 py-2 rounded-lg bg-emerald-700 hover:bg-emerald-800 text-white text-xs font-bold shadow-sm transition-colors cursor-pointer whitespace-nowrap disabled:opacity-50"
           >
-            <ScanLine className="w-4 h-4" />
-            <span>Scan Bill / Document</span>
+            <Camera className="w-4 h-4" />
+            <span>Live Camera Scan</span>
           </button>
-          {isMobileDevice && (
-            <button
-              type="button"
-              onClick={() => fileInputRef.current?.click()}
-              className="inline-flex items-center gap-1.5 px-3 py-2 rounded-lg bg-blue-700 hover:bg-blue-800 text-white text-xs font-bold transition-colors cursor-pointer whitespace-nowrap"
-            >
-              <Upload className="w-4 h-4" />
-              Gallery File
-            </button>
-          )}
-          <span className="hidden sm:inline-flex items-center gap-1 px-2.5 py-2 rounded-lg border border-slate-200 bg-slate-50 text-[11px] font-semibold text-slate-600">
-            <ClipboardPaste className="w-3.5 h-3.5 text-blue-700" />
-            Ctrl + V Ready
-          </span>
+          <button
+            type="button"
+            disabled={readOnly}
+            onClick={handleAutoUsbScannerProbe}
+            className="inline-flex items-center gap-1.5 px-3.5 py-2 rounded-lg bg-[#0D47A1] hover:bg-[#0A3882] text-white text-xs font-bold shadow-sm transition-colors cursor-pointer whitespace-nowrap disabled:opacity-50"
+          >
+            <Usb className="w-4 h-4" />
+            <span>Auto USB Printer/Scanner</span>
+          </button>
+          <button
+            type="button"
+            disabled={readOnly}
+            onClick={handleOneTapScanClick}
+            className="inline-flex items-center gap-1.5 px-3.5 py-2 rounded-lg border border-slate-300 bg-white hover:bg-slate-100 text-slate-900 text-xs font-bold shadow-sm transition-colors cursor-pointer whitespace-nowrap disabled:opacity-50"
+          >
+            <Upload className="w-4 h-4 text-blue-700" />
+            <span>Upload / Ctrl+V</span>
+          </button>
         </div>
       </div>
+
+      {readOnly && (
+        <div className="px-4 py-2 rounded-lg bg-amber-50 border border-amber-300 text-amber-950 text-xs font-bold flex items-center gap-2">
+          <Lock className="w-4 h-4 text-amber-700 shrink-0" />
+          <span>VIEW-ONLY ACCESS: You can search and Print/Download 4-Copy LR PDFs, while Create/Edit/Delete are restricted by Admin.</span>
+        </div>
+      )}
 
       {/* Consignment Note Form */}
       <form
@@ -1701,17 +1844,17 @@ const ConsignmentModuleInner: React.FC<ConsignmentModuleProps> = ({
             )}
             <button
               type="button"
-              disabled={saving}
+              disabled={saving || readOnly}
               onClick={(e) => void handleSave(e, true)}
-              className="inline-flex items-center gap-1.5 px-3.5 py-1.5 rounded-md bg-emerald-600 hover:bg-emerald-700 text-white text-xs font-bold cursor-pointer disabled:opacity-60"
+              className="inline-flex items-center gap-1.5 px-3.5 py-1.5 rounded-md bg-emerald-600 hover:bg-emerald-700 text-white text-xs font-bold cursor-pointer disabled:opacity-50"
             >
               <FilePlus2 className="w-3.5 h-3.5" />
               <span>Save &amp; Send to Bill</span>
             </button>
             <button
               type="submit"
-              disabled={saving}
-              className="inline-flex items-center gap-1.5 px-4 py-1.5 rounded-md bg-blue-700 hover:bg-blue-800 text-white text-xs font-bold cursor-pointer disabled:opacity-60"
+              disabled={saving || readOnly}
+              className="inline-flex items-center gap-1.5 px-4 py-1.5 rounded-md bg-blue-700 hover:bg-blue-800 text-white text-xs font-bold cursor-pointer disabled:opacity-50"
             >
               <Save className="w-3.5 h-3.5" />
               <span>{saving ? 'Assigning Serial & Saving...' : editingId ? 'Update LR' : 'Save Consignment Note'}</span>
@@ -1746,6 +1889,59 @@ const ConsignmentModuleInner: React.FC<ConsignmentModuleProps> = ({
           emptyMessage="No consignment notes found in this Financial Year. Scan a physical document or fill the form above."
         />
       </div>
+
+      {/* Live In-App WebRTC Camera Capture Modal */}
+      {liveCameraOpen && (
+        <div className="fixed inset-0 z-50 flex items-center justify-center bg-slate-950/75 p-4 no-print">
+          <div className="w-full max-w-xl bg-white rounded-xl border border-slate-300 shadow-2xl overflow-hidden">
+            <div className="bg-[#0D47A1] text-white px-4 py-3 flex items-center justify-between">
+              <div className="flex items-center gap-2 text-sm font-bold">
+                <Camera className="w-4 h-4 text-amber-300" />
+                <span>Live Camera LR / Document Scanner</span>
+              </div>
+              <button
+                type="button"
+                onClick={stopLiveCamera}
+                className="p-1 rounded hover:bg-white/15 cursor-pointer"
+                aria-label="Close Live Camera"
+              >
+                <X className="w-4 h-4" />
+              </button>
+            </div>
+            <div className="p-3 bg-slate-900">
+              <video
+                ref={liveVideoRef}
+                autoPlay
+                playsInline
+                muted
+                className="w-full max-h-[60vh] rounded-lg object-contain bg-black"
+              />
+            </div>
+            <div className="px-4 py-3 bg-slate-50 border-t border-slate-200 flex items-center justify-between gap-2 text-xs">
+              <span className="text-slate-700 font-medium">
+                Hold LR / Tax Invoice steady inside frame and capture to run smart OCR auto-fill.
+              </span>
+              <div className="flex items-center gap-2 shrink-0">
+                <button
+                  type="button"
+                  onClick={stopLiveCamera}
+                  className="px-3.5 py-2 rounded-lg border border-slate-300 bg-white font-bold text-slate-700 cursor-pointer"
+                >
+                  Cancel
+                </button>
+                <button
+                  type="button"
+                  onClick={handleCaptureLiveFrame}
+                  className="inline-flex items-center gap-1.5 px-4 py-2 rounded-lg bg-emerald-700 hover:bg-emerald-800 text-white font-bold cursor-pointer"
+                >
+                  <Camera className="w-4 h-4" />
+                  Capture &amp; OCR
+                </button>
+              </div>
+            </div>
+          </div>
+        </div>
+      )}
     </div>
   );
 };

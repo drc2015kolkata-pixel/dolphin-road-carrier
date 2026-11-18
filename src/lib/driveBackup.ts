@@ -1,6 +1,6 @@
 import { DriveFolderName } from '../types/erp';
 
-const ROOT_FOLDER_NAME = 'Dolphin_Road_Carrier_Backup';
+const ROOT_FOLDER_NAME = 'DOLPHIN_ROAD_CARRIERS_MASTER';
 const FOLDER_LIST: DriveFolderName[] = [
   'LR Copy',
   'Bills_Invoices',
@@ -8,7 +8,19 @@ const FOLDER_LIST: DriveFolderName[] = [
   'POD_Scans',
   'Declarations',
   'Reports_Ledgers',
+  'Bank_Statements',
 ];
+
+export const ESSENTIAL_DRIVE_MASTER_FILES = [
+  'Master_Backup_DRC.json',
+  'DRC_Company_Parameters.json',
+  'DRC_Parties_Master.json',
+  'DRC_Consignments_Register.json',
+  'DRC_Invoices_Register.json',
+  'DRC_LorryHire_POD.json',
+  'DRC_Staff_Commission_Ledger.json',
+  'DRC_Bank_Receipts_TDS.json',
+] as const;
 
 export interface DriveFileSummary {
   id: string;
@@ -227,4 +239,96 @@ export async function downloadMasterBackupFromDrive(accessToken: string): Promis
     accessToken
   );
   return (await res.json()) as Record<string, unknown>;
+}
+
+export async function uploadBankStatementMirrorToDrive(params: {
+  accessToken: string;
+  financialYear: string;
+  fileName: string;
+  fileContent: Blob;
+  mimeType: string;
+}): Promise<{ id: string; name: string; webViewLink?: string }> {
+  const { folders } = await ensureDriveBackupHierarchy(params.accessToken);
+  const bankRootId = folders.Bank_Statements;
+  const cleanFyFolder = `Bank_Statements_${params.financialYear.replace(/[^a-zA-Z0-9]+/g, '_')}`;
+  const fyFolderId = await findOrCreateFolder(cleanFyFolder, params.accessToken, bankRootId);
+
+  const existingId = await findFileInFolder(params.fileName, fyFolderId, params.accessToken);
+  const boundary = 'drc_bank_stmt_' + Date.now();
+  const metadata = existingId
+    ? { name: params.fileName, mimeType: params.mimeType }
+    : { name: params.fileName, mimeType: params.mimeType, parents: [fyFolderId] };
+
+  const arrayBuffer = await params.fileContent.arrayBuffer();
+  const base64Body = btoa(
+    new Uint8Array(arrayBuffer).reduce((data, byte) => data + String.fromCharCode(byte), '')
+  );
+
+  const multipartBody =
+    `--${boundary}\r\n` +
+    `Content-Type: application/json; charset=UTF-8\r\n\r\n` +
+    `${JSON.stringify(metadata)}\r\n` +
+    `--${boundary}\r\n` +
+    `Content-Type: ${params.mimeType}\r\n` +
+    `Content-Transfer-Encoding: base64\r\n\r\n` +
+    `${base64Body}\r\n` +
+    `--${boundary}--`;
+
+  const url = existingId
+    ? `https://www.googleapis.com/upload/drive/v3/files/${existingId}?uploadType=multipart&fields=id,name,webViewLink`
+    : `https://www.googleapis.com/upload/drive/v3/files?uploadType=multipart&fields=id,name,webViewLink`;
+
+  const res = await driveFetch(url, params.accessToken, {
+    method: existingId ? 'PATCH' : 'POST',
+    headers: { 'Content-Type': `multipart/related; boundary=${boundary}` },
+    body: multipartBody,
+  });
+
+  return (await res.json()) as { id: string; name: string; webViewLink?: string };
+}
+
+export async function runDailyDrive8FileCleanup(accessToken: string): Promise<{
+  keptCount: number;
+  trashedCount: number;
+}> {
+  const { rootId } = await ensureDriveBackupHierarchy(accessToken);
+  const q = encodeURIComponent(
+    `'${rootId}' in parents and trashed = false and mimeType != 'application/vnd.google-apps.folder'`
+  );
+  const res = await driveFetch(
+    `https://www.googleapis.com/drive/v3/files?q=${q}&fields=files(id,name,modifiedTime)&orderBy=modifiedTime desc&pageSize=100`,
+    accessToken
+  );
+  const json = (await res.json()) as { files?: Array<{ id: string; name: string }> };
+  const files = json.files || [];
+
+  const essentialSet = new Set<string>(ESSENTIAL_DRIVE_MASTER_FILES);
+  const seenEssentials = new Set<string>();
+  const toKeep: Array<{ id: string; name: string }> = [];
+  const toTrash: Array<{ id: string; name: string }> = [];
+
+  for (const f of files) {
+    if (essentialSet.has(f.name) && !seenEssentials.has(f.name)) {
+      seenEssentials.add(f.name);
+      toKeep.push(f);
+    } else if (/tmp|temp|scratch|copy|duplicate/i.test(f.name) || toKeep.length >= 8) {
+      toTrash.push(f);
+    } else {
+      toKeep.push(f);
+    }
+  }
+
+  for (const stale of toTrash) {
+    try {
+      await driveFetch(`https://www.googleapis.com/drive/v3/files/${stale.id}`, accessToken, {
+        method: 'PATCH',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ trashed: true }),
+      });
+    } catch {
+      // Ignore individual cleanup failures
+    }
+  }
+
+  return { keptCount: toKeep.length, trashedCount: toTrash.length };
 }
