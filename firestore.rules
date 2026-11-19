@@ -47,6 +47,18 @@ service cloud.firestore {
       return !(key in data) || (data[key] is int || data[key] is float);
     }
 
+    function isValidOptBool(data, key) {
+      return !(key in data) || data[key] is bool;
+    }
+
+    function isValidOptList(data, key, maxLen) {
+      return !(key in data) || (data[key] is list && data[key].size() <= maxLen);
+    }
+
+    function isValidOptMap(data, key, maxKeys) {
+      return !(key in data) || (data[key] is map && data[key].keys().size() <= maxKeys);
+    }
+
     // 3. Entity Validation Blueprints
     function isValidAdminUser(data) {
       return data.keys().hasAll(['email', 'createdAt']) &&
@@ -58,7 +70,8 @@ service cloud.firestore {
 
     function isValidStaffAccount(data) {
       return data.keys().hasAll(['staffCode', 'displayName', 'role', 'pinHash', 'active', 'permissions', 'ownerUid', 'createdAt', 'updatedAt']) &&
-        data.keys().hasOnly(['staffCode', 'displayName', 'role', 'branchCode', 'pinHash', 'active', 'permissions', 'ownerUid', 'createdAt', 'updatedAt']) &&
+        data.keys().hasOnly(['id', 'staffCode', 'displayName', 'role', 'branchCode', 'pinHash', 'active', 'permissions', 'sheetPermissions', 'ownerUid', 'createdAt', 'updatedAt']) &&
+        isValidOptStr(data, 'id', 128) &&
         data.staffCode is string && data.staffCode.size() >= 2 && data.staffCode.size() <= 32 && data.staffCode.matches('^[a-zA-Z0-9_\\-]+$') &&
         data.displayName is string && data.displayName.size() >= 2 && data.displayName.size() <= 100 &&
         data.role in ['Admin', 'Manager', 'Billing', 'Accounts', 'Dispatch', 'Viewer'] &&
@@ -67,6 +80,7 @@ service cloud.firestore {
         data.active is bool &&
         data.permissions is list && data.permissions.size() <= 12 &&
         (data.permissions.size() == 0 || data.permissions[0] is string) &&
+        isValidOptMap(data, 'sheetPermissions', 20) &&
         data.ownerUid is string && data.ownerUid.size() >= 6 && data.ownerUid.size() <= 128 &&
         data.createdAt is timestamp &&
         data.updatedAt is timestamp;
@@ -74,14 +88,25 @@ service cloud.firestore {
 
     function isValidParty(data) {
       return data.keys().hasAll(['name', 'partyType', 'openingBalance', 'currentBalance', 'balanceType', 'ownerUid', 'createdAt', 'updatedAt']) &&
-        data.keys().hasOnly(['name', 'partyType', 'address', 'gstin', 'pan', 'phone', 'email', 'openingBalance', 'currentBalance', 'balanceType', 'ownerUid', 'createdAt', 'updatedAt']) &&
+        data.keys().hasOnly([
+          'id', 'name', 'partyType', 'address', 'gstin', 'pan', 'aadhaarNo', 'tradeLicenseNo',
+          'bankName', 'bankAccountNo', 'bankIfsc', 'phone', 'email', 'preferredChannel',
+          'openingBalance', 'currentBalance', 'balanceType', 'ownerUid', 'createdAt', 'updatedAt'
+        ]) &&
+        isValidOptStr(data, 'id', 128) &&
         data.name is string && data.name.size() >= 1 && data.name.size() <= 180 &&
-        data.partyType in ['Customer', 'Consignor', 'Consignee', 'TruckOwner', 'Vendor'] &&
+        data.partyType in ['Customer', 'Consignor', 'Consignee', 'TruckOwner', 'Broker', 'Vendor'] &&
         isValidOptStr(data, 'address', 400) &&
         isValidOptStr(data, 'gstin', 20) &&
         isValidOptStr(data, 'pan', 15) &&
+        isValidOptStr(data, 'aadhaarNo', 24) &&
+        isValidOptStr(data, 'tradeLicenseNo', 60) &&
+        isValidOptStr(data, 'bankName', 120) &&
+        isValidOptStr(data, 'bankAccountNo', 40) &&
+        isValidOptStr(data, 'bankIfsc', 20) &&
         isValidOptStr(data, 'phone', 30) &&
         isValidOptStr(data, 'email', 160) &&
+        isValidOptStr(data, 'preferredChannel', 40) &&
         (data.openingBalance is int || data.openingBalance is float) &&
         (data.currentBalance is int || data.currentBalance is float) &&
         data.balanceType in ['Dr', 'Cr'] &&
@@ -92,7 +117,8 @@ service cloud.firestore {
 
     function isValidVehicle(data) {
       return data.keys().hasAll(['truckNo', 'ownerName', 'ownerUid', 'createdAt', 'updatedAt']) &&
-        data.keys().hasOnly(['truckNo', 'vehicleType', 'ownerName', 'ownerPhone', 'engineNo', 'chassisNo', 'fitnessExpiry', 'insuranceExpiry', 'permitExpiry', 'pucExpiry', 'ownerUid', 'createdAt', 'updatedAt']) &&
+        data.keys().hasOnly(['id', 'truckNo', 'vehicleType', 'ownerName', 'ownerPhone', 'engineNo', 'chassisNo', 'fitnessExpiry', 'insuranceExpiry', 'permitExpiry', 'pucExpiry', 'ownerUid', 'createdAt', 'updatedAt']) &&
+        isValidOptStr(data, 'id', 128) &&
         data.truckNo is string && data.truckNo.size() >= 4 && data.truckNo.size() <= 24 &&
         isValidOptStr(data, 'vehicleType', 80) &&
         data.ownerName is string && data.ownerName.size() <= 140 &&
@@ -110,12 +136,18 @@ service cloud.firestore {
 
     function isValidDriver(data) {
       return data.keys().hasAll(['name', 'dlNo', 'dlExpiry', 'ownerUid', 'createdAt', 'updatedAt']) &&
-        data.keys().hasOnly(['name', 'dlNo', 'dlExpiry', 'phone', 'address', 'ownerUid', 'createdAt', 'updatedAt']) &&
+        data.keys().hasOnly(['id', 'name', 'dlNo', 'dlExpiry', 'phone', 'address', 'aadhaarNo', 'panNo', 'bankName', 'bankAccountNo', 'bankIfsc', 'ownerUid', 'createdAt', 'updatedAt']) &&
+        isValidOptStr(data, 'id', 128) &&
         data.name is string && data.name.size() >= 1 && data.name.size() <= 140 &&
         data.dlNo is string && data.dlNo.size() >= 4 && data.dlNo.size() <= 40 &&
         data.dlExpiry is string && data.dlExpiry.size() <= 20 &&
         isValidOptStr(data, 'phone', 30) &&
         isValidOptStr(data, 'address', 300) &&
+        isValidOptStr(data, 'aadhaarNo', 24) &&
+        isValidOptStr(data, 'panNo', 15) &&
+        isValidOptStr(data, 'bankName', 120) &&
+        isValidOptStr(data, 'bankAccountNo', 40) &&
+        isValidOptStr(data, 'bankIfsc', 20) &&
         data.ownerUid is string && data.ownerUid.size() >= 6 && data.ownerUid.size() <= 128 &&
         data.createdAt is timestamp &&
         data.updatedAt is timestamp;
@@ -124,17 +156,26 @@ service cloud.firestore {
     function isValidConsignment(data) {
       return data.keys().hasAll(['cnNo', 'cnDate', 'consignorName', 'consigneeName', 'truckNo', 'fromCity', 'toCity', 'totalFreight', 'billed', 'ownerUid', 'createdAt', 'updatedAt']) &&
         data.keys().hasOnly([
-          'cnNo', 'cnDate', 'deliveryOffice', 'consignorName', 'consignorAddress', 'consignorGstin',
-          'consigneeName', 'consigneeAddress', 'consigneeGstin', 'packages', 'particulars',
-          'nettWeight', 'grossWeight', 'loadingCharge', 'unloadingCharge', 'returnLorryCharge', 'sttCharge',
-          'totalFreight', 'paidAmount', 'toPayAmount', 'taxInvNo', 'taxInvDate', 'ewayBillNo', 'ewayBillDate',
-          'valueOfGoods', 'truckNo', 'fromCity', 'toCity', 'engineNo', 'chassisNo', 'ownerName',
-          'driverName', 'driverDlNo', 'gstPaidBy', 'insuranceStatus', 'billed', 'invoiceId',
+          'id', 'cnNo', 'cnDate', 'financialYear', 'deliveryOffice', 'stockTransfer', 'billingPartyName', 'creditDays',
+          'consignorName', 'consignorAddress', 'consignorGstin',
+          'consigneeName', 'consigneeAddress', 'consigneeGstin', 'packages', 'packageMode', 'particulars',
+          'rateMode', 'ratePerUnit', 'nettWeight', 'grossWeight', 'loadingCharge', 'unloadingCharge',
+          'returnLorryCharge', 'sttCharge', 'totalFreight', 'paidAmount', 'toPayAmount',
+          'hasTaxInvoice', 'hasMultiEwayBill', 'hasMultiVehicle', 'taxInvNo', 'taxInvDate', 'ewayBillNo', 'ewayBillDate',
+          'extraTaxInvoices', 'extraEwayBills', 'extraVehicles',
+          'valueOfGoods', 'truckNo', 'fromState', 'fromDistrict', 'fromCity', 'toState', 'toDistrict', 'toCity',
+          'engineNo', 'chassisNo', 'ownerName', 'driverName', 'driverDlNo', 'gstPaidBy', 'insuranceStatus',
+          'remarks', 'scannedLrDataUrl', 'billed', 'invoiceId',
           'branchCode', 'createdByStaff', 'ownerUid', 'createdAt', 'updatedAt'
         ]) &&
+        isValidOptStr(data, 'id', 128) &&
         data.cnNo is string && data.cnNo.size() >= 2 && data.cnNo.size() <= 40 &&
         data.cnDate is string && data.cnDate.size() >= 8 && data.cnDate.size() <= 20 &&
+        isValidOptStr(data, 'financialYear', 16) &&
         isValidOptStr(data, 'deliveryOffice', 200) &&
+        isValidOptBool(data, 'stockTransfer') &&
+        isValidOptStr(data, 'billingPartyName', 180) &&
+        isValidOptNum(data, 'creditDays') &&
         data.consignorName is string && data.consignorName.size() <= 180 &&
         isValidOptStr(data, 'consignorAddress', 350) &&
         isValidOptStr(data, 'consignorGstin', 24) &&
@@ -142,7 +183,10 @@ service cloud.firestore {
         isValidOptStr(data, 'consigneeAddress', 350) &&
         isValidOptStr(data, 'consigneeGstin', 24) &&
         isValidOptStr(data, 'packages', 40) &&
+        isValidOptStr(data, 'packageMode', 60) &&
         isValidOptStr(data, 'particulars', 400) &&
+        isValidOptStr(data, 'rateMode', 80) &&
+        isValidOptNum(data, 'ratePerUnit') &&
         isValidOptNum(data, 'nettWeight') &&
         isValidOptNum(data, 'grossWeight') &&
         isValidOptNum(data, 'loadingCharge') &&
@@ -152,13 +196,23 @@ service cloud.firestore {
         (data.totalFreight is int || data.totalFreight is float) &&
         isValidOptNum(data, 'paidAmount') &&
         isValidOptNum(data, 'toPayAmount') &&
+        isValidOptBool(data, 'hasTaxInvoice') &&
+        isValidOptBool(data, 'hasMultiEwayBill') &&
+        isValidOptBool(data, 'hasMultiVehicle') &&
         isValidOptStr(data, 'taxInvNo', 80) &&
         isValidOptStr(data, 'taxInvDate', 20) &&
         isValidOptStr(data, 'ewayBillNo', 60) &&
         isValidOptStr(data, 'ewayBillDate', 20) &&
+        isValidOptList(data, 'extraTaxInvoices', 50) &&
+        isValidOptList(data, 'extraEwayBills', 50) &&
+        isValidOptList(data, 'extraVehicles', 30) &&
         isValidOptNum(data, 'valueOfGoods') &&
         data.truckNo is string && data.truckNo.size() <= 30 &&
+        isValidOptStr(data, 'fromState', 80) &&
+        isValidOptStr(data, 'fromDistrict', 80) &&
         data.fromCity is string && data.fromCity.size() <= 120 &&
+        isValidOptStr(data, 'toState', 80) &&
+        isValidOptStr(data, 'toDistrict', 80) &&
         data.toCity is string && data.toCity.size() <= 120 &&
         isValidOptStr(data, 'engineNo', 40) &&
         isValidOptStr(data, 'chassisNo', 40) &&
@@ -167,6 +221,8 @@ service cloud.firestore {
         isValidOptStr(data, 'driverDlNo', 40) &&
         isValidOptStr(data, 'gstPaidBy', 40) &&
         isValidOptStr(data, 'insuranceStatus', 80) &&
+        isValidOptStr(data, 'remarks', 1200) &&
+        isValidOptStr(data, 'scannedLrDataUrl', 450000) &&
         data.billed is bool &&
         isValidOptStr(data, 'invoiceId', 128) &&
         isValidOptStr(data, 'branchCode', 32) &&
@@ -179,21 +235,26 @@ service cloud.firestore {
     function isValidInvoice(data) {
       return data.keys().hasAll(['invoiceNo', 'invoiceDate', 'partyName', 'grandTotal', 'paidAmount', 'status', 'consignmentRows', 'ownerUid', 'createdAt', 'updatedAt']) &&
         data.keys().hasOnly([
-          'invoiceNo', 'invoiceDate', 'dueDate', 'partyName', 'partyAddress', 'partyGstin', 'partyPan',
-          'sac', 'reverseCharge', 'gstRate', 'cgstAmt', 'sgstAmt', 'igstAmt', 'totalTax',
+          'id', 'invoiceNo', 'invoiceDate', 'dueDate', 'financialYear', 'partyName', 'partyAddress', 'partyGstin', 'partyPan',
+          'billingCountry', 'sac', 'reverseCharge', 'interstate', 'gstPaidBy', 'gstRate', 'cgstAmt', 'sgstAmt', 'igstAmt', 'totalTax',
           'freightCharges', 'detentionCharges', 'unloadingCharges', 'stCharges', 'grandTotal',
-          'paidAmount', 'status', 'remarks', 'consignmentRows', 'annexureLorries',
-          'branchCode', 'createdByStaff', 'ownerUid', 'createdAt', 'updatedAt'
+          'paidAmount', 'status', 'remarks', 'copyCount', 'consignmentRows', 'annexureLorries',
+          'selectedBankId', 'branchOfficeId', 'branchCode', 'createdByStaff', 'ownerUid', 'createdAt', 'updatedAt'
         ]) &&
+        isValidOptStr(data, 'id', 128) &&
         data.invoiceNo is string && data.invoiceNo.size() >= 2 && data.invoiceNo.size() <= 40 &&
         data.invoiceDate is string && data.invoiceDate.size() >= 8 && data.invoiceDate.size() <= 20 &&
         isValidOptStr(data, 'dueDate', 20) &&
+        isValidOptStr(data, 'financialYear', 16) &&
         data.partyName is string && data.partyName.size() >= 1 && data.partyName.size() <= 180 &&
         isValidOptStr(data, 'partyAddress', 350) &&
         isValidOptStr(data, 'partyGstin', 24) &&
         isValidOptStr(data, 'partyPan', 15) &&
+        isValidOptStr(data, 'billingCountry', 40) &&
         isValidOptStr(data, 'sac', 20) &&
-        (!('reverseCharge' in data) || data.reverseCharge is bool) &&
+        isValidOptBool(data, 'reverseCharge') &&
+        isValidOptBool(data, 'interstate') &&
+        isValidOptStr(data, 'gstPaidBy', 40) &&
         isValidOptNum(data, 'gstRate') &&
         isValidOptNum(data, 'cgstAmt') &&
         isValidOptNum(data, 'sgstAmt') &&
@@ -207,9 +268,12 @@ service cloud.firestore {
         (data.paidAmount is int || data.paidAmount is float) &&
         data.status in ['Unpaid', 'Partial', 'Paid'] &&
         isValidOptStr(data, 'remarks', 500) &&
+        isValidOptNum(data, 'copyCount') &&
         data.consignmentRows is list && data.consignmentRows.size() >= 1 && data.consignmentRows.size() <= 100 &&
         data.consignmentRows[0] is map &&
-        (!('annexureLorries' in data) || (data.annexureLorries is list && data.annexureLorries.size() <= 100)) &&
+        isValidOptList(data, 'annexureLorries', 100) &&
+        isValidOptStr(data, 'selectedBankId', 80) &&
+        isValidOptStr(data, 'branchOfficeId', 80) &&
         isValidOptStr(data, 'branchCode', 32) &&
         isValidOptStr(data, 'createdByStaff', 64) &&
         data.ownerUid is string && data.ownerUid.size() >= 6 && data.ownerUid.size() <= 128 &&
@@ -220,16 +284,23 @@ service cloud.firestore {
     function isValidQuotation(data) {
       return data.keys().hasAll(['quotationNo', 'quotationDate', 'partyName', 'vehicleType', 'freight', 'destination', 'ownerUid', 'createdAt', 'updatedAt']) &&
         data.keys().hasOnly([
-          'quotationNo', 'quotationDate', 'partyName', 'partyAddress', 'partyGstin', 'subject',
+          'id', 'quotationNo', 'quotationDate', 'financialYear', 'partyName', 'partyAddress', 'partyGstin',
+          'partyPhone', 'partyEmail', 'goodsType', 'rateMode', 'subject',
           'validityText', 'vehicleType', 'freight', 'loadingCharge', 'unloadingCharge',
           'parkingCharge', 'detentionCharge', 'tonGuarantee', 'destination', 'advancePay',
           'entryPoint', 'branchCode', 'createdByStaff', 'ownerUid', 'createdAt', 'updatedAt'
         ]) &&
+        isValidOptStr(data, 'id', 128) &&
         data.quotationNo is string && data.quotationNo.size() >= 2 && data.quotationNo.size() <= 40 &&
         data.quotationDate is string && data.quotationDate.size() >= 8 && data.quotationDate.size() <= 20 &&
+        isValidOptStr(data, 'financialYear', 16) &&
         data.partyName is string && data.partyName.size() >= 1 && data.partyName.size() <= 180 &&
         isValidOptStr(data, 'partyAddress', 350) &&
         isValidOptStr(data, 'partyGstin', 24) &&
+        isValidOptStr(data, 'partyPhone', 30) &&
+        isValidOptStr(data, 'partyEmail', 160) &&
+        isValidOptStr(data, 'goodsType', 120) &&
+        isValidOptStr(data, 'rateMode', 40) &&
         isValidOptStr(data, 'subject', 200) &&
         isValidOptStr(data, 'validityText', 120) &&
         data.vehicleType is string && data.vehicleType.size() <= 120 &&
@@ -252,19 +323,35 @@ service cloud.firestore {
     function isValidLorryHire(data) {
       return data.keys().hasAll(['cnNo', 'truckNo', 'hireAmount', 'advancePaid', 'balancePayable', 'podReceived', 'balancePaid', 'ownerUid', 'createdAt', 'updatedAt']) &&
         data.keys().hasOnly([
-          'cnNo', 'cnDate', 'truckNo', 'ownerName', 'fromCity', 'toCity',
-          'hireAmount', 'advancePaid', 'balancePayable', 'podReceived', 'podReceiveDate',
+          'id', 'cnNo', 'cnDate', 'financialYear', 'truckNo', 'ownerName', 'brokerName', 'fromCity', 'toCity',
+          'bookedPkgs', 'deliveredPkgs', 'shortageDamagePkgs', 'hasMultiAdvance', 'advances',
+          'hireAmount', 'advancePaid', 'loadingCharge', 'unloadingCharge', 'parkingCharge', 'kataCharge',
+          'shortageCharge', 'damageCharge', 'balancePayable', 'podReceived', 'podReceiveDate',
           'podImageDataUrl', 'podFileName', 'balancePaid', 'balancePaidDate',
           'paymentMode', 'paymentRef', 'branchCode', 'createdByStaff', 'ownerUid', 'createdAt', 'updatedAt'
         ]) &&
+        isValidOptStr(data, 'id', 128) &&
         data.cnNo is string && data.cnNo.size() >= 2 && data.cnNo.size() <= 40 &&
         isValidOptStr(data, 'cnDate', 20) &&
-        data.truckNo is string && data.truckNo.size() >= 3 && data.truckNo.size() <= 30 &&
+        isValidOptStr(data, 'financialYear', 16) &&
+        data.truckNo is string && data.truckNo.size() >= 1 && data.truckNo.size() <= 30 &&
         isValidOptStr(data, 'ownerName', 140) &&
+        isValidOptStr(data, 'brokerName', 140) &&
         isValidOptStr(data, 'fromCity', 120) &&
         isValidOptStr(data, 'toCity', 120) &&
+        isValidOptNum(data, 'bookedPkgs') &&
+        isValidOptNum(data, 'deliveredPkgs') &&
+        isValidOptNum(data, 'shortageDamagePkgs') &&
+        isValidOptBool(data, 'hasMultiAdvance') &&
+        isValidOptList(data, 'advances', 30) &&
         (data.hireAmount is int || data.hireAmount is float) &&
         (data.advancePaid is int || data.advancePaid is float) &&
+        isValidOptNum(data, 'loadingCharge') &&
+        isValidOptNum(data, 'unloadingCharge') &&
+        isValidOptNum(data, 'parkingCharge') &&
+        isValidOptNum(data, 'kataCharge') &&
+        isValidOptNum(data, 'shortageCharge') &&
+        isValidOptNum(data, 'damageCharge') &&
         (data.balancePayable is int || data.balancePayable is float) &&
         data.podReceived is bool &&
         isValidOptStr(data, 'podReceiveDate', 20) &&
@@ -289,12 +376,14 @@ service cloud.firestore {
     function isValidTransaction(data) {
       return data.keys().hasAll(['txCode', 'txDate', 'txType', 'ledgerAccount', 'partyName', 'amount', 'paymentMode', 'ownerUid', 'createdAt', 'updatedAt']) &&
         data.keys().hasOnly([
-          'txCode', 'txDate', 'txType', 'ledgerAccount', 'partyName', 'amount',
-          'narration', 'paymentMode', 'referenceNo', 'linkedCnNo', 'linkedInvoiceNo',
-          'branchCode', 'createdByStaff', 'ownerUid', 'createdAt', 'updatedAt'
+          'id', 'txCode', 'txDate', 'financialYear', 'txType', 'ledgerAccount', 'partyName', 'amount',
+          'narration', 'paymentMode', 'referenceNo', 'upiRefId', 'utrNo', 'chequeNo', 'tdsAmount',
+          'linkedCnNo', 'linkedInvoiceNo', 'branchCode', 'createdByStaff', 'ownerUid', 'createdAt', 'updatedAt'
         ]) &&
+        isValidOptStr(data, 'id', 128) &&
         data.txCode is string && data.txCode.size() >= 2 && data.txCode.size() <= 32 &&
         data.txDate is string && data.txDate.size() >= 8 && data.txDate.size() <= 20 &&
+        isValidOptStr(data, 'financialYear', 16) &&
         data.txType in ['Income', 'Expense'] &&
         data.ledgerAccount is string && data.ledgerAccount.size() >= 1 && data.ledgerAccount.size() <= 100 &&
         data.partyName is string && data.partyName.size() >= 1 && data.partyName.size() <= 180 &&
@@ -302,8 +391,76 @@ service cloud.firestore {
         isValidOptStr(data, 'narration', 300) &&
         data.paymentMode is string && data.paymentMode.size() <= 60 &&
         isValidOptStr(data, 'referenceNo', 80) &&
+        isValidOptStr(data, 'upiRefId', 80) &&
+        isValidOptStr(data, 'utrNo', 80) &&
+        isValidOptStr(data, 'chequeNo', 40) &&
+        isValidOptNum(data, 'tdsAmount') &&
         isValidOptStr(data, 'linkedCnNo', 40) &&
         isValidOptStr(data, 'linkedInvoiceNo', 40) &&
+        isValidOptStr(data, 'branchCode', 32) &&
+        isValidOptStr(data, 'createdByStaff', 64) &&
+        data.ownerUid is string && data.ownerUid.size() >= 6 && data.ownerUid.size() <= 128 &&
+        data.createdAt is timestamp &&
+        data.updatedAt is timestamp;
+    }
+
+    function isValidBankReceipt(data) {
+      return data.keys().hasAll(['financialYear', 'receiptDate', 'bankAccountName', 'partyName', 'creditAmount', 'tdsRatePct', 'tdsAmount', 'grossSettled', 'appliedToInvoice', 'ownerUid', 'createdAt', 'updatedAt']) &&
+        data.keys().hasOnly([
+          'id', 'financialYear', 'receiptDate', 'bankAccountName', 'partyName', 'paymentMode',
+          'referenceNo', 'upiRefId', 'utrNo', 'chequeNo', 'narration', 'description',
+          'creditAmount', 'tdsRatePct', 'tdsAmount', 'grossSettled', 'matchedInvoiceId',
+          'matchedInvoiceNo', 'billAmount', 'balanceRemaining', 'appliedToInvoice',
+          'sourceFileName', 'branchCode', 'createdByStaff', 'ownerUid', 'createdAt', 'updatedAt'
+        ]) &&
+        isValidOptStr(data, 'id', 128) &&
+        data.financialYear is string && data.financialYear.size() >= 4 && data.financialYear.size() <= 16 &&
+        data.receiptDate is string && data.receiptDate.size() >= 8 && data.receiptDate.size() <= 20 &&
+        data.bankAccountName is string && data.bankAccountName.size() <= 120 &&
+        data.partyName is string && data.partyName.size() >= 1 && data.partyName.size() <= 180 &&
+        isValidOptStr(data, 'paymentMode', 60) &&
+        isValidOptStr(data, 'referenceNo', 80) &&
+        isValidOptStr(data, 'upiRefId', 80) &&
+        isValidOptStr(data, 'utrNo', 80) &&
+        isValidOptStr(data, 'chequeNo', 40) &&
+        isValidOptStr(data, 'narration', 300) &&
+        isValidOptStr(data, 'description', 400) &&
+        (data.creditAmount is int || data.creditAmount is float) &&
+        (data.tdsRatePct is int || data.tdsRatePct is float) &&
+        (data.tdsAmount is int || data.tdsAmount is float) &&
+        (data.grossSettled is int || data.grossSettled is float) &&
+        isValidOptStr(data, 'matchedInvoiceId', 128) &&
+        isValidOptStr(data, 'matchedInvoiceNo', 60) &&
+        isValidOptNum(data, 'billAmount') &&
+        isValidOptNum(data, 'balanceRemaining') &&
+        data.appliedToInvoice is bool &&
+        isValidOptStr(data, 'sourceFileName', 180) &&
+        isValidOptStr(data, 'branchCode', 32) &&
+        isValidOptStr(data, 'createdByStaff', 64) &&
+        data.ownerUid is string && data.ownerUid.size() >= 6 && data.ownerUid.size() <= 128 &&
+        data.createdAt is timestamp &&
+        data.updatedAt is timestamp;
+    }
+
+    function isValidStaffCommission(data) {
+      return data.keys().hasAll(['entryDate', 'staffName', 'wheelType', 'entryType', 'amount', 'ownerUid', 'createdAt', 'updatedAt']) &&
+        data.keys().hasOnly([
+          'id', 'entryDate', 'financialYear', 'staffName', 'challanNo', 'truckNo',
+          'wheelType', 'entryType', 'commissionRate', 'amount', 'paymentMode', 'remarks',
+          'branchCode', 'createdByStaff', 'ownerUid', 'createdAt', 'updatedAt'
+        ]) &&
+        isValidOptStr(data, 'id', 128) &&
+        data.entryDate is string && data.entryDate.size() >= 8 && data.entryDate.size() <= 20 &&
+        isValidOptStr(data, 'financialYear', 16) &&
+        data.staffName is string && data.staffName.size() >= 1 && data.staffName.size() <= 100 &&
+        isValidOptStr(data, 'challanNo', 60) &&
+        isValidOptStr(data, 'truckNo', 30) &&
+        data.wheelType is string && data.wheelType.size() <= 40 &&
+        data.entryType in ['Commission', 'Advance Taken', 'Paid'] &&
+        isValidOptNum(data, 'commissionRate') &&
+        (data.amount is int || data.amount is float) &&
+        isValidOptStr(data, 'paymentMode', 40) &&
+        isValidOptStr(data, 'remarks', 300) &&
         isValidOptStr(data, 'branchCode', 32) &&
         isValidOptStr(data, 'createdByStaff', 64) &&
         data.ownerUid is string && data.ownerUid.size() >= 6 && data.ownerUid.size() <= 128 &&
@@ -314,13 +471,14 @@ service cloud.firestore {
     function isValidDeclaration(data) {
       return data.keys().hasAll(['partyName', 'financialYear', 'declarationDate', 'place', 'ownerUid', 'createdAt', 'updatedAt']) &&
         data.keys().hasOnly([
-          'partyName', 'partyAddress', 'partyGstin', 'financialYear', 'declarationDate',
+          'id', 'partyName', 'partyAddress', 'partyGstin', 'financialYear', 'declarationDate',
           'place', 'branchCode', 'createdByStaff', 'ownerUid', 'createdAt', 'updatedAt'
         ]) &&
+        isValidOptStr(data, 'id', 128) &&
         data.partyName is string && data.partyName.size() >= 1 && data.partyName.size() <= 180 &&
         isValidOptStr(data, 'partyAddress', 350) &&
         isValidOptStr(data, 'partyGstin', 24) &&
-        data.financialYear is string && data.financialYear.size() >= 7 && data.financialYear.size() <= 12 &&
+        data.financialYear is string && data.financialYear.size() >= 7 && data.financialYear.size() <= 16 &&
         data.declarationDate is string && data.declarationDate.size() >= 8 && data.declarationDate.size() <= 20 &&
         data.place is string && data.place.size() <= 80 &&
         isValidOptStr(data, 'branchCode', 32) &&
@@ -333,10 +491,15 @@ service cloud.firestore {
     function isValidSettings(data) {
       return data.keys().hasAll(['companyName', 'pan', 'gstin', 'ownerUid', 'updatedAt']) &&
         data.keys().hasOnly([
-          'companyName', 'tagline', 'address', 'pan', 'gstin', 'msme', 'hsn',
-          'phones', 'email', 'bankName', 'bankBranch', 'accountNo', 'ifsc', 'swift',
-          'currentFy', 'ownerUid', 'updatedAt'
+          'id', 'companyName', 'tagline', 'address', 'pan', 'gstin', 'msme', 'hsn',
+          'phones', 'email', 'bankName', 'bankBranch', 'accountNo', 'ifsc', 'swift', 'upiId',
+          'bankAccounts', 'branches', 'whatsappCloud',
+          'currentFy', 'availableFys', 'fyOpeningBalances', 'dropdownMaster',
+          'customStampDataUrl', 'bholeBabaPhotoDataUrl', 'khatuShyamPhotoDataUrl',
+          'autoLockMinutes', 'lockSourceInspection', 'last90DayAutoFixAt',
+          'ownerUid', 'updatedAt'
         ]) &&
+        isValidOptStr(data, 'id', 128) &&
         data.companyName is string && data.companyName.size() <= 160 &&
         isValidOptStr(data, 'tagline', 160) &&
         isValidOptStr(data, 'address', 350) &&
@@ -351,7 +514,20 @@ service cloud.firestore {
         isValidOptStr(data, 'accountNo', 40) &&
         isValidOptStr(data, 'ifsc', 24) &&
         isValidOptStr(data, 'swift', 24) &&
-        isValidOptStr(data, 'currentFy', 12) &&
+        isValidOptStr(data, 'upiId', 120) &&
+        isValidOptList(data, 'bankAccounts', 30) &&
+        isValidOptList(data, 'branches', 50) &&
+        isValidOptMap(data, 'whatsappCloud', 10) &&
+        isValidOptStr(data, 'currentFy', 16) &&
+        isValidOptList(data, 'availableFys', 20) &&
+        isValidOptMap(data, 'fyOpeningBalances', 50) &&
+        isValidOptMap(data, 'dropdownMaster', 20) &&
+        isValidOptStr(data, 'customStampDataUrl', 450000) &&
+        isValidOptStr(data, 'bholeBabaPhotoDataUrl', 450000) &&
+        isValidOptStr(data, 'khatuShyamPhotoDataUrl', 450000) &&
+        isValidOptNum(data, 'autoLockMinutes') &&
+        isValidOptBool(data, 'lockSourceInspection') &&
+        isValidOptNum(data, 'last90DayAutoFixAt') &&
         data.ownerUid is string && data.ownerUid.size() >= 6 && data.ownerUid.size() <= 128 &&
         data.updatedAt is timestamp;
     }
@@ -361,7 +537,7 @@ service cloud.firestore {
         data.keys().hasOnly(['seq', 'prefix', 'fy', 'branchCode', 'lastUpdatedBy', 'ownerUid', 'updatedAt']) &&
         (data.seq is int || data.seq is float) && data.seq >= 1 &&
         data.prefix is string && data.prefix.size() >= 1 && data.prefix.size() <= 20 &&
-        data.fy is string && data.fy.size() >= 2 && data.fy.size() <= 12 &&
+        data.fy is string && data.fy.size() >= 2 && data.fy.size() <= 16 &&
         isValidOptStr(data, 'branchCode', 32) &&
         isValidOptStr(data, 'lastUpdatedBy', 64) &&
         data.ownerUid is string && data.ownerUid.size() >= 6 && data.ownerUid.size() <= 128 &&
@@ -423,7 +599,7 @@ service cloud.firestore {
           isAdmin() || (
             isOwnerOrAdmin() &&
             incoming().role == existing().role &&
-            incoming().diff(existing()).affectedKeys().hasOnly(['displayName', 'branchCode', 'pinHash', 'active', 'permissions', 'updatedAt'])
+            incoming().diff(existing()).affectedKeys().hasOnly(['displayName', 'branchCode', 'pinHash', 'active', 'permissions', 'sheetPermissions', 'updatedAt'])
           )
         );
       allow delete: if isValidId(staffId) && isOwnerOrAdmin();
@@ -441,7 +617,11 @@ service cloud.firestore {
         incoming().createdAt == existing().createdAt &&
         incoming().updatedAt == request.time && (
           isAdmin() ||
-          incoming().diff(existing()).affectedKeys().hasOnly(['name', 'partyType', 'address', 'gstin', 'pan', 'phone', 'email', 'openingBalance', 'currentBalance', 'balanceType', 'updatedAt'])
+          incoming().diff(existing()).affectedKeys().hasOnly([
+            'name', 'partyType', 'address', 'gstin', 'pan', 'aadhaarNo', 'tradeLicenseNo',
+            'bankName', 'bankAccountNo', 'bankIfsc', 'phone', 'email', 'preferredChannel',
+            'openingBalance', 'currentBalance', 'balanceType', 'updatedAt'
+          ])
         );
       allow delete: if isValidId(partyId) && isOwnerOrAdmin();
     }
@@ -475,7 +655,7 @@ service cloud.firestore {
         incoming().createdAt == existing().createdAt &&
         incoming().updatedAt == request.time && (
           isAdmin() ||
-          incoming().diff(existing()).affectedKeys().hasOnly(['name', 'dlNo', 'dlExpiry', 'phone', 'address', 'updatedAt'])
+          incoming().diff(existing()).affectedKeys().hasOnly(['name', 'dlNo', 'dlExpiry', 'phone', 'address', 'aadhaarNo', 'panNo', 'bankName', 'bankAccountNo', 'bankIfsc', 'updatedAt'])
         );
       allow delete: if isValidId(driverId) && isOwnerOrAdmin();
     }
@@ -493,12 +673,16 @@ service cloud.firestore {
         incoming().updatedAt == request.time && (
           isAdmin() ||
           incoming().diff(existing()).affectedKeys().hasOnly([
-            'cnNo', 'cnDate', 'deliveryOffice', 'consignorName', 'consignorAddress', 'consignorGstin',
-            'consigneeName', 'consigneeAddress', 'consigneeGstin', 'packages', 'particulars',
-            'nettWeight', 'grossWeight', 'loadingCharge', 'unloadingCharge', 'returnLorryCharge', 'sttCharge',
-            'totalFreight', 'paidAmount', 'toPayAmount', 'taxInvNo', 'taxInvDate', 'ewayBillNo', 'ewayBillDate',
-            'valueOfGoods', 'truckNo', 'fromCity', 'toCity', 'engineNo', 'chassisNo', 'ownerName',
-            'driverName', 'driverDlNo', 'gstPaidBy', 'insuranceStatus', 'billed', 'invoiceId', 'branchCode', 'updatedAt'
+            'cnNo', 'cnDate', 'financialYear', 'deliveryOffice', 'stockTransfer', 'billingPartyName', 'creditDays',
+            'consignorName', 'consignorAddress', 'consignorGstin',
+            'consigneeName', 'consigneeAddress', 'consigneeGstin', 'packages', 'packageMode', 'particulars',
+            'rateMode', 'ratePerUnit', 'nettWeight', 'grossWeight', 'loadingCharge', 'unloadingCharge',
+            'returnLorryCharge', 'sttCharge', 'totalFreight', 'paidAmount', 'toPayAmount',
+            'hasTaxInvoice', 'hasMultiEwayBill', 'hasMultiVehicle', 'taxInvNo', 'taxInvDate', 'ewayBillNo', 'ewayBillDate',
+            'extraTaxInvoices', 'extraEwayBills', 'extraVehicles',
+            'valueOfGoods', 'truckNo', 'fromState', 'fromDistrict', 'fromCity', 'toState', 'toDistrict', 'toCity',
+            'engineNo', 'chassisNo', 'ownerName', 'driverName', 'driverDlNo', 'gstPaidBy', 'insuranceStatus',
+            'remarks', 'scannedLrDataUrl', 'billed', 'invoiceId', 'branchCode', 'updatedAt'
           ])
         );
       allow delete: if isValidId(cnId) && isOwnerOrAdmin();
@@ -518,10 +702,11 @@ service cloud.firestore {
           isAdmin() ||
           (incoming().diff(existing()).affectedKeys().hasOnly(['paidAmount', 'status', 'updatedAt'])) ||
           (existing().status != 'Paid' && incoming().diff(existing()).affectedKeys().hasOnly([
-            'invoiceDate', 'dueDate', 'partyName', 'partyAddress', 'partyGstin', 'partyPan',
-            'sac', 'reverseCharge', 'gstRate', 'cgstAmt', 'sgstAmt', 'igstAmt', 'totalTax',
+            'invoiceDate', 'dueDate', 'financialYear', 'partyName', 'partyAddress', 'partyGstin', 'partyPan',
+            'billingCountry', 'sac', 'reverseCharge', 'interstate', 'gstPaidBy', 'gstRate', 'cgstAmt', 'sgstAmt', 'igstAmt', 'totalTax',
             'freightCharges', 'detentionCharges', 'unloadingCharges', 'stCharges', 'grandTotal',
-            'paidAmount', 'status', 'remarks', 'consignmentRows', 'annexureLorries', 'branchCode', 'updatedAt'
+            'paidAmount', 'status', 'remarks', 'copyCount', 'consignmentRows', 'annexureLorries',
+            'selectedBankId', 'branchOfficeId', 'branchCode', 'updatedAt'
           ]))
         );
       allow delete: if isValidId(invoiceId) && isOwnerOrAdmin();
@@ -540,7 +725,8 @@ service cloud.firestore {
         incoming().updatedAt == request.time && (
           isAdmin() ||
           incoming().diff(existing()).affectedKeys().hasOnly([
-            'quotationDate', 'partyName', 'partyAddress', 'partyGstin', 'subject',
+            'quotationDate', 'financialYear', 'partyName', 'partyAddress', 'partyGstin',
+            'partyPhone', 'partyEmail', 'goodsType', 'rateMode', 'subject',
             'validityText', 'vehicleType', 'freight', 'loadingCharge', 'unloadingCharge',
             'parkingCharge', 'detentionCharge', 'tonGuarantee', 'destination', 'advancePay',
             'entryPoint', 'branchCode', 'updatedAt'
@@ -580,11 +766,53 @@ service cloud.firestore {
         incoming().updatedAt == request.time && (
           isAdmin() ||
           incoming().diff(existing()).affectedKeys().hasOnly([
-            'txDate', 'txType', 'ledgerAccount', 'partyName', 'amount',
-            'narration', 'paymentMode', 'referenceNo', 'linkedCnNo', 'linkedInvoiceNo', 'branchCode', 'updatedAt'
+            'txDate', 'financialYear', 'txType', 'ledgerAccount', 'partyName', 'amount',
+            'narration', 'paymentMode', 'referenceNo', 'upiRefId', 'utrNo', 'chequeNo', 'tdsAmount',
+            'linkedCnNo', 'linkedInvoiceNo', 'branchCode', 'updatedAt'
           ])
         );
       allow delete: if isValidId(txId) && isOwnerOrAdmin();
+    }
+
+    match /bank_receipts/{receiptId} {
+      allow get: if isValidId(receiptId) && isOwnerOrAdmin();
+      allow list: if isListOwnerOrMaster();
+      allow create: if isSignedIn() && isValidId(receiptId) && isValidBankReceipt(incoming()) &&
+        incoming().ownerUid == request.auth.uid &&
+        incoming().createdAt == request.time &&
+        incoming().updatedAt == request.time;
+      allow update: if isValidId(receiptId) && isValidBankReceipt(incoming()) && isOwnerOrAdmin() &&
+        incoming().ownerUid == existing().ownerUid &&
+        incoming().createdAt == existing().createdAt &&
+        incoming().updatedAt == request.time && (
+          isAdmin() ||
+          incoming().diff(existing()).affectedKeys().hasOnly([
+            'partyName', 'paymentMode', 'referenceNo', 'upiRefId', 'utrNo', 'chequeNo',
+            'narration', 'tdsRatePct', 'tdsAmount', 'grossSettled', 'matchedInvoiceId',
+            'matchedInvoiceNo', 'billAmount', 'balanceRemaining', 'appliedToInvoice', 'updatedAt'
+          ])
+        );
+      allow delete: if isValidId(receiptId) && isOwnerOrAdmin();
+    }
+
+    match /staff_commissions/{commId} {
+      allow get: if isValidId(commId) && isOwnerOrAdmin();
+      allow list: if isListOwnerOrMaster();
+      allow create: if isSignedIn() && isValidId(commId) && isValidStaffCommission(incoming()) &&
+        incoming().ownerUid == request.auth.uid &&
+        incoming().createdAt == request.time &&
+        incoming().updatedAt == request.time;
+      allow update: if isValidId(commId) && isValidStaffCommission(incoming()) && isOwnerOrAdmin() &&
+        incoming().ownerUid == existing().ownerUid &&
+        incoming().createdAt == existing().createdAt &&
+        incoming().updatedAt == request.time && (
+          isAdmin() ||
+          incoming().diff(existing()).affectedKeys().hasOnly([
+            'entryDate', 'financialYear', 'staffName', 'challanNo', 'truckNo',
+            'wheelType', 'entryType', 'commissionRate', 'amount', 'paymentMode', 'remarks', 'updatedAt'
+          ])
+        );
+      allow delete: if isValidId(commId) && isOwnerOrAdmin();
     }
 
     match /declarations/{declId} {

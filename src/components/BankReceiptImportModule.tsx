@@ -10,6 +10,7 @@ import {
   Upload,
 } from 'lucide-react';
 import { uploadBankStatementMirrorToDrive } from '../lib/driveBackup';
+import { sheetToObjectsSmartHeader } from '../lib/excelImport';
 import {
   bulkUpsertDocuments,
   logBranchActivity,
@@ -17,6 +18,11 @@ import {
   upsertDocument,
 } from '../lib/firestoreStore';
 import { formatDateDDMMYYYY, formatINR } from '../lib/formatters';
+import {
+  buildAutomaticNarration,
+  extractPaymentMetadata,
+  formatReferenceChain,
+} from '../lib/paymentNarration';
 import { GeneratedPdfResult, generateFoxproStatementPDF } from '../lib/pdfEngine';
 import { BankReceiptRecord, CompanySettings, Invoice } from '../types/erp';
 import { ConfirmModal } from './ConfirmModal';
@@ -108,9 +114,24 @@ export function extractCreditReceiptsFromRows(params: {
     const description = String(
       findVal([/narration/, /particulars/, /description/, /remarks/, /details/]) || ''
     ).trim();
-    const referenceNo = String(
-      findVal([/chq/, /cheque/, /utr/, /ref/, /instrument/]) || ''
+    const rawRefCol = String(
+      findVal([/chq/, /cheque/, /utr/, /upi/, /ref/, /instrument/]) || ''
     ).trim();
+    const rawModeCol = String(findVal([/mode/, /channel/]) || '').trim();
+    const explicitUpi = String(findVal([/upi\s*ref/, /upi\s*id/]) || '').trim();
+    const explicitUtr = String(findVal([/\butr\b/]) || '').trim();
+    const explicitCheque = String(findVal([/chq/, /cheque/]) || '').trim();
+
+    const meta = extractPaymentMetadata({
+      description,
+      referenceNo: rawRefCol,
+      rawMode: rawModeCol,
+    });
+    const upiRefId = explicitUpi || meta.upiRefId;
+    const utrNo = explicitUtr || meta.utrNo;
+    const chequeNo = explicitCheque || meta.chequeNo;
+    const referenceNo = meta.primaryReferenceNo || rawRefCol || `UTR-${idx + 1}`;
+
     const rawPartyHint = String(findVal([/party/, /payer/, /customer/]) || '').trim();
     const receiptDate = normalizeStatementDate(
       findVal([/date/, /txn\s*date/, /value\s*date/])
@@ -166,16 +187,37 @@ export function extractCreditReceiptsFromRows(params: {
       ? Math.max(0, Number(matchedInv.grandTotal || 0) - Number(matchedInv.paidAmount || 0) - grossSettled)
       : 0;
 
+    const resolvedPartyName =
+      matchedInv?.partyName ||
+      rawPartyHint ||
+      (description.split(/[\/\-]/)[0] || 'Unmatched Party').trim().slice(0, 50);
+
+    const narration = buildAutomaticNarration({
+      txType: 'Income',
+      partyName: resolvedPartyName,
+      amount: creditAmt,
+      paymentMode: meta.paymentMode,
+      upiRefId,
+      utrNo,
+      chequeNo,
+      referenceNo,
+      linkedInvoiceNo: matchedInv?.invoiceNo,
+      bankAccountName: params.bankAccountName,
+      tdsAmount,
+    });
+
     results.push({
       id: `brec_${Date.now()}_${idx}_${Math.random().toString(36).slice(2, 6)}`,
       financialYear: params.activeFy,
       receiptDate,
       bankAccountName: params.bankAccountName,
-      partyName:
-        matchedInv?.partyName ||
-        rawPartyHint ||
-        (description.split(/[\/\-]/)[0] || 'Unmatched Party').trim().slice(0, 50),
-      referenceNo: referenceNo || `UTR-${idx + 1}`,
+      partyName: resolvedPartyName,
+      paymentMode: meta.paymentMode,
+      referenceNo,
+      upiRefId,
+      utrNo,
+      chequeNo,
+      narration,
       description,
       creditAmount: creditAmt,
       tdsRatePct,
@@ -241,6 +283,14 @@ export const BankReceiptImportModule: React.FC<BankReceiptImportModuleProps> = (
     [invoices, activeFy]
   );
 
+  const bankKpis = useMemo(() => {
+    const totalBilled = fyInvoices.reduce((s, inv) => s + Number(inv.grandTotal || 0), 0);
+    const totalReceived = fyReceipts.reduce((s, r) => s + Number(r.creditAmount || 0), 0);
+    const totalTds = fyReceipts.reduce((s, r) => s + Number(r.tdsAmount || 0), 0);
+    const netBalance = Math.max(0, totalBilled - totalReceived - totalTds);
+    return { totalBilled, totalReceived, totalTds, netBalance };
+  }, [fyInvoices, fyReceipts]);
+
   const handleFileUpload = async (file: File) => {
     if (readOnly) return;
     setImporting(true);
@@ -250,9 +300,14 @@ export const BankReceiptImportModule: React.FC<BankReceiptImportModuleProps> = (
       const wb = XLSX.read(buf, { type: 'array' });
       const firstSheet = wb.SheetNames[0];
       if (!firstSheet) throw new Error('Uploaded file has no worksheets.');
-      const rows = XLSX.utils.sheet_to_json<Record<string, unknown>>(wb.Sheets[firstSheet], {
-        defval: '',
-      });
+      const ws = wb.Sheets[firstSheet];
+      const smartRows = sheetToObjectsSmartHeader(ws);
+      const rows =
+        smartRows.length > 0
+          ? smartRows
+          : XLSX.utils.sheet_to_json<Record<string, unknown>>(ws, {
+              defval: '',
+            });
 
       const parsed = extractCreditReceiptsFromRows({
         rows,
@@ -326,6 +381,23 @@ export const BankReceiptImportModule: React.FC<BankReceiptImportModuleProps> = (
             next.grossSettled
         )
       : 0;
+    next.referenceNo =
+      next.upiRefId || next.utrNo || next.chequeNo || next.referenceNo || '';
+    if (!('narration' in patch)) {
+      next.narration = buildAutomaticNarration({
+        txType: 'Income',
+        partyName: next.partyName,
+        amount: next.creditAmount,
+        paymentMode: next.paymentMode || 'Bank Transfer',
+        upiRefId: next.upiRefId,
+        utrNo: next.utrNo,
+        chequeNo: next.chequeNo,
+        referenceNo: next.referenceNo,
+        linkedInvoiceNo: next.matchedInvoiceNo,
+        bankAccountName: next.bankAccountName,
+        tdsAmount: next.tdsAmount,
+      });
+    }
 
     await upsertDocument('bank_receipts', rec.id, next as unknown as Record<string, unknown>, false);
   };
@@ -354,24 +426,44 @@ export const BankReceiptImportModule: React.FC<BankReceiptImportModuleProps> = (
       false
     );
 
+    const txMode = rec.paymentMode || 'NEFT';
+    const refPrimary = rec.upiRefId || rec.utrNo || rec.chequeNo || rec.referenceNo || '';
+    const autoNarration =
+      rec.narration ||
+      buildAutomaticNarration({
+        txType: 'Income',
+        partyName: inv.partyName,
+        amount: rec.creditAmount,
+        paymentMode: txMode,
+        upiRefId: rec.upiRefId,
+        utrNo: rec.utrNo,
+        chequeNo: rec.chequeNo,
+        referenceNo: refPrimary,
+        linkedInvoiceNo: inv.invoiceNo,
+        bankAccountName: rec.bankAccountName,
+        tdsAmount: rec.tdsAmount,
+      });
+
     const txId = `tx_bank_${Date.now()}`;
     await upsertDocument(
       'transactions',
       txId,
       {
         id: txId,
-        txCode: `BNK-${rec.referenceNo || rec.id.slice(-4)}`,
+        txCode: `BNK-${refPrimary || rec.id.slice(-4)}`,
         txDate: rec.receiptDate,
         financialYear: activeFy,
         txType: 'Income',
         ledgerAccount: rec.bankAccountName,
         partyName: inv.partyName,
         amount: rec.creditAmount,
-        narration: `Bank Receipt (${rec.referenceNo})${
-          rec.tdsAmount > 0 ? ` + TDS Rs.${rec.tdsAmount}` : ''
-        } against ${inv.invoiceNo}`,
-        paymentMode: 'NEFT/RTGS/UPI',
-        referenceNo: rec.referenceNo,
+        narration: autoNarration,
+        paymentMode: txMode,
+        referenceNo: refPrimary,
+        upiRefId: rec.upiRefId || '',
+        utrNo: rec.utrNo || '',
+        chequeNo: rec.chequeNo || '',
+        tdsAmount: rec.tdsAmount || 0,
         linkedInvoiceNo: inv.invoiceNo,
         branchCode: currentBranchCode,
         createdByStaff: currentStaffCode,
@@ -385,6 +477,7 @@ export const BankReceiptImportModule: React.FC<BankReceiptImportModuleProps> = (
       rec.id,
       {
         ...rec,
+        narration: autoNarration,
         appliedToInvoice: true,
         balanceRemaining: Math.max(0, Number(inv.grandTotal || 0) - nextPaid),
       },
@@ -409,26 +502,60 @@ export const BankReceiptImportModule: React.FC<BankReceiptImportModuleProps> = (
         subtitle: `Financial Year: ${activeFy}   |   Party Credits Only (Debits Excluded)`,
         fileName: `Bank_Receipts_TDS_${activeFy.replace(/\s+/g, '_')}.pdf`,
         orientation: 'l',
+        summaryLines: [
+          { label: 'Total Billed', value: `Rs. ${formatINR(bankKpis.totalBilled)}` },
+          { label: 'Total Received', value: `Rs. ${formatINR(bankKpis.totalReceived)}` },
+          { label: 'Total TDS Deducted', value: `Rs. ${formatINR(bankKpis.totalTds)}` },
+          { label: 'Net Balance', value: `Rs. ${formatINR(bankKpis.netBalance)}` },
+        ],
         columns: [
           { label: 'DATE', widthPct: 10 },
-          { label: 'PARTY NAME', widthPct: 24 },
-          { label: 'REF / UTR', widthPct: 15 },
-          { label: 'BILL NO', widthPct: 14 },
-          { label: 'NET RECEIVED', widthPct: 13, align: 'right' },
-          { label: 'AUTO TDS', widthPct: 11, align: 'right' },
-          { label: 'BALANCE', widthPct: 13, align: 'right' },
+          { label: 'PARTY NAME / NARRATION', widthPct: 28 },
+          { label: 'MODE / UPI / UTR / CHQ', widthPct: 20 },
+          { label: 'BILL NO', widthPct: 12 },
+          { label: 'NET RECEIVED', widthPct: 10, align: 'right' },
+          { label: 'AUTO TDS', widthPct: 10, align: 'right' },
+          { label: 'BALANCE', widthPct: 10, align: 'right' },
         ],
-        rows: fyReceipts.map((r) => ({
-          line1: [
-            formatDateDDMMYYYY(r.receiptDate),
-            r.partyName,
-            r.referenceNo,
-            r.matchedInvoiceNo || 'Unmatched',
-            formatINR(r.creditAmount),
-            formatINR(r.tdsAmount),
-            formatINR(r.balanceRemaining || 0),
-          ],
-        })),
+        rows: fyReceipts.map((r) => {
+          const refChain = formatReferenceChain({
+            upiRefId: r.upiRefId,
+            utrNo: r.utrNo,
+            chequeNo: r.chequeNo,
+            referenceNo: r.referenceNo,
+          });
+          return {
+            line1: [
+              formatDateDDMMYYYY(r.receiptDate),
+              r.partyName,
+              `${r.paymentMode || 'Bank Transfer'} ${r.upiRefId || r.utrNo || r.chequeNo || r.referenceNo}`,
+              r.matchedInvoiceNo || 'Unmatched',
+              formatINR(r.creditAmount),
+              formatINR(r.tdsAmount),
+              formatINR(r.balanceRemaining || 0),
+            ],
+            line2: [
+              '',
+              r.narration || buildAutomaticNarration({
+                txType: 'Income',
+                partyName: r.partyName,
+                amount: r.creditAmount,
+                paymentMode: r.paymentMode,
+                upiRefId: r.upiRefId,
+                utrNo: r.utrNo,
+                chequeNo: r.chequeNo,
+                referenceNo: r.referenceNo,
+                linkedInvoiceNo: r.matchedInvoiceNo,
+                tdsAmount: r.tdsAmount,
+              }),
+              refChain || '-',
+              r.bankAccountName || '',
+              '',
+              '',
+              '',
+            ],
+          };
+        }),
         totalsLabel: 'TOTAL CREDITS :',
         totalsLine1: ['', '', '', '', formatINR(sumCredit), formatINR(sumTds), formatINR(sumGross)],
         totalAmountForWords: sumGross,
@@ -440,6 +567,34 @@ export const BankReceiptImportModule: React.FC<BankReceiptImportModuleProps> = (
 
   return (
     <div className="space-y-4">
+      {/* Top 4 KPI Summary Badges */}
+      <div className="grid grid-cols-2 lg:grid-cols-4 gap-3">
+        <div className="bg-white rounded-xl border border-blue-200 shadow-sm p-3.5">
+          <p className="text-[11px] font-bold uppercase text-blue-700">Total Billed ({activeFy})</p>
+          <p className="text-lg font-extrabold font-mono-num text-slate-900 mt-0.5">
+            ₹ {formatINR(bankKpis.totalBilled)}
+          </p>
+        </div>
+        <div className="bg-white rounded-xl border border-emerald-200 shadow-sm p-3.5">
+          <p className="text-[11px] font-bold uppercase text-emerald-700">Total Received (Net)</p>
+          <p className="text-lg font-extrabold font-mono-num text-emerald-800 mt-0.5">
+            ₹ {formatINR(bankKpis.totalReceived)}
+          </p>
+        </div>
+        <div className="bg-white rounded-xl border border-amber-200 shadow-sm p-3.5">
+          <p className="text-[11px] font-bold uppercase text-amber-800">Total TDS Deducted</p>
+          <p className="text-lg font-extrabold font-mono-num text-amber-900 mt-0.5">
+            ₹ {formatINR(bankKpis.totalTds)}
+          </p>
+        </div>
+        <div className="bg-white rounded-xl border border-rose-200 shadow-sm p-3.5">
+          <p className="text-[11px] font-bold uppercase text-rose-700">Net Balance Receivable</p>
+          <p className="text-lg font-extrabold font-mono-num text-rose-900 mt-0.5">
+            ₹ {formatINR(bankKpis.netBalance)}
+          </p>
+        </div>
+      </div>
+
       <div className="bg-white rounded-xl border border-slate-200 shadow-sm p-4 sm:p-5 space-y-4">
         <div className="flex flex-wrap items-center justify-between gap-3">
           <div className="flex items-center gap-3">
@@ -451,7 +606,7 @@ export const BankReceiptImportModule: React.FC<BankReceiptImportModuleProps> = (
                 Party-Only Bank Receipt &amp; TDS Auto-Import ({activeFy})
               </h2>
               <p className="text-xs text-slate-600">
-                Upload .xlsx / .csv bank statement. Debit/Withdrawal rows are strictly ignored. Auto-matches pending bills &amp; detects 194C TDS.
+                Upload .xlsx / .csv bank statement. Extracts Payment Mode, UPI Ref ID, UTR No., Cheque No., auto-writes accounting narration &amp; detects 194C TDS.
               </p>
             </div>
           </div>
@@ -544,8 +699,9 @@ export const BankReceiptImportModule: React.FC<BankReceiptImportModuleProps> = (
             <thead>
               <tr className="bg-slate-900 text-white">
                 <th className="p-2.5">Date</th>
-                <th className="p-2.5">Party Name</th>
-                <th className="p-2.5">Cheque / UTR</th>
+                <th className="p-2.5">Party Name &amp; Auto-Narration</th>
+                <th className="p-2.5">Payment Mode</th>
+                <th className="p-2.5">UPI Ref / UTR No. / Cheque No.</th>
                 <th className="p-2.5">Matched Invoice</th>
                 <th className="p-2.5 text-right">Bill Amt</th>
                 <th className="p-2.5 text-right">Net Received</th>
@@ -557,121 +713,181 @@ export const BankReceiptImportModule: React.FC<BankReceiptImportModuleProps> = (
             <tbody>
               {fyReceipts.length === 0 ? (
                 <tr>
-                  <td colSpan={9} className="p-6 text-center text-slate-500">
+                  <td colSpan={10} className="p-6 text-center text-slate-500">
                     No Credit receipts imported for {activeFy}. Upload a bank Excel/CSV above.
                   </td>
                 </tr>
               ) : (
-                fyReceipts.map((rec) => (
-                  <tr key={rec.id} className="border-b border-slate-100 hover:bg-slate-50">
-                    <td className="p-2 font-mono-num whitespace-nowrap">
-                      {formatDateDDMMYYYY(rec.receiptDate)}
-                    </td>
-                    <td className="p-2 min-w-[160px]">
-                      <input
-                        type="text"
-                        disabled={readOnly}
-                        value={rec.partyName}
-                        onChange={(e) =>
-                          void handleUpdateReceiptField(rec, { partyName: e.target.value })
-                        }
-                        className="w-full px-2 py-1 rounded border border-slate-200 bg-white text-xs font-bold"
-                      />
-                    </td>
-                    <td className="p-2 min-w-[115px]">
-                      <input
-                        type="text"
-                        disabled={readOnly}
-                        value={rec.referenceNo}
-                        onChange={(e) =>
-                          void handleUpdateReceiptField(rec, { referenceNo: e.target.value })
-                        }
-                        className="w-full px-2 py-1 rounded border border-slate-200 bg-white text-xs font-mono-num"
-                      />
-                    </td>
-                    <td className="p-2 min-w-[165px]">
-                      <select
-                        disabled={readOnly || rec.appliedToInvoice}
-                        value={rec.matchedInvoiceId || ''}
-                        onChange={(e) =>
-                          void handleUpdateReceiptField(rec, {
-                            matchedInvoiceId: e.target.value || undefined,
-                          })
-                        }
-                        className="w-full px-2 py-1 rounded border border-slate-200 bg-white text-xs font-semibold"
-                      >
-                        <option value="">-- Select Bill --</option>
-                        {fyInvoices.map((inv) => (
-                          <option key={inv.id} value={inv.id}>
-                            {inv.invoiceNo} ({inv.partyName.slice(0, 18)})
-                          </option>
-                        ))}
-                      </select>
-                    </td>
-                    <td className="p-2 text-right font-mono-num">
-                      {formatINR(rec.billAmount || 0)}
-                    </td>
-                    <td className="p-2 text-right">
-                      <input
-                        type="number"
-                        disabled={readOnly || rec.appliedToInvoice}
-                        value={rec.creditAmount}
-                        onChange={(e) =>
-                          void handleUpdateReceiptField(rec, {
-                            creditAmount: Math.max(0, Number(e.target.value || 0)),
-                          })
-                        }
-                        className="w-24 px-2 py-1 rounded border border-slate-200 bg-white text-right font-mono-num font-bold text-emerald-800"
-                      />
-                    </td>
-                    <td className="p-2 text-right">
-                      <input
-                        type="number"
-                        disabled={readOnly || rec.appliedToInvoice}
-                        value={rec.tdsAmount}
-                        onChange={(e) =>
-                          void handleUpdateReceiptField(rec, {
-                            tdsAmount: Math.max(0, Number(e.target.value || 0)),
-                          })
-                        }
-                        className="w-20 px-2 py-1 rounded border border-slate-200 bg-white text-right font-mono-num font-bold text-amber-800"
-                      />
-                    </td>
-                    <td className="p-2 text-right font-mono-num font-bold">
-                      {formatINR(rec.balanceRemaining || 0)}
-                    </td>
-                    <td className="p-2 text-center whitespace-nowrap">
-                      {rec.appliedToInvoice ? (
-                        <span className="inline-flex items-center gap-1 px-2 py-1 rounded bg-emerald-100 text-emerald-900 text-[11px] font-bold">
-                          <CheckCircle2 className="w-3 h-3" /> Posted
-                        </span>
-                      ) : (
-                        <div className="inline-flex items-center gap-1">
-                          {!readOnly && (
-                            <button
-                              type="button"
-                              disabled={!rec.matchedInvoiceId}
-                              onClick={() => void handleApplyToInvoice(rec)}
-                              className="px-2.5 py-1 rounded bg-blue-700 hover:bg-blue-800 disabled:opacity-40 text-white text-[11px] font-bold cursor-pointer"
-                            >
-                              Apply
-                            </button>
-                          )}
-                          {!readOnly && (
-                            <button
-                              type="button"
-                              onClick={() => setDeleteTarget(rec)}
-                              className="p-1 rounded text-red-600 hover:bg-red-50 cursor-pointer"
-                              title="Delete Row"
-                            >
-                              <Trash2 className="w-3.5 h-3.5" />
-                            </button>
-                          )}
-                        </div>
-                      )}
-                    </td>
-                  </tr>
-                ))
+                fyReceipts.map((rec) => {
+                  const autoNarrationText =
+                    rec.narration ||
+                    buildAutomaticNarration({
+                      txType: 'Income',
+                      partyName: rec.partyName,
+                      amount: rec.creditAmount,
+                      paymentMode: rec.paymentMode || 'Bank Transfer',
+                      upiRefId: rec.upiRefId,
+                      utrNo: rec.utrNo,
+                      chequeNo: rec.chequeNo,
+                      referenceNo: rec.referenceNo,
+                      linkedInvoiceNo: rec.matchedInvoiceNo,
+                      bankAccountName: rec.bankAccountName,
+                      tdsAmount: rec.tdsAmount,
+                    });
+                  return (
+                    <tr key={rec.id} className="border-b border-slate-100 hover:bg-slate-50 align-top">
+                      <td className="p-2 font-mono-num whitespace-nowrap">
+                        {formatDateDDMMYYYY(rec.receiptDate)}
+                      </td>
+                      <td className="p-2 min-w-[210px] space-y-1">
+                        <input
+                          type="text"
+                          disabled={readOnly}
+                          value={rec.partyName}
+                          onChange={(e) =>
+                            void handleUpdateReceiptField(rec, { partyName: e.target.value })
+                          }
+                          className="w-full px-2 py-1 rounded border border-slate-200 bg-white text-xs font-bold"
+                        />
+                        <p className="text-[10px] text-slate-600 leading-snug">
+                          {autoNarrationText}
+                        </p>
+                      </td>
+                      <td className="p-2 min-w-[115px]">
+                        <select
+                          aria-label="Payment Mode"
+                          disabled={readOnly || rec.appliedToInvoice}
+                          value={rec.paymentMode || 'NEFT'}
+                          onChange={(e) =>
+                            void handleUpdateReceiptField(rec, { paymentMode: e.target.value })
+                          }
+                          className="w-full px-2 py-1 rounded border border-slate-200 bg-white text-xs font-bold"
+                        >
+                          <option value="UPI">UPI</option>
+                          <option value="NEFT">NEFT</option>
+                          <option value="RTGS">RTGS</option>
+                          <option value="Cheque">Cheque</option>
+                          <option value="Cash">Cash</option>
+                          <option value="Advance">Advance</option>
+                          <option value="Bank Transfer">Bank Transfer</option>
+                        </select>
+                      </td>
+                      <td className="p-2 min-w-[185px] space-y-1">
+                        <input
+                          type="text"
+                          disabled={readOnly}
+                          value={rec.upiRefId || ''}
+                          onChange={(e) =>
+                            void handleUpdateReceiptField(rec, { upiRefId: e.target.value })
+                          }
+                          placeholder="UPI Ref ID"
+                          className="w-full px-2 py-0.5 rounded border border-slate-200 bg-white text-[11px] font-mono-num"
+                        />
+                        <input
+                          type="text"
+                          disabled={readOnly}
+                          value={rec.utrNo || ''}
+                          onChange={(e) =>
+                            void handleUpdateReceiptField(rec, { utrNo: e.target.value })
+                          }
+                          placeholder="UTR No."
+                          className="w-full px-2 py-0.5 rounded border border-slate-200 bg-white text-[11px] font-mono-num"
+                        />
+                        <input
+                          type="text"
+                          disabled={readOnly}
+                          value={rec.chequeNo || ''}
+                          onChange={(e) =>
+                            void handleUpdateReceiptField(rec, { chequeNo: e.target.value })
+                          }
+                          placeholder="Cheque No."
+                          className="w-full px-2 py-0.5 rounded border border-slate-200 bg-white text-[11px] font-mono-num"
+                        />
+                      </td>
+                      <td className="p-2 min-w-[165px]">
+                        <select
+                          disabled={readOnly || rec.appliedToInvoice}
+                          value={rec.matchedInvoiceId || ''}
+                          onChange={(e) =>
+                            void handleUpdateReceiptField(rec, {
+                              matchedInvoiceId: e.target.value || undefined,
+                            })
+                          }
+                          className="w-full px-2 py-1 rounded border border-slate-200 bg-white text-xs font-semibold"
+                        >
+                          <option value="">-- Select Bill --</option>
+                          {fyInvoices.map((inv) => (
+                            <option key={inv.id} value={inv.id}>
+                              {inv.invoiceNo} ({inv.partyName.slice(0, 18)})
+                            </option>
+                          ))}
+                        </select>
+                      </td>
+                      <td className="p-2 text-right font-mono-num">
+                        {formatINR(rec.billAmount || 0)}
+                      </td>
+                      <td className="p-2 text-right">
+                        <input
+                          type="number"
+                          disabled={readOnly || rec.appliedToInvoice}
+                          value={rec.creditAmount}
+                          onChange={(e) =>
+                            void handleUpdateReceiptField(rec, {
+                              creditAmount: Math.max(0, Number(e.target.value || 0)),
+                            })
+                          }
+                          className="w-24 px-2 py-1 rounded border border-slate-200 bg-white text-right font-mono-num font-bold text-emerald-800"
+                        />
+                      </td>
+                      <td className="p-2 text-right">
+                        <input
+                          type="number"
+                          disabled={readOnly || rec.appliedToInvoice}
+                          value={rec.tdsAmount}
+                          onChange={(e) =>
+                            void handleUpdateReceiptField(rec, {
+                              tdsAmount: Math.max(0, Number(e.target.value || 0)),
+                            })
+                          }
+                          className="w-20 px-2 py-1 rounded border border-slate-200 bg-white text-right font-mono-num font-bold text-amber-800"
+                        />
+                      </td>
+                      <td className="p-2 text-right font-mono-num font-bold">
+                        {formatINR(rec.balanceRemaining || 0)}
+                      </td>
+                      <td className="p-2 text-center whitespace-nowrap">
+                        {rec.appliedToInvoice ? (
+                          <span className="inline-flex items-center gap-1 px-2 py-1 rounded bg-emerald-100 text-emerald-900 text-[11px] font-bold">
+                            <CheckCircle2 className="w-3 h-3" /> Posted
+                          </span>
+                        ) : (
+                          <div className="inline-flex items-center gap-1">
+                            {!readOnly && (
+                              <button
+                                type="button"
+                                disabled={!rec.matchedInvoiceId}
+                                onClick={() => void handleApplyToInvoice(rec)}
+                                className="px-2.5 py-1 rounded bg-blue-700 hover:bg-blue-800 disabled:opacity-40 text-white text-[11px] font-bold cursor-pointer"
+                              >
+                                Apply
+                              </button>
+                            )}
+                            {!readOnly && (
+                              <button
+                                type="button"
+                                onClick={() => setDeleteTarget(rec)}
+                                className="p-1 rounded text-red-600 hover:bg-red-50 cursor-pointer"
+                                title="Delete Row"
+                              >
+                                <Trash2 className="w-3.5 h-3.5" />
+                              </button>
+                            )}
+                          </div>
+                        )}
+                      </td>
+                    </tr>
+                  );
+                })
               )}
             </tbody>
           </table>

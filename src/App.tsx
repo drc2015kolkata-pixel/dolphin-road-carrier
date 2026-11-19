@@ -107,10 +107,13 @@ import {
 import {
   registerManagedBlobUrl,
   revokeThermalMemoryCooledUrls,
+  runDailyLocalJunkCleanup,
   runSystemAutoFixAndClean,
   shouldRun90DayMaintenance,
+  shouldRunDailyJunkCleanup,
 } from './lib/selfHealing';
 import { useOnlineStatus, usePWAInstall } from './hooks/usePWAInstall';
+import { DEFAULT_BHOLE_BABA_IMAGE, DEFAULT_KHATU_SHYAM_IMAGE } from './lib/sacredDefaults';
 import { ErrorBoundary } from './components/ErrorBoundary';
 import { DrcTriangleLogo } from './components/DrcTriangleLogo';
 import { SignInScreen } from './components/SignInScreen';
@@ -223,11 +226,14 @@ export default function App() {
   const [unlocking, setUnlocking] = useState(false);
   const lastActivityRef = useRef<number>(Date.now());
 
-  // Multi-tab Sheet Bar + Back Navigation History + Sidebar UI
+  // Multi-tab Sheet Bar + Back Navigation History + Default-Collapsed Sidebar + FY Lock UI
   const [openTabs, setOpenTabs] = useState<SheetTabDef[]>([{ id: 'dashboard', label: 'Dashboard' }]);
   const [activeTab, setActiveTab] = useState<SheetTabId>('dashboard');
   const [tabHistory, setTabHistory] = useState<SheetTabId[]>([]);
-  const [mobileMenuOpen, setMobileMenuOpen] = useState(false);
+  const [sidebarOpen, setSidebarOpen] = useState(false);
+  const [fyLocked, setFyLocked] = useState(true);
+  const [bholeImgFailed, setBholeImgFailed] = useState(false);
+  const [shyamImgFailed, setShyamImgFailed] = useState(false);
   const [notifOpen, setNotifOpen] = useState(false);
   const [liveMonitorOpen, setLiveMonitorOpen] = useState(false);
   const [iosGuideOpen, setIosGuideOpen] = useState(false);
@@ -297,8 +303,11 @@ export default function App() {
     }
   }, [isOnline, erpSession]);
 
-  // 90-day self-healing maintenance & Ctrl+K global search shortcut
+  // 90-day self-healing maintenance, daily scratch junk cleanup & Ctrl+K global search shortcut
   useEffect(() => {
+    if (erpSession && shouldRunDailyJunkCleanup()) {
+      runDailyLocalJunkCleanup();
+    }
     if (erpSession && shouldRun90DayMaintenance()) {
       runSystemAutoFixAndClean({
         parties,
@@ -312,6 +321,8 @@ export default function App() {
         e.preventDefault();
         setSearchDropdownOpen(true);
         globalSearchInputRef.current?.focus();
+      } else if (e.key === 'Escape') {
+        setSidebarOpen(false);
       }
     };
     window.addEventListener('keydown', onKeyDown);
@@ -478,8 +489,16 @@ export default function App() {
   );
 
   useEffect(() => {
-    document.title = `Dolphin Road Carriers ERP | ACTIVE SEASON: ${activeFy}`;
+    document.title = `Dolphin Road Carriers ERP | FINANCIAL YEAR: ${activeFy.replace(/^FY\s+/i, '')}`;
   }, [activeFy]);
+
+  useEffect(() => {
+    setBholeImgFailed(false);
+  }, [companySettings.bholeBabaPhotoDataUrl]);
+
+  useEffect(() => {
+    setShyamImgFailed(false);
+  }, [companySettings.khatuShyamPhotoDataUrl]);
 
   const fyChoices = useMemo(() => {
     const set = new Set<string>([
@@ -741,7 +760,7 @@ export default function App() {
         return [...prev, { id: tabId, label: TAB_LABELS[tabId] }];
       });
       setActiveTab(tabId);
-      setMobileMenuOpen(false);
+      setSidebarOpen(false);
     },
     [activeTab]
   );
@@ -779,6 +798,8 @@ export default function App() {
       setErpSession(session);
       setActiveStaffSession(session.staffAccount);
       setIsScreenLocked(false);
+      setSidebarOpen(false);
+      setFyLocked(true);
       setBranchFilter('ALL');
       setOpenTabs([{ id: 'dashboard', label: 'Dashboard' }]);
       setActiveTab('dashboard');
@@ -797,6 +818,8 @@ export default function App() {
       setErpSession(session);
       setActiveStaffSession(null);
       setIsScreenLocked(false);
+      setSidebarOpen(false);
+      setFyLocked(true);
       setBranchFilter('ALL');
       setOpenTabs([{ id: 'dashboard', label: 'Dashboard' }]);
       setActiveTab('dashboard');
@@ -1189,184 +1212,160 @@ export default function App() {
     ? `${activeStaffSession.displayName} (${activeStaffSession.staffCode})`
     : `${erpSession.displayName} (${erpSession.userId})`;
 
+  const activeFyShort = activeFy.replace(/^FY\s+/i, '');
+  const bholeBabaSrc = companySettings.bholeBabaPhotoDataUrl || DEFAULT_BHOLE_BABA_IMAGE;
+  const khatuShyamSrc = companySettings.khatuShyamPhotoDataUrl || DEFAULT_KHATU_SHYAM_IMAGE;
+
   return (
     <ErrorBoundary>
       <div className="min-h-screen flex flex-col bg-[#E2E8F0] text-slate-900 select-none">
-      {/* Desktop ERP Top Window Title Strip with Active Season & Cloud Sync Pill */}
-      <div className="bg-[#EFF6FF] border-b border-blue-200 px-3 py-1 flex flex-wrap items-center justify-between gap-2 text-[11px] text-slate-800 font-semibold no-print">
-        <div className="flex items-center gap-2 truncate">
-          <Truck className="w-3.5 h-3.5 text-[#0D47A1] shrink-0" />
-          <span className="truncate font-bold text-[#0D47A1]">
-            ACTIVE SEASON: {activeFy}
-          </span>
-          <span className="hidden sm:inline text-slate-500">
-            · Cargo &amp; Logistics ERP — {companySettings.companyName}
-          </span>
-        </div>
-        <div className="flex items-center gap-2.5 shrink-0">
-          {!isOnline ? (
-            <span className="inline-flex items-center gap-1 px-2 py-0.5 rounded bg-red-600 text-white font-bold">
-              <WifiOff className="w-3 h-3" />
-              Offline Saved — Queued ({offlineSyncStatus.pendingCount})
-            </span>
-          ) : offlineSyncStatus.pendingCount > 0 ? (
+      {/* Flush Sticky Top Header Bar */}
+      <header className="sticky top-0 z-30 bg-white border-b border-slate-300 px-2.5 md:px-4 py-2 shadow-sm no-print space-y-1.5">
+        {/* Row 1: Left Controls & Brand | Top-Center Sacred Frames | Right Locked FY & Utilities */}
+        <div className="flex flex-wrap items-center justify-between gap-2 md:gap-3">
+          {/* Left: Top-Left Collapsible Sidebar Toggle, Back Button & 24K Gold Triangular DRC Brand */}
+          <div className="flex items-center gap-2 shrink-0">
             <button
               type="button"
-              onClick={() => void flushOfflineSyncQueue()}
-              className="inline-flex items-center gap-1 px-2 py-0.5 rounded bg-amber-600 text-white font-bold cursor-pointer"
+              onClick={() => setSidebarOpen((v) => !v)}
+              className="inline-flex items-center gap-1.5 px-2.5 py-1.5 rounded-lg bg-[#0D47A1] hover:bg-[#0A3882] text-white text-xs font-extrabold shadow-sm cursor-pointer shrink-0"
+              aria-expanded={sidebarOpen}
+              aria-label="Toggle Menu Sidebar"
+              title={sidebarOpen ? 'Hide Navigation Sidebar' : 'Open Navigation Sidebar'}
             >
-              <RefreshCw className="w-3 h-3 animate-spin" />
-              Syncing {offlineSyncStatus.pendingCount} Offline Record(s)...
-            </button>
-          ) : (
-            <span className="inline-flex items-center gap-1 px-2 py-0.5 rounded bg-emerald-100 text-emerald-900 font-bold">
-              <Cloud className="w-3 h-3 text-emerald-700" />
-              Cloud &amp; Drive Live Synced
-            </span>
-          )}
-          <span className="hidden md:inline text-slate-600">
-            PAN: {companySettings.pan} · GSTIN: {companySettings.gstin}
-          </span>
-        </div>
-      </div>
-
-      {/* Main White/Blue Unified Master Header */}
-      <header className="bg-white border-b border-slate-200 px-3 md:px-5 py-2.5 shadow-sm no-print space-y-2">
-        <div className="flex flex-wrap items-center justify-between gap-3">
-          {/* Left: Back Button, Menu & 24K Gold Triangular DRC Brand */}
-          <div className="flex items-center gap-2.5">
-            <button
-              type="button"
-              onClick={() => setMobileMenuOpen((v) => !v)}
-              className="lg:hidden p-2 rounded-lg border border-slate-200 text-slate-700 hover:bg-slate-100 cursor-pointer"
-              aria-label="Toggle navigation"
-            >
-              <Menu className="w-5 h-5" />
+              {sidebarOpen ? <X className="w-4 h-4" /> : <Menu className="w-4 h-4" />}
+              <span className="hidden sm:inline whitespace-nowrap">Menu</span>
             </button>
             <button
               type="button"
               onClick={handleGoBack}
               disabled={tabHistory.length === 0 && activeTab === 'dashboard'}
-              className="inline-flex items-center gap-1 px-2.5 py-1.5 rounded-lg border border-slate-300 bg-slate-50 hover:bg-slate-200 text-slate-800 text-xs font-extrabold cursor-pointer disabled:opacity-40"
+              className="inline-flex items-center gap-1 px-2.5 py-1.5 rounded-lg border border-slate-300 bg-slate-50 hover:bg-slate-200 text-slate-800 text-xs font-extrabold cursor-pointer disabled:opacity-40 whitespace-nowrap shrink-0"
               title="Go Back to Previous Screen"
             >
               <ArrowLeft className="w-3.5 h-3.5" />
               <span>Back</span>
             </button>
-            <DrcTriangleLogo className="w-10 h-10 shrink-0" />
-            <div>
-              <h1 className="text-lg md:text-xl font-extrabold tracking-tight text-[#0B3B8C] leading-none">
+            <DrcTriangleLogo className="w-9 h-9 md:w-10 md:h-10 shrink-0" />
+            <div className="min-w-0">
+              <h1 className="text-sm sm:text-base md:text-lg font-extrabold tracking-tight text-[#0B3B8C] leading-none whitespace-nowrap">
                 DOLPHIN ROAD CARRIERS
               </h1>
-              <p className="text-[11px] md:text-xs font-bold italic text-[#1565C0] mt-0.5">
+              <p className="text-[10px] md:text-[11px] font-bold italic text-[#1565C0] mt-0.5 truncate">
                 {companySettings.tagline || 'Fast · Safe · Reliable'}
               </p>
             </div>
           </div>
 
-          {/* Center: Universal Dropdown Search (Ctrl+K) */}
-          <div className="relative flex-1 min-w-[240px] max-w-md order-last lg:order-none">
-            <div className="relative">
-              <Search className="w-4 h-4 text-slate-500 absolute left-3 top-2.5" />
-              <input
-                ref={globalSearchInputRef}
-                type="text"
-                value={globalSearch}
-                onFocus={() => setSearchDropdownOpen(true)}
-                onBlur={() => setTimeout(() => setSearchDropdownOpen(false), 180)}
-                onChange={(e) => {
-                  setGlobalSearch(e.target.value);
-                  setSearchDropdownOpen(true);
-                }}
-                placeholder="Universal Search (Ctrl+K): Bill 101, CN, Quotation, Truck..."
-                className="w-full pl-9 pr-14 py-2 rounded-lg border border-slate-300 bg-slate-50 focus:bg-white text-xs font-semibold text-slate-900 focus:outline-none focus:ring-2 focus:ring-blue-600"
-              />
-              {globalSearch ? (
-                <button
-                  type="button"
-                  onClick={() => setGlobalSearch('')}
-                  className="absolute right-2.5 top-2 text-slate-500 hover:text-slate-800 cursor-pointer"
-                  aria-label="Clear search"
-                >
-                  <X className="w-4 h-4" />
-                </button>
-              ) : (
-                <kbd className="hidden sm:inline-block absolute right-2.5 top-2 px-1.5 py-0.5 rounded bg-white border border-slate-300 text-[10px] font-mono-num text-slate-600">
-                  Ctrl+K
-                </kbd>
-              )}
-            </div>
-
-            {searchDropdownOpen && globalSearch.trim().length > 0 && (
-              <div className="absolute left-0 right-0 mt-1.5 bg-white rounded-xl border border-slate-300 shadow-2xl z-50 max-h-80 overflow-y-auto divide-y divide-slate-100">
-                {universalSearchResults.length === 0 ? (
-                  <p className="p-3.5 text-xs text-slate-500 text-center">
-                    No matching Bills, CNs, Quotations, Vehicles, or Screens for &ldquo;{globalSearch}&rdquo;.
-                  </p>
+          {/* Top-Center: Two Compact Sacred Blessing Frames (Bhole Baba & Khatu Shyam Ji) */}
+          <div
+            className="flex items-center justify-center gap-2.5 mx-auto shrink-0"
+            aria-label="Sacred Blessing Frames"
+          >
+            <div className="flex flex-col items-center">
+              <div className="p-0.5 rounded-lg bg-gradient-to-b from-amber-300 via-yellow-500 to-amber-700 shadow-sm">
+                {bholeImgFailed ? (
+                  <div className="w-9 h-9 sm:w-11 sm:h-11 rounded-[5px] bg-amber-50 flex items-center justify-center text-amber-800 font-extrabold text-[10px]">
+                    ॐ शिव
+                  </div>
                 ) : (
-                  universalSearchResults.map((item) => (
-                    <button
-                      key={item.id}
-                      type="button"
-                      onMouseDown={(e) => {
-                        e.preventDefault();
-                        setSearchDropdownOpen(false);
-                        setGlobalSearch('');
-                        void item.onSelect();
-                      }}
-                      className="w-full text-left px-3.5 py-2.5 hover:bg-blue-50 flex items-center justify-between gap-2 cursor-pointer"
-                    >
-                      <div className="min-w-0">
-                        <p className="text-xs font-bold text-slate-900 truncate">{item.title}</p>
-                        <p className="text-[11px] text-slate-600 truncate">{item.subtitle}</p>
-                      </div>
-                      <span className="px-2 py-0.5 rounded bg-[#0D47A1] text-white text-[10px] font-extrabold shrink-0">
-                        {item.badge}
-                      </span>
-                    </button>
-                  ))
+                  <img
+                    src={bholeBabaSrc}
+                    alt="Bhole Baba (Lord Shiva) with raised blessing hand"
+                    referrerPolicy="no-referrer"
+                    onError={() => setBholeImgFailed(true)}
+                    className="w-9 h-9 sm:w-11 sm:h-11 rounded-[5px] object-cover bg-amber-50 block"
+                  />
                 )}
               </div>
-            )}
-          </div>
-
-          {/* Right Utility Strip */}
-          <div className="flex flex-wrap items-center gap-2 md:gap-2.5">
-            {/* Location & Clock */}
-            <div className="hidden 2xl:flex items-center gap-3 text-xs font-semibold text-slate-700 bg-slate-50 border border-slate-200 px-3 py-1.5 rounded-lg">
-              <span className="inline-flex items-center gap-1 text-[#0D47A1]">
-                <MapPin className="w-3.5 h-3.5" />
-                Kolkata - India
-              </span>
-              <span className="text-slate-300">|</span>
-              <span className="inline-flex items-center gap-1 font-mono-num">
-                <CalendarClock className="w-3.5 h-3.5 text-[#1565C0]" />
-                {formattedClock}
+              <span className="text-[9px] sm:text-[10px] font-extrabold text-amber-900 leading-tight mt-0.5 whitespace-nowrap">
+                Bhole Baba
               </span>
             </div>
 
-            {/* Financial Year Dropdown Selector */}
-            <div className="inline-flex items-center gap-1.5 bg-indigo-50 border border-indigo-200 px-2.5 py-1 rounded-lg text-[11px] font-bold text-indigo-900">
-              <Calendar className="w-3.5 h-3.5 text-indigo-700" />
-              <select
-                value={activeFy}
-                onChange={(e) => handleSelectFy(e.target.value)}
-                className="bg-transparent font-bold text-indigo-900 focus:outline-none cursor-pointer"
-                aria-label="Select Financial Year"
+            <div className="flex flex-col items-center">
+              <div className="p-0.5 rounded-lg bg-gradient-to-b from-amber-300 via-yellow-500 to-amber-700 shadow-sm">
+                {shyamImgFailed ? (
+                  <div className="w-9 h-9 sm:w-11 sm:h-11 rounded-[5px] bg-amber-50 flex items-center justify-center text-amber-800 font-extrabold text-[10px]">
+                    श्याम
+                  </div>
+                ) : (
+                  <img
+                    src={khatuShyamSrc}
+                    alt="Khatu Shyam Ji with raised blessing hand"
+                    referrerPolicy="no-referrer"
+                    onError={() => setShyamImgFailed(true)}
+                    className="w-9 h-9 sm:w-11 sm:h-11 rounded-[5px] object-cover bg-amber-50 block"
+                  />
+                )}
+              </div>
+              <span className="text-[9px] sm:text-[10px] font-extrabold text-amber-900 leading-tight mt-0.5 whitespace-nowrap">
+                Khatu Shyam Ji
+              </span>
+            </div>
+          </div>
+
+          {/* Right Utility Strip: High-Contrast Active FY Badge + Padlock, Branch, Sync & Quick Controls */}
+          <div className="flex flex-wrap items-center justify-end gap-1.5 md:gap-2 shrink-0">
+            {/* High-Contrast Active Financial Year Badge (Locked by Default with Padlock Toggle) */}
+            <div
+              className="inline-flex items-center gap-1.5 rounded-lg bg-[#0B3B8C] border-2 border-amber-400 px-2.5 py-1 text-white shadow-sm shrink-0"
+              role="group"
+              aria-label="Active Financial Year Control"
+            >
+              <Calendar className="w-3.5 h-3.5 text-amber-300 shrink-0" />
+              <span className="text-[10px] sm:text-[11px] font-extrabold tracking-wide text-amber-200 whitespace-nowrap">
+                FINANCIAL YEAR:
+              </span>
+              {fyLocked ? (
+                <span className="text-xs font-extrabold font-mono-num text-white whitespace-nowrap">
+                  {activeFyShort}
+                </span>
+              ) : (
+                <select
+                  value={activeFy}
+                  onChange={(e) => {
+                    handleSelectFy(e.target.value);
+                    setFyLocked(true);
+                  }}
+                  aria-label="Select Financial Year"
+                  className="bg-[#082A66] border border-amber-300 rounded px-1.5 py-0.5 text-xs font-extrabold font-mono-num text-amber-200 focus:outline-none cursor-pointer"
+                >
+                  {fyChoices.map((fy) => (
+                    <option key={fy} value={fy} className="bg-[#0B3B8C] text-white">
+                      {fy.replace(/^FY\s+/i, '')}
+                    </option>
+                  ))}
+                </select>
+              )}
+              <button
+                type="button"
+                onClick={() => setFyLocked((prev) => !prev)}
+                aria-label={
+                  fyLocked
+                    ? 'Locked — click to unlock Financial Year selector'
+                    : 'Unlocked — select Financial Year or click to lock'
+                }
+                title={
+                  fyLocked
+                    ? 'Financial Year Locked by default — Click to unlock (🔓) to switch season'
+                    : 'Unlocked — Select season (auto-locks on change) or click to lock'
+                }
+                className={`inline-flex items-center gap-1 px-2 py-0.5 rounded text-[11px] font-extrabold transition-colors cursor-pointer whitespace-nowrap shrink-0 ${
+                  fyLocked
+                    ? 'bg-amber-400 text-slate-950 hover:bg-amber-300'
+                    : 'bg-emerald-400 text-slate-950 hover:bg-emerald-300'
+                }`}
               >
-                {fyChoices.map((fy) => (
-                  <option key={fy} value={fy}>
-                    {fy}
-                  </option>
-                ))}
-              </select>
+                <span>{fyLocked ? '🔒 Locked' : '🔓'}</span>
+              </button>
             </div>
 
             {/* Branch Isolation / Master Filter Control */}
-            <div className="inline-flex items-center gap-1.5 bg-blue-50 border border-blue-200 px-2.5 py-1 rounded-lg text-[11px] font-bold text-[#0D47A1]">
-              <GitBranch className="w-3.5 h-3.5" />
+            <div className="inline-flex items-center gap-1 bg-blue-50 border border-blue-200 px-2 py-1 rounded-lg text-[11px] font-bold text-[#0D47A1] shrink-0">
+              <GitBranch className="w-3.5 h-3.5 shrink-0" />
               {isBranchLocked ? (
-                <span>Branch: {effectiveBranchFilter}</span>
+                <span className="whitespace-nowrap">Branch: {effectiveBranchFilter}</span>
               ) : (
                 <select
                   value={branchFilter}
@@ -1383,91 +1382,25 @@ export default function App() {
               )}
             </div>
 
-            {/* Exit Staff Preview back to Master Admin */}
-            {isMasterAdmin && activeStaffSession && (
-              <button
-                type="button"
-                onClick={() => setActiveStaffSession(null)}
-                className="inline-flex items-center gap-1 px-2.5 py-1.5 rounded-lg bg-amber-500 hover:bg-amber-600 text-white text-[11px] font-bold cursor-pointer whitespace-nowrap"
-                title="Exit Staff Preview and restore Master Admin controls"
-              >
-                <ShieldCheck className="w-3.5 h-3.5" />
-                <span>Restore Admin</span>
-              </button>
-            )}
-
-            {/* Live Concurrent Staff & Activity Log Badge */}
-            <button
-              type="button"
-              onClick={() => setLiveMonitorOpen((v) => !v)}
-              className="inline-flex items-center gap-1.5 px-2.5 py-1.5 rounded-lg border border-emerald-200 bg-emerald-50 hover:bg-emerald-100 text-emerald-800 text-[11px] font-bold cursor-pointer whitespace-nowrap"
-              title="View live online branch staff & real-time activity feed"
-            >
-              <Radio className="w-3.5 h-3.5 text-emerald-600 animate-pulse" />
-              <span>Online: {Math.max(1, activeOnlineStaff.length)}</span>
-            </button>
-
-            {/* Red Alert Badges */}
-            <button
-              type="button"
-              onClick={() => {
-                setMasterInitialTab('vehicles');
-                setMasterFocusNonce((n) => n + 1);
-                openOrSwitchTab('master');
-              }}
-              className={`inline-flex items-center gap-1 px-2.5 py-1.5 rounded-lg text-[11px] font-bold transition-colors cursor-pointer whitespace-nowrap ${
-                alerts.failedVehicles.length > 0
-                  ? 'bg-red-600 text-white hover:bg-red-700 shadow-sm'
-                  : 'bg-slate-100 text-slate-700 hover:bg-slate-200'
-              }`}
-              title="Vehicles with expired Fitness, Insurance, Permit or PUC"
-            >
-              <AlertTriangle className="w-3.5 h-3.5" />
-              Failed Vehicles: {alerts.failedVehicles.length}
-            </button>
-
-            <button
-              type="button"
-              onClick={() => {
-                setMasterInitialTab('drivers');
-                setMasterFocusNonce((n) => n + 1);
-                openOrSwitchTab('master');
-              }}
-              className={`inline-flex items-center gap-1 px-2.5 py-1.5 rounded-lg text-[11px] font-bold transition-colors cursor-pointer whitespace-nowrap ${
-                alerts.failedDrivers.length > 0
-                  ? 'bg-red-600 text-white hover:bg-red-700 shadow-sm'
-                  : 'bg-slate-100 text-slate-700 hover:bg-slate-200'
-              }`}
-              title="Drivers with expired Driving Licenses"
-            >
-              <UserX className="w-3.5 h-3.5" />
-              Failed Driver Licenses: {alerts.failedDrivers.length}
-            </button>
-
-            <button
-              type="button"
-              onClick={() => {
-                setReportInitialTab('aging');
-                setReportFocusNonce((n) => n + 1);
-                openOrSwitchTab('reports');
-              }}
-              className={`inline-flex items-center gap-1 px-2.5 py-1.5 rounded-lg text-[11px] font-bold transition-colors cursor-pointer whitespace-nowrap ${
-                alerts.overdueInvoices.length > 0
-                  ? 'bg-red-600 text-white hover:bg-red-700 shadow-sm'
-                  : 'bg-slate-100 text-slate-700 hover:bg-slate-200'
-              }`}
-              title="Party bills overdue beyond 7 days"
-            >
-              <ShieldAlert className="w-3.5 h-3.5" />
-              Overdue Payments: {alerts.overdueInvoices.length}
-            </button>
+            {/* Location & Clock on Wide Desktop */}
+            <div className="hidden 2xl:flex items-center gap-2 text-xs font-semibold text-slate-700 bg-slate-50 border border-slate-200 px-2.5 py-1 rounded-lg shrink-0">
+              <span className="inline-flex items-center gap-1 text-[#0D47A1]">
+                <MapPin className="w-3.5 h-3.5" />
+                Kolkata
+              </span>
+              <span className="text-slate-300">|</span>
+              <span className="inline-flex items-center gap-1 font-mono-num">
+                <CalendarClock className="w-3.5 h-3.5 text-[#1565C0]" />
+                {formattedClock}
+              </span>
+            </div>
 
             {/* Notification Bell */}
-            <div className="relative">
+            <div className="relative shrink-0">
               <button
                 type="button"
                 onClick={() => setNotifOpen((v) => !v)}
-                className="relative p-2 rounded-lg border border-slate-200 bg-white hover:bg-slate-100 text-slate-700 cursor-pointer"
+                className="relative p-1.5 rounded-lg border border-slate-200 bg-white hover:bg-slate-100 text-slate-700 cursor-pointer"
                 aria-label="Compliance and Payment Notifications"
               >
                 <Bell className="w-4 h-4" />
@@ -1578,7 +1511,7 @@ export default function App() {
                 setUnlockError(null);
                 setIsScreenLocked(true);
               }}
-              className="inline-flex items-center gap-1 px-2.5 py-1.5 rounded-lg border border-slate-200 bg-white hover:bg-slate-100 text-slate-700 text-xs font-semibold cursor-pointer"
+              className="inline-flex items-center gap-1 px-2.5 py-1.5 rounded-lg border border-slate-200 bg-white hover:bg-slate-100 text-slate-700 text-xs font-semibold cursor-pointer shrink-0"
               title="Lock Session Screen Immediately"
             >
               <Lock className="w-3.5 h-3.5 text-amber-700" />
@@ -1589,7 +1522,7 @@ export default function App() {
             <button
               type="button"
               onClick={handleRefreshApp}
-              className="inline-flex items-center gap-1 px-2.5 py-1.5 rounded-lg border border-slate-200 bg-white hover:bg-slate-100 text-slate-700 text-xs font-semibold cursor-pointer"
+              className="inline-flex items-center gap-1 px-2.5 py-1.5 rounded-lg border border-slate-200 bg-white hover:bg-slate-100 text-slate-700 text-xs font-semibold cursor-pointer shrink-0"
               title="Refresh App & Sync Latest PWA Build"
             >
               <RefreshCw className="w-3.5 h-3.5 text-blue-700" />
@@ -1608,113 +1541,290 @@ export default function App() {
                     setIosGuideOpen(true);
                   }
                 }}
-                className="inline-flex items-center gap-1 px-3 py-1.5 rounded-lg bg-emerald-600 hover:bg-emerald-700 text-white text-xs font-bold cursor-pointer whitespace-nowrap"
+                className="inline-flex items-center gap-1 px-2.5 py-1.5 rounded-lg bg-emerald-600 hover:bg-emerald-700 text-white text-xs font-bold cursor-pointer whitespace-nowrap shrink-0"
                 title="Install Dolphin Road Carriers ERP on Android or Windows PC"
               >
                 <Download className="w-3.5 h-3.5" />
-                Install App
+                <span>Install App</span>
               </button>
             )}
           </div>
         </div>
 
-        {/* Quick Jump & Rectify Navigation Bar */}
-        <div className="flex flex-wrap items-center gap-1.5 pt-1.5 border-t border-slate-100 text-[11px] font-bold">
-          <span className="text-slate-500 mr-1">Quick Jump:</span>
-          {hasPermission('lr') && (
+        {/* Row 2: Universal Search (Ctrl+K), Quick Jump Navigation, Live Alerts & Cloud Sync */}
+        <div className="flex flex-wrap items-center justify-between gap-2 pt-1.5 border-t border-slate-100 text-[11px] font-bold">
+          <div className="flex flex-wrap items-center gap-1.5">
+            {/* Compact Universal Search (Ctrl+K) */}
+            <div className="relative w-56 sm:w-72">
+              <div className="relative">
+                <Search className="w-3.5 h-3.5 text-slate-500 absolute left-2.5 top-2" />
+                <input
+                  ref={globalSearchInputRef}
+                  type="text"
+                  value={globalSearch}
+                  onFocus={() => setSearchDropdownOpen(true)}
+                  onBlur={() => setTimeout(() => setSearchDropdownOpen(false), 180)}
+                  onChange={(e) => {
+                    setGlobalSearch(e.target.value);
+                    setSearchDropdownOpen(true);
+                  }}
+                  placeholder="Search (Ctrl+K): Bill, CN, Quote..."
+                  className="w-full pl-8 pr-12 py-1.5 rounded-lg border border-slate-300 bg-slate-50 focus:bg-white text-xs font-semibold text-slate-900 focus:outline-none focus:ring-2 focus:ring-blue-600"
+                />
+                {globalSearch ? (
+                  <button
+                    type="button"
+                    onClick={() => setGlobalSearch('')}
+                    className="absolute right-2 top-1.5 text-slate-500 hover:text-slate-800 cursor-pointer"
+                    aria-label="Clear search"
+                  >
+                    <X className="w-3.5 h-3.5" />
+                  </button>
+                ) : (
+                  <kbd className="hidden sm:inline-block absolute right-2 top-1.5 px-1 py-0.2 rounded bg-white border border-slate-300 text-[9px] font-mono-num text-slate-600">
+                    Ctrl+K
+                  </kbd>
+                )}
+              </div>
+
+              {searchDropdownOpen && globalSearch.trim().length > 0 && (
+                <div className="absolute left-0 right-0 mt-1.5 bg-white rounded-xl border border-slate-300 shadow-2xl z-50 max-h-80 overflow-y-auto divide-y divide-slate-100">
+                  {universalSearchResults.length === 0 ? (
+                    <p className="p-3.5 text-xs text-slate-500 text-center">
+                      No matching Bills, CNs, Quotations, Vehicles, or Screens for &ldquo;{globalSearch}&rdquo;.
+                    </p>
+                  ) : (
+                    universalSearchResults.map((item) => (
+                      <button
+                        key={item.id}
+                        type="button"
+                        onMouseDown={(e) => {
+                          e.preventDefault();
+                          setSearchDropdownOpen(false);
+                          setGlobalSearch('');
+                          void item.onSelect();
+                        }}
+                        className="w-full text-left px-3.5 py-2.5 hover:bg-blue-50 flex items-center justify-between gap-2 cursor-pointer"
+                      >
+                        <div className="min-w-0">
+                          <p className="text-xs font-bold text-slate-900 truncate">{item.title}</p>
+                          <p className="text-[11px] text-slate-600 truncate">{item.subtitle}</p>
+                        </div>
+                        <span className="px-2 py-0.5 rounded bg-[#0D47A1] text-white text-[10px] font-extrabold shrink-0">
+                          {item.badge}
+                        </span>
+                      </button>
+                    ))
+                  )}
+                </div>
+              )}
+            </div>
+
+            {hasPermission('lr') && (
+              <button
+                type="button"
+                onClick={() => openOrSwitchTab('lr')}
+                className="px-2.5 py-1 rounded bg-blue-50 hover:bg-blue-100 text-[#0D47A1] cursor-pointer whitespace-nowrap"
+              >
+                + CN / LR
+              </button>
+            )}
+            {hasPermission('billing') && (
+              <button
+                type="button"
+                onClick={() => {
+                  setBillingInitialSubTab('invoice');
+                  setBillingFocusNonce((n) => n + 1);
+                  openOrSwitchTab('billing');
+                }}
+                className="px-2.5 py-1 rounded bg-emerald-50 hover:bg-emerald-100 text-emerald-800 cursor-pointer whitespace-nowrap"
+              >
+                + Tax Invoice
+              </button>
+            )}
+            {hasPermission('lorryHire') && (
+              <button
+                type="button"
+                onClick={() => openOrSwitchTab('lorryHire')}
+                className="px-2.5 py-1 rounded bg-amber-50 hover:bg-amber-100 text-amber-900 cursor-pointer whitespace-nowrap"
+              >
+                Lorry Hire &amp; POD
+              </button>
+            )}
+            {hasPermission('commission') && (
+              <button
+                type="button"
+                onClick={() => openOrSwitchTab('commission')}
+                className="px-2.5 py-1 rounded bg-indigo-50 hover:bg-indigo-100 text-indigo-800 cursor-pointer whitespace-nowrap"
+              >
+                Commission &amp; Advance
+              </button>
+            )}
+            {hasPermission('bankImport') && (
+              <button
+                type="button"
+                onClick={() => openOrSwitchTab('bankImport')}
+                className="px-2.5 py-1 rounded bg-teal-50 hover:bg-teal-100 text-teal-800 cursor-pointer whitespace-nowrap"
+              >
+                Bank &amp; 194C Import
+              </button>
+            )}
+            {hasPermission('reports') && (
+              <button
+                type="button"
+                onClick={() => {
+                  setReportInitialTab('partyFollowUp');
+                  setReportFocusNonce((n) => n + 1);
+                  openOrSwitchTab('reports');
+                }}
+                className="px-2.5 py-1 rounded bg-red-50 hover:bg-red-100 text-red-800 cursor-pointer whitespace-nowrap"
+              >
+                15/30d Alerts &amp; Follow-Up
+              </button>
+            )}
+            {isEffectiveMasterAdmin && (
+              <button
+                type="button"
+                onClick={() => openOrSwitchTab('staffAccess')}
+                className="px-2.5 py-1 rounded bg-amber-500 text-white hover:bg-amber-600 cursor-pointer whitespace-nowrap"
+              >
+                Staff Access Control
+              </button>
+            )}
+          </div>
+
+          <div className="flex flex-wrap items-center gap-1.5">
+            {isMasterAdmin && activeStaffSession && (
+              <button
+                type="button"
+                onClick={() => setActiveStaffSession(null)}
+                className="inline-flex items-center gap-1 px-2 py-1 rounded bg-amber-500 hover:bg-amber-600 text-white text-[11px] font-bold cursor-pointer whitespace-nowrap"
+                title="Exit Staff Preview and restore Master Admin controls"
+              >
+                <ShieldCheck className="w-3.5 h-3.5" />
+                <span>Restore Admin</span>
+              </button>
+            )}
+
             <button
               type="button"
-              onClick={() => openOrSwitchTab('lr')}
-              className="px-2.5 py-1 rounded bg-blue-50 hover:bg-blue-100 text-[#0D47A1] cursor-pointer"
+              onClick={() => setLiveMonitorOpen((v) => !v)}
+              className="inline-flex items-center gap-1 px-2 py-1 rounded border border-emerald-200 bg-emerald-50 hover:bg-emerald-100 text-emerald-800 text-[11px] font-bold cursor-pointer whitespace-nowrap"
+              title="View live online branch staff & real-time activity feed"
             >
-              + CN / LR
+              <Radio className="w-3 h-3 text-emerald-600 animate-pulse" />
+              <span>Online: {Math.max(1, activeOnlineStaff.length)}</span>
             </button>
-          )}
-          {hasPermission('billing') && (
+
             <button
               type="button"
               onClick={() => {
-                setBillingInitialSubTab('invoice');
-                setBillingFocusNonce((n) => n + 1);
-                openOrSwitchTab('billing');
+                setMasterInitialTab('vehicles');
+                setMasterFocusNonce((n) => n + 1);
+                openOrSwitchTab('master');
               }}
-              className="px-2.5 py-1 rounded bg-emerald-50 hover:bg-emerald-100 text-emerald-800 cursor-pointer"
+              className={`inline-flex items-center gap-1 px-2 py-1 rounded text-[11px] font-bold cursor-pointer whitespace-nowrap ${
+                alerts.failedVehicles.length > 0
+                  ? 'bg-red-600 text-white hover:bg-red-700'
+                  : 'bg-slate-100 text-slate-700 hover:bg-slate-200'
+              }`}
+              title="Vehicles with expired Fitness, Insurance, Permit or PUC"
             >
-              + Tax Invoice
+              <AlertTriangle className="w-3 h-3" />
+              Vehicles: {alerts.failedVehicles.length}
             </button>
-          )}
-          {hasPermission('lorryHire') && (
-            <button
-              type="button"
-              onClick={() => openOrSwitchTab('lorryHire')}
-              className="px-2.5 py-1 rounded bg-amber-50 hover:bg-amber-100 text-amber-900 cursor-pointer"
-            >
-              Lorry Hire &amp; POD
-            </button>
-          )}
-          {hasPermission('commission') && (
-            <button
-              type="button"
-              onClick={() => openOrSwitchTab('commission')}
-              className="px-2.5 py-1 rounded bg-indigo-50 hover:bg-indigo-100 text-indigo-800 cursor-pointer"
-            >
-              Commission &amp; Advance
-            </button>
-          )}
-          {hasPermission('bankImport') && (
-            <button
-              type="button"
-              onClick={() => openOrSwitchTab('bankImport')}
-              className="px-2.5 py-1 rounded bg-teal-50 hover:bg-teal-100 text-teal-800 cursor-pointer"
-            >
-              Bank &amp; 194C Import
-            </button>
-          )}
-          {hasPermission('reports') && (
+
             <button
               type="button"
               onClick={() => {
-                setReportInitialTab('partyFollowUp');
+                setMasterInitialTab('drivers');
+                setMasterFocusNonce((n) => n + 1);
+                openOrSwitchTab('master');
+              }}
+              className={`inline-flex items-center gap-1 px-2 py-1 rounded text-[11px] font-bold cursor-pointer whitespace-nowrap ${
+                alerts.failedDrivers.length > 0
+                  ? 'bg-red-600 text-white hover:bg-red-700'
+                  : 'bg-slate-100 text-slate-700 hover:bg-slate-200'
+              }`}
+              title="Drivers with expired Driving Licenses"
+            >
+              <UserX className="w-3 h-3" />
+              D/L: {alerts.failedDrivers.length}
+            </button>
+
+            <button
+              type="button"
+              onClick={() => {
+                setReportInitialTab('aging');
                 setReportFocusNonce((n) => n + 1);
                 openOrSwitchTab('reports');
               }}
-              className="px-2.5 py-1 rounded bg-red-50 hover:bg-red-100 text-red-800 cursor-pointer"
+              className={`inline-flex items-center gap-1 px-2 py-1 rounded text-[11px] font-bold cursor-pointer whitespace-nowrap ${
+                alerts.overdueInvoices.length > 0
+                  ? 'bg-red-600 text-white hover:bg-red-700'
+                  : 'bg-slate-100 text-slate-700 hover:bg-slate-200'
+              }`}
+              title="Party bills overdue beyond 7 days"
             >
-              15/30d Alerts &amp; Load Follow-Up
+              <ShieldAlert className="w-3 h-3" />
+              Overdue: {alerts.overdueInvoices.length}
             </button>
-          )}
-          {isEffectiveMasterAdmin && (
-            <button
-              type="button"
-              onClick={() => openOrSwitchTab('staffAccess')}
-              className="px-2.5 py-1 rounded bg-amber-500 text-white hover:bg-amber-600 cursor-pointer"
-            >
-              Staff Access Control
-            </button>
-          )}
+
+            {!isOnline ? (
+              <span className="inline-flex items-center gap-1 px-2 py-1 rounded bg-red-600 text-white text-[11px] font-bold whitespace-nowrap">
+                <WifiOff className="w-3 h-3" />
+                Offline ({offlineSyncStatus.pendingCount})
+              </span>
+            ) : offlineSyncStatus.pendingCount > 0 ? (
+              <button
+                type="button"
+                onClick={() => void flushOfflineSyncQueue()}
+                className="inline-flex items-center gap-1 px-2 py-1 rounded bg-amber-600 text-white text-[11px] font-bold cursor-pointer whitespace-nowrap"
+              >
+                <RefreshCw className="w-3 h-3 animate-spin" />
+                Syncing ({offlineSyncStatus.pendingCount})
+              </button>
+            ) : (
+              <span className="hidden xl:inline-flex items-center gap-1 px-2 py-1 rounded bg-emerald-100 text-emerald-900 text-[11px] font-bold whitespace-nowrap">
+                <Cloud className="w-3 h-3 text-emerald-700" />
+                Synced
+              </span>
+            )}
+          </div>
         </div>
       </header>
 
-      {/* Main Body: Left Royal Blue Sidebar + Multi-Tab Workspace */}
+      {/* Main Body: Collapsible Left Royal Blue Sidebar (Hidden by Default) + Full-Width Multi-Tab Workspace */}
       <div className="flex-1 flex min-h-0 relative">
-        {/* Left Royal Blue Sidebar */}
+        {sidebarOpen && (
+          <div
+            className="fixed inset-0 bg-slate-900/45 z-40 no-print"
+            onClick={() => setSidebarOpen(false)}
+            aria-hidden="true"
+          />
+        )}
+
+        {/* Left Royal Blue Sidebar Drawer (Hidden by Default across Desktop, Tablet & Android) */}
         <aside
           className={`${
-            mobileMenuOpen ? 'fixed inset-y-0 left-0 z-40 flex' : 'hidden lg:flex'
-          } w-56 shrink-0 flex-col justify-between bg-gradient-to-b from-[#0D47A1] via-[#1565C0] to-[#0A347A] text-white shadow-lg no-print`}
+            sidebarOpen ? 'fixed inset-y-0 left-0 z-50 flex' : 'hidden'
+          } w-60 shrink-0 flex-col justify-between bg-gradient-to-b from-[#0D47A1] via-[#1565C0] to-[#0A347A] text-white shadow-2xl no-print`}
+          aria-label="Primary Navigation Sidebar"
         >
           <div className="p-2.5 space-y-1 overflow-y-auto">
-            {mobileMenuOpen && (
-              <div className="flex justify-end pb-1 lg:hidden">
-                <button
-                  type="button"
-                  onClick={() => setMobileMenuOpen(false)}
-                  className="p-1 text-blue-100 hover:text-white"
-                >
-                  <X className="w-4 h-4" />
-                </button>
-              </div>
-            )}
+            <div className="flex items-center justify-between px-2 py-1.5 pb-2 border-b border-white/15 mb-1">
+              <span className="text-xs font-extrabold tracking-wide text-amber-200 uppercase">
+                DRC Menu
+              </span>
+              <button
+                type="button"
+                onClick={() => setSidebarOpen(false)}
+                className="p-1 rounded hover:bg-white/15 text-blue-100 hover:text-white cursor-pointer"
+                aria-label="Close Navigation Sidebar"
+              >
+                <X className="w-4 h-4" />
+              </button>
+            </div>
 
             {sidebarItems
               .filter((item) => !item.perm || hasPermission(item.perm))
@@ -2026,6 +2136,7 @@ export default function App() {
                 lorryHires={visibleLorryHires}
                 consignments={visibleConsignments}
                 transactions={visibleTransactions}
+                bankReceipts={bankReceipts}
                 parties={parties}
                 drivers={drivers}
                 company={companySettings}
@@ -2064,6 +2175,8 @@ export default function App() {
                   lorryHires,
                   transactions,
                   declarations,
+                  bankReceipts,
+                  staffCommissions,
                 }}
                 onSwitchGmail={() => handleGoogleDriveConnect(true)}
                 onSwitchStaffSession={setActiveStaffSession}

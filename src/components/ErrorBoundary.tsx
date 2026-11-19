@@ -1,4 +1,4 @@
-import React, { Component, ErrorInfo, ReactNode } from 'react';
+import { Component, ErrorInfo, ReactNode } from 'react';
 import { AlertTriangle, RotateCcw, Wrench } from 'lucide-react';
 import { revokeThermalMemoryCooledUrls } from '../lib/selfHealing';
 

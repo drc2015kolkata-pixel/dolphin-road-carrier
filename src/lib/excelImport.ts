@@ -80,6 +80,45 @@ function parseNum(raw: string): number {
   return Number.isFinite(n) ? n : 0;
 }
 
+export function sheetToObjectsSmartHeader(ws: XLSX.WorkSheet): Array<Record<string, unknown>> {
+  const matrix = XLSX.utils.sheet_to_json<unknown[]>(ws, { header: 1, defval: '' });
+  if (matrix.length === 0) return [];
+
+  let headerRowIdx = 0;
+  for (let i = 0; i < Math.min(35, matrix.length); i += 1) {
+    const cells = (matrix[i] || []).map((c) => String(c || '').trim().toLowerCase());
+    const nonEmpty = cells.filter(Boolean);
+    if (nonEmpty.length < 2) continue;
+    const joined = nonEmpty.join(' ');
+    const looksLikeHeader =
+      /(date|txn|particular|narration|description|credit|debit|deposit|withdrawal|party|cnno|lrno|bill|invoice|chq|utr|truck|balance)/i.test(
+        joined
+      );
+    if (looksLikeHeader) {
+      headerRowIdx = i;
+      break;
+    }
+  }
+
+  const headerCells = (matrix[headerRowIdx] || []).map((h, idx) => {
+    const clean = String(h || '').trim();
+    return clean || `COL_${idx + 1}`;
+  });
+
+  const rows: Array<Record<string, unknown>> = [];
+  for (let r = headerRowIdx + 1; r < matrix.length; r += 1) {
+    const arr = matrix[r] || [];
+    const hasData = arr.some((v) => v !== '' && v !== null && v !== undefined);
+    if (!hasData) continue;
+    const obj: Record<string, unknown> = {};
+    headerCells.forEach((colName, cIdx) => {
+      obj[colName] = arr[cIdx] ?? '';
+    });
+    rows.push(obj);
+  }
+  return rows;
+}
+
 export async function parseExcelOrCsvFile(params: {
   file: File;
   entityType: ImportEntityType;
@@ -99,7 +138,11 @@ export async function parseExcelOrCsvFile(params: {
   if (!sheetName) throw new Error('The uploaded spreadsheet contains no sheets.');
 
   const ws = wb.Sheets[sheetName];
-  const rawRows = XLSX.utils.sheet_to_json<Record<string, unknown>>(ws, { defval: '' });
+  const smartRows = sheetToObjectsSmartHeader(ws);
+  const rawRows =
+    smartRows.length > 0
+      ? smartRows
+      : XLSX.utils.sheet_to_json<Record<string, unknown>>(ws, { defval: '' });
   if (rawRows.length === 0) throw new Error('Spreadsheet is empty (0 rows found).');
 
   const previewHeaders = Object.keys(rawRows[0] || {}).slice(0, 6);

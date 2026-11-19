@@ -18,10 +18,12 @@ export const CLIENT_BUILD_TIME: string =
   typeof __BUILD_TIME__ !== 'undefined' ? __BUILD_TIME__ : new Date().toISOString();
 
 const RELOAD_GUARD_KEY = 'drc_erp_sw_reloaded_build';
+export const VERSION_POLL_INTERVAL_MS = 15_000;
 
 let swRegistration: ServiceWorkerRegistration | null = null;
 let initialized = false;
 let reloadScheduled = false;
+let pollTimerId: number | null = null;
 
 let status: VersionStatusInfo = {
   appVersion: CLIENT_APP_VERSION,
@@ -32,7 +34,7 @@ let status: VersionStatusInfo = {
   updateAvailable: false,
   lastCheckedAt: null,
   checking: false,
-  message: 'Auto-Update Engine Ready (registerType: autoUpdate)',
+  message: 'Auto-Update Engine Ready (skipWaiting + clientsClaim + 15s Poll)',
 };
 
 const listeners = new Set<(info: VersionStatusInfo) => void>();
@@ -75,18 +77,20 @@ export function getVersionStatus(): VersionStatusInfo {
 }
 
 export async function checkForUpdatesNow(autoReloadIfUpdated = true): Promise<VersionStatusInfo> {
-  status = { ...status, checking: true, message: 'Checking server & Service Worker for updates...' };
+  status = { ...status, checking: true, message: 'Checking server & Service Worker (15s Poll)...' };
   emit();
 
   try {
-    // 1. Trigger browser Service Worker check (silently activates via skipWaiting + clientsClaim)
-    if (swRegistration) {
-      await swRegistration.update().catch(() => {});
-    } else if (typeof navigator !== 'undefined' && 'serviceWorker' in navigator) {
-      const reg = await navigator.serviceWorker.getRegistration().catch(() => undefined);
-      if (reg) {
-        swRegistration = reg;
-        await reg.update().catch(() => {});
+    // 1. Trigger browser Service Worker check (sw.js has skipWaiting + clients.claim) in production
+    if (import.meta.env.PROD) {
+      if (swRegistration) {
+        await swRegistration.update().catch(() => {});
+      } else if (typeof navigator !== 'undefined' && 'serviceWorker' in navigator) {
+        const reg = await navigator.serviceWorker.getRegistration().catch(() => undefined);
+        if (reg) {
+          swRegistration = reg;
+          await reg.update().catch(() => {});
+        }
       }
     }
 
@@ -115,8 +119,8 @@ export async function checkForUpdatesNow(autoReloadIfUpdated = true): Promise<Ve
         swActive: Boolean(swRegistration?.active || navigator.serviceWorker?.controller),
         updateAvailable: hasNewVersion || Boolean(swRegistration?.waiting),
         message: hasNewVersion
-          ? `New build ${serverVersion} detected — upgrading silently now...`
-          : `Running latest DRC ERP v${CLIENT_APP_VERSION} (Auto-Sync Verified).`,
+          ? `New build ${serverVersion} detected — auto-reloading seamlessly...`
+          : `Running latest DRC ERP v${CLIENT_APP_VERSION} (15s Live Sync).`,
       };
       emit();
 
@@ -149,11 +153,53 @@ export async function checkForUpdatesNow(autoReloadIfUpdated = true): Promise<Ve
   return getVersionStatus();
 }
 
+function startVersionPollingLoop(): void {
+  if (typeof window === 'undefined' || pollTimerId !== null) return;
+  pollTimerId = window.setInterval(() => {
+    void checkForUpdatesNow(true);
+  }, VERSION_POLL_INTERVAL_MS);
+
+  window.addEventListener('focus', () => {
+    void checkForUpdatesNow(true);
+  });
+  document.addEventListener('visibilitychange', () => {
+    if (document.visibilityState === 'visible') {
+      void checkForUpdatesNow(true);
+    }
+  });
+}
+
 export function initVersionSync(): void {
   if (initialized || typeof window === 'undefined') return;
   initialized = true;
 
+  if (import.meta.env.DEV) {
+    // Cleanly purge any previously installed /dev-sw.js & stale Vite chunk caches so React never hits duplicate-module null useState
+    if ('serviceWorker' in navigator) {
+      const hadController = Boolean(navigator.serviceWorker.controller);
+      void navigator.serviceWorker
+        .getRegistrations()
+        .then(async (regs) => {
+          if (regs.length === 0) return;
+          await Promise.all(regs.map((r) => r.unregister().catch(() => false)));
+          if ('caches' in window) {
+            const keys = await caches.keys().catch(() => []);
+            await Promise.all(keys.map((k) => caches.delete(k).catch(() => false)));
+          }
+          if (hadController) {
+            triggerSingleShotReload('dev_sw_purged');
+          }
+        })
+        .catch(() => {});
+    }
+    startVersionPollingLoop();
+    void checkForUpdatesNow(false);
+    return;
+  }
+
   if ('serviceWorker' in navigator) {
+    const hadInitialController = Boolean(navigator.serviceWorker.controller);
+
     navigator.serviceWorker.addEventListener('controllerchange', () => {
       status = {
         ...status,
@@ -162,6 +208,9 @@ export function initVersionSync(): void {
         message: `Silently upgraded to DRC ERP v${CLIENT_APP_VERSION}.`,
       };
       emit();
+      if (hadInitialController) {
+        triggerSingleShotReload(`sw_ctrl_${Date.now()}`);
+      }
     });
 
     registerSW({
@@ -172,15 +221,10 @@ export function initVersionSync(): void {
         status = {
           ...status,
           swActive: Boolean(registration.active || navigator.serviceWorker.controller),
-          message: `PWA Auto-Update active (v${CLIENT_APP_VERSION})`,
+          message: `PWA Auto-Update active (v${CLIENT_APP_VERSION} · 15s Poll)`,
         };
         emit();
-
-        // Check silently for updates on startup & every 15 minutes
         void registration.update().catch(() => {});
-        window.setInterval(() => {
-          void registration.update().catch(() => {});
-        }, 15 * 60 * 1000);
       },
       onOfflineReady() {
         status = {
@@ -197,7 +241,6 @@ export function initVersionSync(): void {
           message: 'Downloading silent background upgrade...',
         };
         emit();
-        // Because workbox skipWaiting & clientsClaim are true, trigger clean update check
         void checkForUpdatesNow(true);
       },
       onRegisterError() {
@@ -206,6 +249,6 @@ export function initVersionSync(): void {
     });
   }
 
-  // Also check server version non-blockingly on startup
-  void checkForUpdatesNow(false);
+  startVersionPollingLoop();
+  void checkForUpdatesNow(true);
 }

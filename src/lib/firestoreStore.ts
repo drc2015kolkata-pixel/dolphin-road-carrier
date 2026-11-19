@@ -8,6 +8,7 @@ import {
   setDoc,
   updateDoc,
   where,
+  writeBatch,
 } from 'firebase/firestore';
 import {
   auth,
@@ -583,7 +584,7 @@ export function subscribeCollection<T>(
     onData(existing as T[]);
   }
 
-  // Optional Firebase Firestore real-time mirror ONLY when Google account is verified
+  // Live Firebase Firestore real-time mirror when Google account is verified
   let firestoreUnsub: (() => void) | null = null;
   if (auth.currentUser?.emailVerified) {
     try {
@@ -593,13 +594,48 @@ export function subscribeCollection<T>(
           ? query(colRef)
           : query(colRef, where('ownerUid', '==', ownerUid));
 
+      const toMillis = (val: unknown): number => {
+        if (typeof val === 'number') return val;
+        if (val && typeof val === 'object' && 'toMillis' in val && typeof (val as { toMillis: unknown }).toMillis === 'function') {
+          return (val as { toMillis: () => number }).toMillis();
+        }
+        return 0;
+      };
+
       firestoreUnsub = onSnapshot(
         q,
-        () => {
-          // Primary multi-branch state is synchronized via /api/erp/stream
+        (snapshot) => {
+          if (snapshot.empty) return;
+          const localList = ([...(collectionState.get(collectionName) || [])] as Array<
+            Record<string, unknown> & { id: string }
+          >);
+          const mergedMap = new Map<string, Record<string, unknown> & { id: string }>(
+            localList.map((item) => [item.id, item])
+          );
+          let changed = false;
+          snapshot.docs.forEach((snapDoc) => {
+            const raw = snapDoc.data() as Record<string, unknown>;
+            const remoteItem: Record<string, unknown> & { id: string } = {
+              ...raw,
+              id: snapDoc.id,
+              createdAt: raw.createdAt ? toMillis(raw.createdAt) || raw.createdAt : undefined,
+              updatedAt: raw.updatedAt ? toMillis(raw.updatedAt) || raw.updatedAt : undefined,
+            };
+            const existing = mergedMap.get(snapDoc.id);
+            const remoteTs = toMillis(remoteItem.updatedAt);
+            const localTs = toMillis(existing?.updatedAt);
+            if (!existing || remoteTs >= localTs) {
+              mergedMap.set(snapDoc.id, { ...(existing || {}), ...remoteItem });
+              changed = true;
+            }
+          });
+          if (changed) {
+            markCloudSyncedNow();
+            notifyCollection(collectionName, Array.from(mergedMap.values()));
+          }
         },
         (error) => {
-          console.warn(`Firestore optional sync (${collectionName}):`, error.message);
+          console.warn(`Firestore real-time sync (${collectionName}):`, error.message);
         }
       );
     } catch {
@@ -709,19 +745,30 @@ export async function upsertDocument(
   }
 
   // Optional Firestore mirror if user connected verified Google account
+  const sanitizeFirestorePayload = (obj: Record<string, unknown>, stripTimestamps = false): Record<string, unknown> => {
+    const out: Record<string, unknown> = {};
+    for (const [k, v] of Object.entries(obj)) {
+      if (v === undefined) continue;
+      if (stripTimestamps && (k === 'createdAt' || k === 'updatedAt')) continue;
+      out[k] = v;
+    }
+    return out;
+  };
+
   if (auth.currentUser?.emailVerified) {
     const ref = doc(db, collectionName, safeId);
+    const cleanPayload = sanitizeFirestorePayload(payload, true);
     try {
       if (isNew) {
         await setDoc(ref, {
-          ...payload,
+          ...cleanPayload,
           ownerUid: auth.currentUser.uid,
           createdAt: serverTimestamp(),
           updatedAt: serverTimestamp(),
         });
       } else {
         await updateDoc(ref, {
-          ...payload,
+          ...cleanPayload,
           updatedAt: serverTimestamp(),
         });
       }
@@ -765,6 +812,7 @@ export async function bulkUpsertDocuments(
   }
   notifyCollection(collectionName, Array.from(map.values()));
 
+  let apiSynced = false;
   try {
     const res = await fetch('/api/erp/bulk-upsert', {
       method: 'POST',
@@ -772,15 +820,53 @@ export async function bulkUpsertDocuments(
       body: JSON.stringify({ collection: collectionName, items }),
     });
     if (res.ok) {
-      const json = (await res.json().catch(() => ({}))) as { count?: number };
+      apiSynced = true;
       markCloudSyncedNow();
-      return json.count ?? items.length;
+    } else {
+      enqueueOfflineOp({ opType: 'bulk-upsert', collectionName, items });
     }
-    enqueueOfflineOp({ opType: 'bulk-upsert', collectionName, items });
   } catch {
     enqueueOfflineOp({ opType: 'bulk-upsert', collectionName, items });
   }
-  return items.length;
+
+  // Real-time Firestore chunked writeBatch mirror when verified Google user is signed in
+  if (auth.currentUser?.emailVerified && items.length > 0) {
+    try {
+      const CHUNK_SIZE = 300;
+      for (let i = 0; i < items.length; i += CHUNK_SIZE) {
+        const chunk = items.slice(i, i + CHUNK_SIZE);
+        const batch = writeBatch(db);
+        for (const row of chunk) {
+          const rawId = String(row.id || `${collectionName.slice(0, 4)}_${now}_${Math.random().toString(36).slice(2, 7)}`);
+          const safeId = rawId.replace(/[^a-zA-Z0-9_\-]/g, '_').slice(0, 128);
+          const ref = doc(db, collectionName, safeId);
+          const cleanRow: Record<string, unknown> = {};
+          for (const [k, v] of Object.entries(row)) {
+            if (v !== undefined && k !== 'createdAt' && k !== 'updatedAt') {
+              cleanRow[k] = v;
+            }
+          }
+          batch.set(
+            ref,
+            {
+              ...cleanRow,
+              id: safeId,
+              ownerUid: auth.currentUser.uid,
+              createdAt: serverTimestamp(),
+              updatedAt: serverTimestamp(),
+            },
+            { merge: true }
+          );
+        }
+        await batch.commit();
+      }
+      markCloudSyncedNow();
+    } catch {
+      // Keep local + Express save intact even if Firestore batch hits rules/offline limit
+    }
+  }
+
+  return apiSynced ? items.length : items.length;
 }
 
 export async function saveSettingsDocument(
@@ -818,16 +904,22 @@ export async function saveSettingsDocument(
 
   if (auth.currentUser?.emailVerified) {
     const ref = doc(db, 'settings', safeId);
+    const cleanPayload: Record<string, unknown> = {};
+    for (const [k, v] of Object.entries(payload)) {
+      if (v !== undefined && k !== 'updatedAt' && k !== 'createdAt') {
+        cleanPayload[k] = v;
+      }
+    }
     try {
       if (!exists) {
         await setDoc(ref, {
-          ...payload,
+          ...cleanPayload,
           ownerUid: auth.currentUser.uid,
           updatedAt: serverTimestamp(),
         });
       } else {
         await updateDoc(ref, {
-          ...payload,
+          ...cleanPayload,
           updatedAt: serverTimestamp(),
         });
       }
@@ -980,13 +1072,46 @@ export async function seedSampleDataset(ownerUid: string): Promise<void> {
 }
 
 export async function restoreErpBackupBundle(payload: Record<string, unknown>): Promise<void> {
-  const res = await fetch('/api/erp/restore', {
-    method: 'POST',
-    headers: { 'Content-Type': 'application/json' },
-    body: JSON.stringify(payload),
-  });
-  if (!res.ok) {
-    const json = (await res.json().catch(() => ({}))) as { error?: string };
-    throw new Error(json.error || 'Failed to restore backup bundle.');
+  const collectionMapping: Array<[string, string[]]> = [
+    ['parties', ['parties']],
+    ['vehicles', ['vehicles']],
+    ['drivers', ['drivers']],
+    ['consignments', ['consignments']],
+    ['invoices', ['invoices']],
+    ['quotations', ['quotations']],
+    ['lorry_hires', ['lorryHires', 'lorry_hires']],
+    ['transactions', ['transactions']],
+    ['declarations', ['declarations']],
+    ['bank_receipts', ['bankReceipts', 'bank_receipts']],
+    ['staff_commissions', ['staffCommissions', 'staff_commissions']],
+    ['staff_accounts', ['staffAccounts', 'staff_accounts']],
+  ];
+
+  // Always hydrate local cache + IndexedDB + Firestore mirror even when static Vercel has no Express backend
+  for (const [targetCol, candidateKeys] of collectionMapping) {
+    for (const key of candidateKeys) {
+      const arr = payload[key];
+      if (Array.isArray(arr) && arr.length > 0) {
+        await bulkUpsertDocuments(targetCol, arr as Array<Record<string, unknown>>);
+        break;
+      }
+    }
+  }
+
+  if (payload.company && typeof payload.company === 'object') {
+    await saveSettingsDocument('company', payload.company as Record<string, unknown>, true);
+  }
+
+  try {
+    const res = await fetch('/api/erp/restore', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify(payload),
+    });
+    if (res.ok) {
+      markCloudSyncedNow();
+    }
+  } catch {
+    // Static deployment (e.g. Vercel) relies on bulkUpsertDocuments + IndexedDB + Firestore above
   }
 }

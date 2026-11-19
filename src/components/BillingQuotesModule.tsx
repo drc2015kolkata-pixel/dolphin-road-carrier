@@ -413,6 +413,63 @@ const BillingQuotesModuleInner: React.FC<BillingQuotesModuleProps> = ({
     }
   };
 
+  const applyQuotationSmartAutoFill = (partyVal: string, destVal: string) => {
+    const cleanP = partyVal.trim().toLowerCase();
+    const cleanD = destVal.trim().toLowerCase();
+    if (!cleanP && !cleanD) return;
+    const sortedQ = [...quotations].sort((a, b) =>
+      (b.quotationDate || '').localeCompare(a.quotationDate || '')
+    );
+    const prevQ =
+      sortedQ.find(
+        (x) =>
+          cleanP &&
+          cleanD &&
+          x.partyName?.toLowerCase() === cleanP &&
+          x.destination?.toLowerCase().includes(cleanD)
+      ) ||
+      sortedQ.find((x) => cleanP && x.partyName?.toLowerCase() === cleanP) ||
+      sortedQ.find((x) => cleanD && x.destination?.toLowerCase().includes(cleanD));
+
+    if (prevQ) {
+      if (!qDest.trim() && prevQ.destination) setQDest(prevQ.destination);
+      if (prevQ.vehicleType) setQVehicleType(prevQ.vehicleType);
+      if (prevQ.goodsType) setQGoodsType(prevQ.goodsType);
+      if (prevQ.rateMode === 'Fixed' || prevQ.rateMode === 'Per Ton') setQRateMode(prevQ.rateMode);
+      if ((!qFreight || Number(qFreight) <= 0) && Number(prevQ.freight || 0) > 0) {
+        setQFreight(String(prevQ.freight));
+      }
+      if (!qTonGuarantee.trim() && prevQ.tonGuarantee) setQTonGuarantee(prevQ.tonGuarantee);
+      return;
+    }
+
+    const sortedCns = [...consignments].sort((a, b) =>
+      (b.cnDate || '').localeCompare(a.cnDate || '')
+    );
+    const prevCn =
+      sortedCns.find(
+        (c) =>
+          cleanP &&
+          cleanD &&
+          (c.billingPartyName?.toLowerCase() === cleanP || c.consignorName?.toLowerCase() === cleanP) &&
+          c.toCity?.toLowerCase().includes(cleanD)
+      ) ||
+      sortedCns.find(
+        (c) =>
+          cleanP &&
+          (c.billingPartyName?.toLowerCase() === cleanP || c.consignorName?.toLowerCase() === cleanP)
+      ) ||
+      sortedCns.find((c) => cleanD && c.toCity?.toLowerCase().includes(cleanD));
+
+    if (prevCn) {
+      if ((!qFreight || Number(qFreight) <= 0) && Number(prevCn.totalFreight || 0) > 0) {
+        setQFreight(String(prevCn.totalFreight));
+      }
+      if (!qGoodsType.trim() && prevCn.particulars) setQGoodsType(prevCn.particulars);
+      if (prevCn.rateMode && /ton|mt/i.test(prevCn.rateMode)) setQRateMode('Per Ton');
+    }
+  };
+
   const handleScanLRIntoBill = async (file: File | undefined) => {
     if (!file) return;
     setScanMsg('Scanning physical LR copy in background worker...');
@@ -1959,14 +2016,16 @@ const BillingQuotesModuleInner: React.FC<BillingQuotesModuleProps> = ({
                   list="q-party-list"
                   value={qParty}
                   onChange={(e) => {
-                    setQParty(e.target.value);
-                    const p = parties.find((x) => x.name.toLowerCase() === e.target.value.toLowerCase());
+                    const nextVal = e.target.value;
+                    setQParty(nextVal);
+                    const p = parties.find((x) => x.name.toLowerCase() === nextVal.toLowerCase());
                     if (p) {
                       setQAddr(p.address || '');
                       setQGstin(p.gstin || '');
                       setQPhone(p.phone || '');
                       setQEmail(p.email || '');
                     }
+                    applyQuotationSmartAutoFill(nextVal, qDest);
                   }}
                   placeholder="Auto-fills Address, GSTIN, Phone & Email"
                   className="w-full px-2.5 py-1.5 rounded border border-slate-300"
@@ -2022,7 +2081,11 @@ const BillingQuotesModuleInner: React.FC<BillingQuotesModuleProps> = ({
                   required
                   list="q-dest-list"
                   value={qDest}
-                  onChange={(e) => setQDest(e.target.value)}
+                  onChange={(e) => {
+                    const nextDest = e.target.value;
+                    setQDest(nextDest);
+                    applyQuotationSmartAutoFill(qParty, nextDest);
+                  }}
                   placeholder={PRIORITY_CORRIDOR_REGIONS.join(', ')}
                   className="w-full px-2.5 py-1.5 rounded border border-slate-300"
                 />

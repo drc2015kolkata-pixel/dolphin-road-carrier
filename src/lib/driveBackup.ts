@@ -12,6 +12,7 @@ const FOLDER_LIST: DriveFolderName[] = [
 ];
 
 export const ESSENTIAL_DRIVE_MASTER_FILES = [
+  'Master_Backup_DRC.json.gz',
   'Master_Backup_DRC.json',
   'DRC_Company_Parameters.json',
   'DRC_Parties_Master.json',
@@ -30,6 +31,61 @@ export interface DriveFileSummary {
   modifiedTime?: string;
   webViewLink?: string;
   folderName?: string;
+}
+
+async function compressCompactJsonGzip(payload: unknown): Promise<{
+  bytes: Uint8Array;
+  compressed: boolean;
+  rawBytes: number;
+  compressedBytes: number;
+}> {
+  const compactJson = JSON.stringify(payload);
+  const rawBytesArr = new TextEncoder().encode(compactJson);
+  const rawBytes = rawBytesArr.byteLength;
+
+  if (typeof CompressionStream !== 'undefined') {
+    try {
+      const stream = new Blob([rawBytesArr]).stream().pipeThrough(new CompressionStream('gzip'));
+      const buf = await new Response(stream).arrayBuffer();
+      const gzBytes = new Uint8Array(buf);
+      return {
+        bytes: gzBytes,
+        compressed: true,
+        rawBytes,
+        compressedBytes: gzBytes.byteLength,
+      };
+    } catch {
+      // Fallback to compact JSON if browser refuses gzip stream
+    }
+  }
+  return {
+    bytes: rawBytesArr,
+    compressed: false,
+    rawBytes,
+    compressedBytes: rawBytes,
+  };
+}
+
+async function decompressGzipOrJsonBuffer(buf: ArrayBuffer): Promise<Record<string, unknown>> {
+  const bytes = new Uint8Array(buf);
+  const isGzipMagic = bytes.length >= 2 && bytes[0] === 0x1f && bytes[1] === 0x8b;
+  if (isGzipMagic && typeof DecompressionStream !== 'undefined') {
+    const stream = new Blob([bytes]).stream().pipeThrough(new DecompressionStream('gzip'));
+    const text = await new Response(stream).text();
+    return JSON.parse(text) as Record<string, unknown>;
+  }
+  const text = new TextDecoder().decode(bytes);
+  return JSON.parse(text) as Record<string, unknown>;
+}
+
+function uint8ArrayToBase64(bytes: Uint8Array): string {
+  const chunkSize = 0x8000;
+  const parts: string[] = [];
+  for (let i = 0; i < bytes.length; i += chunkSize) {
+    const slice = bytes.subarray(i, i + chunkSize);
+    parts.push(String.fromCharCode(...slice));
+  }
+  return btoa(parts.join(''));
 }
 
 async function driveFetch(url: string, accessToken: string, init?: RequestInit) {
@@ -138,9 +194,7 @@ export async function uploadBlobToDriveFolder(params: {
     : { name: fileName, mimeType, parents: [folderId] };
 
   const arrayBuffer = await blob.arrayBuffer();
-  const base64Body = btoa(
-    new Uint8Array(arrayBuffer).reduce((data, byte) => data + String.fromCharCode(byte), '')
-  );
+  const base64Body = uint8ArrayToBase64(new Uint8Array(arrayBuffer));
 
   const multipartBody =
     `--${boundary}\r\n` +
@@ -170,24 +224,34 @@ export async function uploadBlobToDriveFolder(params: {
 export async function uploadMasterBackupToDrive(
   accessToken: string,
   backupPayload: unknown
-): Promise<{ id: string; name: string; webViewLink?: string }> {
+): Promise<{
+  id: string;
+  name: string;
+  webViewLink?: string;
+  rawBytes: number;
+  compressedBytes: number;
+  compressed: boolean;
+}> {
   const { rootId } = await ensureDriveBackupHierarchy(accessToken);
-  const fileName = 'Master_Backup_DRC.json';
+  const pack = await compressCompactJsonGzip(backupPayload);
+  const fileName = pack.compressed ? 'Master_Backup_DRC.json.gz' : 'Master_Backup_DRC.json';
+  const mimeType = pack.compressed ? 'application/gzip' : 'application/json';
   const existingId = await findFileInFolder(fileName, rootId, accessToken);
 
   const boundary = 'drc_master_backup_' + Date.now();
   const metadata = existingId
-    ? { name: fileName, mimeType: 'application/json' }
-    : { name: fileName, mimeType: 'application/json', parents: [rootId] };
+    ? { name: fileName, mimeType }
+    : { name: fileName, mimeType, parents: [rootId] };
 
-  const jsonContent = JSON.stringify(backupPayload, null, 2);
+  const base64Body = uint8ArrayToBase64(pack.bytes);
   const multipartBody =
     `--${boundary}\r\n` +
     `Content-Type: application/json; charset=UTF-8\r\n\r\n` +
     `${JSON.stringify(metadata)}\r\n` +
     `--${boundary}\r\n` +
-    `Content-Type: application/json; charset=UTF-8\r\n\r\n` +
-    `${jsonContent}\r\n` +
+    `Content-Type: ${mimeType}\r\n` +
+    `Content-Transfer-Encoding: base64\r\n\r\n` +
+    `${base64Body}\r\n` +
     `--${boundary}--`;
 
   const url = existingId
@@ -202,7 +266,13 @@ export async function uploadMasterBackupToDrive(
     body: multipartBody,
   });
 
-  return (await res.json()) as { id: string; name: string; webViewLink?: string };
+  const uploaded = (await res.json()) as { id: string; name: string; webViewLink?: string };
+  return {
+    ...uploaded,
+    rawBytes: pack.rawBytes,
+    compressedBytes: pack.compressedBytes,
+    compressed: pack.compressed,
+  };
 }
 
 export async function listDriveBackupFiles(accessToken: string): Promise<DriveFileSummary[]> {
@@ -231,14 +301,16 @@ export async function listDriveBackupFiles(accessToken: string): Promise<DriveFi
 
 export async function downloadMasterBackupFromDrive(accessToken: string): Promise<Record<string, unknown> | null> {
   const { rootId } = await ensureDriveBackupHierarchy(accessToken);
-  const fileId = await findFileInFolder('Master_Backup_DRC.json', rootId, accessToken);
-  if (!fileId) return null;
+  const gzId = await findFileInFolder('Master_Backup_DRC.json.gz', rootId, accessToken);
+  const legacyId = gzId || (await findFileInFolder('Master_Backup_DRC.json', rootId, accessToken));
+  if (!legacyId) return null;
 
   const res = await driveFetch(
-    `https://www.googleapis.com/drive/v3/files/${fileId}?alt=media`,
+    `https://www.googleapis.com/drive/v3/files/${legacyId}?alt=media`,
     accessToken
   );
-  return (await res.json()) as Record<string, unknown>;
+  const buf = await res.arrayBuffer();
+  return decompressGzipOrJsonBuffer(buf);
 }
 
 export async function uploadBankStatementMirrorToDrive(params: {
@@ -260,9 +332,7 @@ export async function uploadBankStatementMirrorToDrive(params: {
     : { name: params.fileName, mimeType: params.mimeType, parents: [fyFolderId] };
 
   const arrayBuffer = await params.fileContent.arrayBuffer();
-  const base64Body = btoa(
-    new Uint8Array(arrayBuffer).reduce((data, byte) => data + String.fromCharCode(byte), '')
-  );
+  const base64Body = uint8ArrayToBase64(new Uint8Array(arrayBuffer));
 
   const multipartBody =
     `--${boundary}\r\n` +
@@ -291,7 +361,7 @@ export async function runDailyDrive8FileCleanup(accessToken: string): Promise<{
   keptCount: number;
   trashedCount: number;
 }> {
-  const { rootId } = await ensureDriveBackupHierarchy(accessToken);
+  const { rootId, folders } = await ensureDriveBackupHierarchy(accessToken);
   const q = encodeURIComponent(
     `'${rootId}' in parents and trashed = false and mimeType != 'application/vnd.google-apps.folder'`
   );
@@ -311,10 +381,35 @@ export async function runDailyDrive8FileCleanup(accessToken: string): Promise<{
     if (essentialSet.has(f.name) && !seenEssentials.has(f.name)) {
       seenEssentials.add(f.name);
       toKeep.push(f);
-    } else if (/tmp|temp|scratch|copy|duplicate/i.test(f.name) || toKeep.length >= 8) {
+    } else if (/tmp|temp|scratch|copy|duplicate|scrap/i.test(f.name) || toKeep.length >= 8) {
       toTrash.push(f);
     } else {
       toKeep.push(f);
+    }
+  }
+
+  // Also scan all 7 subfolders for temp/scratch/copy/scrap junk so 15GB lasts 50+ years
+  for (const folderId of Object.values(folders)) {
+    try {
+      const subQ = encodeURIComponent(
+        `'${folderId}' in parents and trashed = false and mimeType != 'application/vnd.google-apps.folder'`
+      );
+      const subRes = await driveFetch(
+        `https://www.googleapis.com/drive/v3/files?q=${subQ}&fields=files(id,name,modifiedTime)&orderBy=modifiedTime desc&pageSize=100`,
+        accessToken
+      );
+      const subJson = (await subRes.json()) as { files?: Array<{ id: string; name: string }> };
+      const seenSubNames = new Set<string>();
+      for (const sf of subJson.files || []) {
+        if (/tmp|temp|scratch|copy|duplicate|scrap/i.test(sf.name) || seenSubNames.has(sf.name)) {
+          toTrash.push(sf);
+        } else {
+          seenSubNames.add(sf.name);
+          toKeep.push(sf);
+        }
+      }
+    } catch {
+      // Ignore individual subfolder scan errors
     }
   }
 

@@ -3,7 +3,6 @@ import {
   AlertTriangle,
   Camera,
   CheckCircle2,
-  ClipboardPaste,
   Edit3,
   FilePlus2,
   Lock,
@@ -457,6 +456,58 @@ const ConsignmentModuleInner: React.FC<ConsignmentModuleProps> = ({
     }
   };
 
+  const applyRouteSmartAutoFill = useCallback(
+    (partyCandidate: string, destinationCandidate: string) => {
+      const cleanParty = partyCandidate.trim().toLowerCase();
+      const cleanDest = destinationCandidate.trim().toLowerCase();
+      if (!cleanParty && !cleanDest) return;
+
+      const sortedCns = [...consignments].sort((a, b) =>
+        (b.cnDate || '').localeCompare(a.cnDate || '')
+      );
+      const exactMatch = sortedCns.find(
+        (c) =>
+          cleanParty &&
+          cleanDest &&
+          (c.billingPartyName?.toLowerCase() === cleanParty ||
+            c.consignorName?.toLowerCase() === cleanParty) &&
+          c.toCity?.toLowerCase() === cleanDest
+      );
+      const partyMatch = sortedCns.find(
+        (c) =>
+          cleanParty &&
+          (c.billingPartyName?.toLowerCase() === cleanParty ||
+            c.consignorName?.toLowerCase() === cleanParty)
+      );
+      const destMatch = sortedCns.find((c) => cleanDest && c.toCity?.toLowerCase() === cleanDest);
+
+      const best = exactMatch || partyMatch || destMatch;
+      if (!best) return;
+
+      if (!creditDaysOption && best.creditDays && best.creditDays > 0) {
+        if (creditDayPresets.includes(best.creditDays)) {
+          setCreditDaysOption(String(best.creditDays));
+        } else {
+          setCreditDaysOption('custom');
+          setCustomCreditDays(String(best.creditDays));
+        }
+      }
+      if (!deliveryOffice.trim() && best.deliveryOffice) {
+        setDeliveryOffice(best.deliveryOffice);
+      }
+      if (!particulars.trim() && best.particulars) {
+        setParticulars(best.particulars);
+      }
+      const currentFreightNum = Number(totalFreight || 0);
+      if ((totalFreight === '' || currentFreightNum <= 0) && Number(best.totalFreight || 0) > 0) {
+        setTotalFreight(String(best.totalFreight));
+        if (best.rateMode) setRateMode(best.rateMode);
+        if (best.ratePerUnit) setRatePerUnit(String(best.ratePerUnit));
+      }
+    },
+    [consignments, creditDaysOption, creditDayPresets, deliveryOffice, particulars, totalFreight]
+  );
+
   const handleSelectConsignor = (name: string) => {
     setConsignorName(name);
     const found = parties.find((p) => p.name.toLowerCase() === name.toLowerCase());
@@ -464,6 +515,7 @@ const ConsignmentModuleInner: React.FC<ConsignmentModuleProps> = ({
       setConsignorAddress(found.address || '');
       setConsignorGstin(found.gstin || '');
     }
+    applyRouteSmartAutoFill(billingPartyName || name, toCity);
   };
 
   const handleSelectConsignee = (name: string) => {
@@ -476,12 +528,20 @@ const ConsignmentModuleInner: React.FC<ConsignmentModuleProps> = ({
   };
 
   const handleSelectVehicle = (tNo: string) => {
-    setTruckNo(tNo.toUpperCase());
-    const found = vehicles.find((v) => v.truckNo.toUpperCase() === tNo.toUpperCase());
+    const upper = tNo.toUpperCase();
+    setTruckNo(upper);
+    const found = vehicles.find((v) => v.truckNo.toUpperCase() === upper);
     if (found) {
       setEngineNo(found.engineNo || '');
       setChassisNo(found.chassisNo || '');
       setOwnerName(found.ownerName || '');
+    }
+    const lastTrip = [...consignments]
+      .filter((c) => c.truckNo?.toUpperCase() === upper)
+      .sort((a, b) => (b.cnDate || '').localeCompare(a.cnDate || ''))[0];
+    if (lastTrip) {
+      if (!driverName.trim() && lastTrip.driverName) setDriverName(lastTrip.driverName);
+      if (!driverDlNo.trim() && lastTrip.driverDlNo) setDriverDlNo(lastTrip.driverDlNo);
     }
   };
 
@@ -1136,6 +1196,7 @@ const ConsignmentModuleInner: React.FC<ConsignmentModuleProps> = ({
               onChange={(val) => {
                 setBillingPartyName(val);
                 if (val.trim()) setValidationError(null);
+                applyRouteSmartAutoFill(val, toCity);
               }}
               options={partyNameOptions}
               placeholder="Select or search Billing Party (or click + Edit to add new)..."
@@ -1372,7 +1433,9 @@ const ConsignmentModuleInner: React.FC<ConsignmentModuleProps> = ({
                 onChange={(val) => {
                   setToDistrict(val);
                   if (val) {
-                    setToCity(val.split('(')[0].trim().toUpperCase());
+                    const nextCity = val.split('(')[0].trim().toUpperCase();
+                    setToCity(nextCity);
+                    applyRouteSmartAutoFill(billingPartyName || consignorName, nextCity);
                   }
                 }}
                 options={toDistrictOptions}
@@ -1388,7 +1451,11 @@ const ConsignmentModuleInner: React.FC<ConsignmentModuleProps> = ({
                 type="text"
                 required
                 value={toCity}
-                onChange={(e) => setToCity(e.target.value)}
+                onChange={(e) => {
+                  const nextCity = e.target.value;
+                  setToCity(nextCity);
+                  applyRouteSmartAutoFill(billingPartyName || consignorName, nextCity);
+                }}
                 placeholder="SILIGURI / BIRGUNJ / DHAKA"
                 className="w-full px-2.5 py-1.5 rounded border border-slate-300 bg-white"
               />

@@ -19,6 +19,8 @@ export default defineConfig(() => {
       tailwindcss(),
       VitePWA({
         registerType: 'autoUpdate',
+        strategies: 'generateSW',
+        filename: 'sw.js',
         includeAssets: [
           'drc-triangle-logo.svg',
           'favicon.ico',
@@ -72,7 +74,7 @@ export default defineConfig(() => {
           clientsClaim: true,
           cleanupOutdatedCaches: true,
           maximumFileSizeToCacheInBytes: 5 * 1024 * 1024,
-          globPatterns: ['**/*.{js,css,html,ico,png,svg,woff,woff2}'],
+          globPatterns: ['**/*.{js,css,html,ico,png,jpg,jpeg,svg,woff,woff2}'],
           navigateFallbackDenylist: [/^\/api\//],
           runtimeCaching: [
             {
@@ -110,7 +112,7 @@ export default defineConfig(() => {
           ],
         },
         devOptions: {
-          enabled: true,
+          enabled: false,
           type: 'module',
         },
       }),
@@ -124,8 +126,15 @@ export default defineConfig(() => {
           const distDir = path.resolve(import.meta.dirname, 'dist');
           const srcAssets = path.resolve(import.meta.dirname, 'src/assets');
           const distAssets = path.resolve(distDir, 'src/assets');
-          if (fs.existsSync(distDir) && fs.existsSync(srcAssets)) {
-            fs.cpSync(srcAssets, distAssets, {recursive: true, force: true});
+          if (fs.existsSync(distDir)) {
+            fs.writeFileSync(
+              path.join(distDir, 'version.json'),
+              JSON.stringify({ version: APP_VERSION, buildTime: BUILD_TIME }),
+              'utf8'
+            );
+            if (fs.existsSync(srcAssets)) {
+              fs.cpSync(srcAssets, distAssets, {recursive: true, force: true});
+            }
           }
         },
       },
@@ -134,6 +143,10 @@ export default defineConfig(() => {
       alias: {
         '@': path.resolve(import.meta.dirname, '.'),
       },
+      dedupe: ['react', 'react-dom'],
+    },
+    optimizeDeps: {
+      include: ['react', 'react-dom', 'react/jsx-runtime', 'react/jsx-dev-runtime'],
     },
     worker: {
       format: 'es' as const,

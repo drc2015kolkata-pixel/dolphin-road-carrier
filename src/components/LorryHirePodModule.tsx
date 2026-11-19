@@ -262,6 +262,25 @@ const LorryHirePodModuleInner: React.FC<LorryHirePodModuleProps> = ({
     return indexedHires.filter((x) => x.haystack.includes(q)).map((x) => x.item);
   }, [indexedHires, debouncedSearch]);
 
+  const applyHireSmartAutoFill = (tNo: string, oName: string, destCity: string) => {
+    const cleanTruck = tNo.trim().toUpperCase();
+    const cleanOwner = oName.trim().toLowerCase();
+    const cleanDest = destCity.trim().toLowerCase();
+    const sorted = [...lorryHires].sort((a, b) =>
+      (b.cnDate || '').localeCompare(a.cnDate || '')
+    );
+    const match =
+      sorted.find((h) => cleanTruck && h.truckNo?.toUpperCase() === cleanTruck) ||
+      sorted.find((h) => cleanOwner && h.ownerName?.toLowerCase() === cleanOwner) ||
+      sorted.find((h) => cleanDest && h.toCity?.toLowerCase() === cleanDest);
+    if (!match) return;
+    if (!ownerName.trim() && match.ownerName) setOwnerName(match.ownerName);
+    if (!brokerName.trim() && match.brokerName) setBrokerName(match.brokerName);
+    if ((!hireAmount || Number(hireAmount) <= 0) && Number(match.hireAmount || 0) > 0) {
+      setHireAmount(String(match.hireAmount));
+    }
+  };
+
   const handleSelectCn = (selectedCnNo: string) => {
     setCnNo(selectedCnNo);
     const cn = consignments.find((c) => c.cnNo.toLowerCase() === selectedCnNo.toLowerCase());
@@ -276,6 +295,7 @@ const LorryHirePodModuleInner: React.FC<LorryHirePodModuleProps> = ({
         setBookedPkgs(parsedPkgs);
         setDeliveredPkgs(parsedPkgs);
       }
+      applyHireSmartAutoFill(cn.truckNo, cn.ownerName || '', cn.toCity || '');
       if (!hireAmount && cn.totalFreight) {
         setHireAmount(String(cn.totalFreight));
       }
@@ -914,7 +934,11 @@ const LorryHirePodModuleInner: React.FC<LorryHirePodModuleProps> = ({
                 type="text"
                 required
                 value={truckNo}
-                onChange={(e) => setTruckNo(e.target.value.toUpperCase())}
+                onChange={(e) => {
+                  const val = e.target.value.toUpperCase();
+                  setTruckNo(val);
+                  applyHireSmartAutoFill(val, ownerName, toCity);
+                }}
                 placeholder="WB51B0800"
                 className="w-full px-2.5 py-1.5 rounded border border-slate-300 font-mono-num uppercase"
               />
@@ -925,7 +949,11 @@ const LorryHirePodModuleInner: React.FC<LorryHirePodModuleProps> = ({
                 type="text"
                 list="hire-owner-list"
                 value={ownerName}
-                onChange={(e) => setOwnerName(e.target.value)}
+                onChange={(e) => {
+                  const val = e.target.value;
+                  setOwnerName(val);
+                  applyHireSmartAutoFill(truckNo, val, toCity);
+                }}
                 placeholder="Owner Name"
                 className="w-full px-2.5 py-1.5 rounded border border-slate-300"
               />

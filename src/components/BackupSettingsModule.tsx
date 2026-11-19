@@ -6,11 +6,13 @@ import {
   CheckCircle2,
   CloudDownload,
   CloudUpload,
+  Copy,
   Download,
   Edit3,
   Eye,
   EyeOff,
   FileSpreadsheet,
+  FolderArchive,
   FolderOpen,
   ImagePlus,
   KeyRound,
@@ -33,6 +35,7 @@ import {
   Wrench,
 } from 'lucide-react';
 import {
+  BankReceiptRecord,
   BRANCH_OPTIONS,
   CompanyBankAccount,
   CompanyBranchOffice,
@@ -46,6 +49,7 @@ import {
   PermissionKey,
   Quotation,
   StaffAccount,
+  StaffCommissionEntry,
   StaffRole,
   TransactionRecord,
   Vehicle,
@@ -57,6 +61,14 @@ import {
   runDailyDrive8FileCleanup,
   uploadMasterBackupToDrive,
 } from '../lib/driveBackup';
+import {
+  getOAuthDomainStatus,
+  VERCEL_APP_DOMAIN,
+} from '../lib/firebase';
+import {
+  AutoCollectedOldDataResult,
+  autoCollectOldDataFiles,
+} from '../lib/foxproDbfImport';
 import {
   getLast90DayMaintenanceTimestamp,
   runSystemAutoFixAndClean,
@@ -95,6 +107,7 @@ import {
   upsertDistrictItem,
 } from '../lib/dropdownMasterStore';
 import { formatINR, makeSafeDocId, normalizeFyLabel, PRECREATED_FYS, todayISO } from '../lib/formatters';
+import { DEFAULT_BHOLE_BABA_IMAGE, DEFAULT_KHATU_SHYAM_IMAGE } from '../lib/sacredDefaults';
 import { useDebouncedValue } from '../hooks/useDebounce';
 import { PaginatedDataTable, TableColumn } from './PaginatedDataTable';
 
@@ -120,6 +133,8 @@ interface BackupSettingsModuleProps {
     lorryHires: LorryHire[];
     transactions: TransactionRecord[];
     declarations: Declaration194C[];
+    bankReceipts?: BankReceiptRecord[];
+    staffCommissions?: StaffCommissionEntry[];
   };
   onSwitchGmail: () => Promise<void>;
   onSwitchStaffSession: (staff: StaffAccount | null) => void;
@@ -167,12 +182,23 @@ const BackupSettingsModuleInner: React.FC<BackupSettingsModuleProps> = ({
   onShowConfirm,
 }) => {
   const stampInputRef = useRef<HTMLInputElement | null>(null);
+  const bholeBabaInputRef = useRef<HTMLInputElement | null>(null);
+  const khatuShyamInputRef = useRef<HTMLInputElement | null>(null);
   const excelInputRef = useRef<HTMLInputElement | null>(null);
+  const autoCollectFolderRef = useRef<HTMLInputElement | null>(null);
+  const autoCollectFilesRef = useRef<HTMLInputElement | null>(null);
 
   const [driveStatus, setDriveStatus] = useState<string | null>(null);
   const [driveError, setDriveError] = useState<string | null>(null);
   const [driveFiles, setDriveFiles] = useState<DriveFileSummary[]>([]);
   const [busyDrive, setBusyDrive] = useState(false);
+
+  // One-Click FoxPro (.DBF) & Bank PNB Excel Auto-Collector State
+  const [autoCollectResult, setAutoCollectResult] = useState<AutoCollectedOldDataResult | null>(null);
+  const [autoCollecting, setAutoCollecting] = useState(false);
+  const [autoCollectImporting, setAutoCollectImporting] = useState(false);
+  const [copiedDomain, setCopiedDomain] = useState(false);
+  const oauthDomain = useMemo(() => getOAuthDomainStatus(), []);
 
   // Master Admin ID & Password Management
   const [adminCurrentPwd, setAdminCurrentPwd] = useState('');
@@ -265,27 +291,129 @@ const BackupSettingsModuleInner: React.FC<BackupSettingsModuleProps> = ({
       return;
     }
     onShowConfirm({
-      title: 'Upload Master Backup to Google Drive?',
-      description: `This will create/overwrite Master_Backup_DRC.json inside Dolphin_Road_Carrier_Backup on ${connectedEmail || 'your Google Drive'} and ensure all 6 PDF folders exist.`,
-      confirmLabel: 'Backup to Drive',
+      title: 'Upload Compact GZIP Backup to Google Drive?',
+      description: `This will create/overwrite compressed Master_Backup_DRC.json.gz inside DOLPHIN_ROAD_CARRIERS_MASTER on ${connectedEmail || 'your Google Drive'} (50-Year 15GB Storage Optimizer).`,
+      confirmLabel: 'Backup Compact GZIP to Drive',
       onConfirm: async () => {
         setBusyDrive(true);
+        setDriveError(null);
         try {
           const res = await uploadMasterBackupToDrive(driveAccessToken, {
             exportedAt: new Date().toISOString(),
             company: compState,
             ...allData,
           });
-          setDriveStatus(`Backed up Master_Backup_DRC.json (File ID: ${res.id})`);
+          const rawKb = Math.max(1, Math.round(res.rawBytes / 1024));
+          const compKb = Math.max(1, Math.round(res.compressedBytes / 1024));
+          const pctSaved = res.rawBytes > 0 ? Math.max(0, Math.round((1 - res.compressedBytes / res.rawBytes) * 100)) : 0;
+          setDriveStatus(
+            `Backed up ${res.name} (${compKb} KB vs ${rawKb} KB raw · ${pctSaved}% saved for 50-year Drive space · File ID: ${res.id})`
+          );
           const files = await listDriveBackupFiles(driveAccessToken);
           setDriveFiles(files);
         } catch (err) {
-          setDriveStatus(err instanceof Error ? err.message : 'Drive backup failed');
+          setDriveError(err instanceof Error ? err.message : 'Drive backup failed');
         } finally {
           setBusyDrive(false);
         }
       },
     });
+  };
+
+  const handleAutoCollectSelected = async (fileList: FileList | null) => {
+    if (!fileList || fileList.length === 0) return;
+    setAutoCollecting(true);
+    setDriveError(null);
+    setDriveStatus(null);
+    try {
+      const res = await autoCollectOldDataFiles({
+        files: Array.from(fileList),
+        activeFy,
+        bankAccountName: compState.bankName || 'PUNJAB NATIONAL BANK',
+        ownerUid,
+        branchCode: 'KOL-HQ',
+        staffCode: adminUserId || 'ADMIN',
+        existingInvoices: allData.invoices,
+      });
+      setAutoCollectResult(res);
+      if (res.processedFiles.length === 0) {
+        setDriveError('No .DBF or Bank PNB Excel (.xlsx/.xls/.csv) files found in the selected folder/files.');
+      } else {
+        setDriveStatus(
+          `Auto-Collect scanned ${res.processedFiles.length} data file(s) & skipped ${res.ignoredScrapFiles.length} scrap file(s): Ready to import ${res.parties.length} Parties, ${res.consignments.length} CN/Bilty, ${res.invoices.length} Bills, ${res.lorryHires.length} Challans, ${res.bankReceipts.length} PNB Bank Receipts.`
+        );
+      }
+    } catch (err) {
+      setAutoCollectResult(null);
+      setDriveError(err instanceof Error ? err.message : 'Auto-Collect scan failed.');
+    } finally {
+      setAutoCollecting(false);
+    }
+  };
+
+  const handleConfirmAutoCollectImport = async () => {
+    if (!autoCollectResult) return;
+    setAutoCollectImporting(true);
+    setDriveError(null);
+    try {
+      let totalImported = 0;
+      if (autoCollectResult.parties.length > 0) {
+        totalImported += await bulkUpsertDocuments('parties', autoCollectResult.parties as unknown as Array<Record<string, unknown>>);
+      }
+      if (autoCollectResult.vehicles.length > 0) {
+        totalImported += await bulkUpsertDocuments('vehicles', autoCollectResult.vehicles as unknown as Array<Record<string, unknown>>);
+      }
+      if (autoCollectResult.drivers.length > 0) {
+        totalImported += await bulkUpsertDocuments('drivers', autoCollectResult.drivers as unknown as Array<Record<string, unknown>>);
+      }
+      if (autoCollectResult.consignments.length > 0) {
+        totalImported += await bulkUpsertDocuments('consignments', autoCollectResult.consignments as unknown as Array<Record<string, unknown>>);
+      }
+      if (autoCollectResult.invoices.length > 0) {
+        totalImported += await bulkUpsertDocuments('invoices', autoCollectResult.invoices as unknown as Array<Record<string, unknown>>);
+      }
+      if (autoCollectResult.lorryHires.length > 0) {
+        totalImported += await bulkUpsertDocuments('lorry_hires', autoCollectResult.lorryHires as unknown as Array<Record<string, unknown>>);
+      }
+      if (autoCollectResult.bankReceipts.length > 0) {
+        totalImported += await bulkUpsertDocuments('bank_receipts', autoCollectResult.bankReceipts as unknown as Array<Record<string, unknown>>);
+      }
+      if (autoCollectResult.destinations.length > 0) {
+        const mergedPlaces = Array.from(
+          new Set([
+            ...(compState.dropdownMaster?.deliveryPlaces || []),
+            ...autoCollectResult.destinations,
+          ])
+        );
+        const nextComp: CompanySettings = {
+          ...compState,
+          dropdownMaster: {
+            ...(compState.dropdownMaster || {}),
+            deliveryPlaces: mergedPlaces,
+          },
+        };
+        setCompState(nextComp);
+        await saveSettingsDocument('company', { ...nextComp, ownerUid }, hasCustomSettings);
+      }
+      setDriveStatus(
+        `One-Click Auto-Collect Complete: Imported ${totalImported} legacy FoxPro/PNB record(s) + ${autoCollectResult.destinations.length} Destination(s) into Firestore & Local Cache (${autoCollectResult.ignoredScrapFiles.length} scrap file(s) excluded).`
+      );
+      setAutoCollectResult(null);
+    } catch (err) {
+      setDriveError(err instanceof Error ? err.message : 'Auto-Collect import failed.');
+    } finally {
+      setAutoCollectImporting(false);
+    }
+  };
+
+  const handleCopyVercelDomain = async () => {
+    try {
+      await navigator.clipboard.writeText(VERCEL_APP_DOMAIN);
+      setCopiedDomain(true);
+      setTimeout(() => setCopiedDomain(false), 2000);
+    } catch {
+      // Ignore clipboard permission errors
+    }
   };
 
   const handleRunDailyDriveCleanup = async () => {
@@ -298,7 +426,7 @@ const BackupSettingsModuleInner: React.FC<BackupSettingsModuleProps> = ({
     try {
       const res = await runDailyDrive8FileCleanup(driveAccessToken);
       setDriveStatus(
-        `Google Drive 8-File Cleanup Complete: ${res.trashedCount} redundant temp files pruned, ${res.keptCount} essential master files preserved inside DOLPHIN_ROAD_CARRIERS_MASTER.`
+        `Google Drive 8-File & Subfolder Cleanup Complete: ${res.trashedCount} redundant/temp/scrap files pruned, ${res.keptCount} essential master files preserved inside DOLPHIN_ROAD_CARRIERS_MASTER.`
       );
       const files = await listDriveBackupFiles(driveAccessToken);
       setDriveFiles(files);
@@ -556,6 +684,60 @@ const BackupSettingsModuleInner: React.FC<BackupSettingsModuleProps> = ({
       img.src = String(reader.result || '');
     };
     reader.readAsDataURL(file);
+  };
+
+  const handleUploadSacredPhoto = (
+    field: 'bholeBabaPhotoDataUrl' | 'khatuShyamPhotoDataUrl',
+    deityLabel: string,
+    file: File | undefined
+  ) => {
+    if (!file) return;
+    setDriveError(null);
+    const reader = new FileReader();
+    reader.onload = () => {
+      const img = new Image();
+      img.onload = async () => {
+        const maxSide = 256;
+        const scale = Math.min(1, maxSide / Math.max(img.width, img.height));
+        const w = Math.max(48, Math.round(img.width * scale));
+        const h = Math.max(48, Math.round(img.height * scale));
+        const canvas = document.createElement('canvas');
+        canvas.width = w;
+        canvas.height = h;
+        const ctx = canvas.getContext('2d');
+        if (!ctx) return;
+        ctx.clearRect(0, 0, w, h);
+        ctx.drawImage(img, 0, 0, w, h);
+        const jpgDataUrl = canvas.toDataURL('image/jpeg', 0.88);
+        const nextComp = {
+          ...compState,
+          [field]: jpgDataUrl,
+          availableFys: fyChoices,
+          ownerUid,
+        };
+        setCompState(nextComp);
+        await saveSettingsDocument('company', nextComp as Record<string, unknown>, hasCustomSettings);
+        setDriveStatus(`Updated ${deityLabel} header portrait cleanly and saved to Settings.`);
+      };
+      img.onerror = () => setDriveError(`Could not read the selected ${deityLabel} image file.`);
+      img.src = String(reader.result || '');
+    };
+    reader.readAsDataURL(file);
+  };
+
+  const handleResetSacredPhoto = async (
+    field: 'bholeBabaPhotoDataUrl' | 'khatuShyamPhotoDataUrl',
+    deityLabel: string
+  ) => {
+    const nextComp = {
+      ...compState,
+      [field]: '',
+      availableFys: fyChoices,
+      ownerUid,
+    };
+    setCompState(nextComp);
+    await saveSettingsDocument('company', nextComp as Record<string, unknown>, hasCustomSettings);
+    setDriveStatus(`Restored default sacred artwork for ${deityLabel}.`);
   };
 
   const handleAddFutureFy = async () => {
@@ -947,10 +1129,135 @@ const BackupSettingsModuleInner: React.FC<BackupSettingsModuleProps> = ({
 
       {mode === 'backup' && (
         <div className="space-y-4">
+          {/* One-Click Auto-Collect FoxPro (.DBF) & Bank PNB Excel Importer (Excluding Scrap) */}
+          <div className="bg-white rounded-xl border border-blue-200 shadow-sm overflow-hidden">
+            <div className="bg-gradient-to-r from-[#0F3D7A] to-[#1D4ED8] text-white px-4 py-3 flex flex-wrap items-center justify-between gap-3">
+              <div className="flex items-center gap-2.5">
+                <FolderArchive className="w-5 h-5 text-amber-300 shrink-0" />
+                <div>
+                  <h3 className="text-sm font-bold">
+                    One-Click Auto-Collect FoxPro (.DBF) &amp; Bank PNB Excel Importer
+                  </h3>
+                  <p className="text-[11px] text-blue-100">
+                    Maps HEAD, brkrmast, desmast, courvhl, drvrmast, courtran, Tax Inv, challant &amp; PNB Bank Excel (UPI/UTR/Cheque + 194C TDS) — strictly excludes scrap*.dbf
+                  </p>
+                </div>
+              </div>
+              <div className="flex flex-wrap gap-2">
+                <input
+                  ref={autoCollectFolderRef}
+                  type="file"
+                  multiple
+                  {...({ webkitdirectory: '', directory: '' } as Record<string, string>)}
+                  className="hidden"
+                  onChange={(e) => {
+                    void handleAutoCollectSelected(e.target.files);
+                    e.target.value = '';
+                  }}
+                />
+                <input
+                  ref={autoCollectFilesRef}
+                  type="file"
+                  multiple
+                  accept=".dbf,.xlsx,.xls,.csv"
+                  className="hidden"
+                  onChange={(e) => {
+                    void handleAutoCollectSelected(e.target.files);
+                    e.target.value = '';
+                  }}
+                />
+                <button
+                  type="button"
+                  disabled={autoCollecting || autoCollectImporting}
+                  onClick={() => autoCollectFolderRef.current?.click()}
+                  className="inline-flex items-center gap-1.5 px-3.5 py-2 rounded-lg bg-amber-400 hover:bg-amber-300 text-slate-950 text-xs font-extrabold cursor-pointer whitespace-nowrap disabled:opacity-60"
+                >
+                  <FolderArchive className="w-4 h-4" />
+                  {autoCollecting ? 'Scanning...' : 'Auto-Collect Old Data (Select data Folder / Bank PNB Excel)'}
+                </button>
+                <button
+                  type="button"
+                  disabled={autoCollecting || autoCollectImporting}
+                  onClick={() => autoCollectFilesRef.current?.click()}
+                  className="inline-flex items-center gap-1.5 px-3 py-2 rounded-lg bg-white/15 hover:bg-white/25 text-white text-xs font-bold cursor-pointer whitespace-nowrap disabled:opacity-60"
+                >
+                  <Upload className="w-3.5 h-3.5" />
+                  Select Multiple .DBF / Excel Files
+                </button>
+              </div>
+            </div>
+
+            {autoCollectResult && (
+              <div className="p-4 space-y-3 bg-blue-50/40 text-xs">
+                <div className="flex flex-wrap items-center justify-between gap-2">
+                  <span className="font-bold text-slate-900">
+                    Scan Preview ({autoCollectResult.processedFiles.length} data file(s) parsed for {activeFy})
+                  </span>
+                  {autoCollectResult.ignoredScrapFiles.length > 0 && (
+                    <span className="px-2.5 py-1 rounded bg-red-100 text-red-800 font-bold text-[11px]">
+                      Excluded Scrap: {autoCollectResult.ignoredScrapFiles.join(', ')}
+                    </span>
+                  )}
+                </div>
+
+                <div className="grid grid-cols-2 sm:grid-cols-4 lg:grid-cols-9 gap-2">
+                  {[
+                    { label: 'Parties (HEAD)', val: autoCollectResult.parties.length },
+                    { label: 'Brokers', val: autoCollectResult.brokersAddedCount },
+                    { label: 'Destinations', val: autoCollectResult.destinations.length },
+                    { label: 'Vehicles', val: autoCollectResult.vehicles.length },
+                    { label: 'Drivers', val: autoCollectResult.drivers.length },
+                    { label: 'CN / Bilty', val: autoCollectResult.consignments.length },
+                    { label: 'Tax Invoices', val: autoCollectResult.invoices.length },
+                    { label: 'Challans', val: autoCollectResult.lorryHires.length },
+                    { label: 'PNB Receipts+TDS', val: autoCollectResult.bankReceipts.length },
+                  ].map((box) => (
+                    <div
+                      key={box.label}
+                      className="p-2 rounded-lg bg-white border border-slate-200 text-center"
+                    >
+                      <div className="text-[10px] font-semibold text-slate-500">{box.label}</div>
+                      <div className="text-base font-extrabold font-mono-num text-blue-900">
+                        {box.val}
+                      </div>
+                    </div>
+                  ))}
+                </div>
+
+                <div className="text-[11px] text-slate-600">
+                  Parsed files:{' '}
+                  <span className="font-mono-num text-slate-800">
+                    {autoCollectResult.processedFiles.join(', ')}
+                  </span>
+                </div>
+
+                <div className="flex flex-wrap gap-2 pt-1">
+                  <button
+                    type="button"
+                    disabled={autoCollectImporting}
+                    onClick={handleConfirmAutoCollectImport}
+                    className="inline-flex items-center gap-1.5 px-4 py-2 rounded-lg bg-emerald-700 hover:bg-emerald-800 text-white font-extrabold cursor-pointer disabled:opacity-60"
+                  >
+                    <CheckCircle2 className="w-4 h-4" />
+                    {autoCollectImporting ? 'Importing to ERP...' : 'Confirm & Import All Old Data'}
+                  </button>
+                  <button
+                    type="button"
+                    disabled={autoCollectImporting}
+                    onClick={() => setAutoCollectResult(null)}
+                    className="px-3 py-2 rounded-lg border border-slate-300 bg-white hover:bg-slate-100 text-slate-700 font-semibold cursor-pointer"
+                  >
+                    Cancel Preview
+                  </button>
+                </div>
+              </div>
+            )}
+          </div>
+
           <div className="bg-white rounded-xl border border-slate-200 shadow-sm overflow-hidden">
             <div className="bg-gradient-to-r from-[#0D47A1] to-[#1976D2] text-white px-4 py-3 flex flex-wrap items-center justify-between gap-3">
               <div>
-                <h3 className="text-sm font-bold">Google Drive Cloud Backup &amp; Account Switcher</h3>
+                <h3 className="text-sm font-bold">Google Drive Cloud Backup &amp; Account Switcher (GZIP Compact)</h3>
                 <p className="text-xs text-blue-100">
                   Connected Gmail: <span className="font-bold">{connectedEmail || 'Not Connected'}</span> ·{' '}
                   {driveAccessToken ? 'Drive OAuth Active' : 'Click Switch / Connect Gmail to grant Drive token'}
@@ -967,9 +1274,26 @@ const BackupSettingsModuleInner: React.FC<BackupSettingsModuleProps> = ({
             </div>
 
             <div className="p-4 space-y-4 text-xs">
+              <div className="p-2.5 rounded-lg bg-slate-50 border border-slate-200 flex flex-wrap items-center justify-between gap-2 text-[11px]">
+                <div className="text-slate-700">
+                  <span className="font-bold text-slate-900">OAuth Origin Status:</span>{' '}
+                  Host <span className="font-mono-num font-bold text-blue-800">{oauthDomain.hostname}</span> · Target Production:{' '}
+                  <span className="font-mono-num font-bold text-emerald-700">{VERCEL_APP_DOMAIN}</span>{' '}
+                  ({oauthDomain.isAllowlistedHost ? 'Allowlist-Compatible' : 'Add to Firebase Authorized Domains'})
+                </div>
+                <button
+                  type="button"
+                  onClick={handleCopyVercelDomain}
+                  className="inline-flex items-center gap-1 px-2.5 py-1 rounded bg-white border border-slate-300 hover:bg-slate-100 font-bold text-slate-800 cursor-pointer"
+                >
+                  <Copy className="w-3 h-3" />
+                  {copiedDomain ? 'Copied!' : 'Copy dolphin-road-carrier.vercel.app'}
+                </button>
+              </div>
+
               <div>
                 <p className="font-bold text-slate-800 mb-2">
-                  Dedicated Google Drive Folder Structure (inside DOLPHIN_ROAD_CARRIERS_MASTER · Keeps only 8 Essential Master Files Daily)
+                  Dedicated Google Drive Folder Structure (inside DOLPHIN_ROAD_CARRIERS_MASTER · Keeps only 8 Essential Master Files Daily &amp; Cleans Subfolders)
                 </p>
                 <div className="grid grid-cols-2 sm:grid-cols-4 lg:grid-cols-7 gap-2.5">
                   {[
@@ -1000,7 +1324,7 @@ const BackupSettingsModuleInner: React.FC<BackupSettingsModuleProps> = ({
                   className="inline-flex items-center gap-1.5 px-4 py-2 rounded-lg bg-blue-700 hover:bg-blue-800 text-white font-bold cursor-pointer disabled:opacity-60"
                 >
                   <CloudUpload className="w-4 h-4" />
-                  Backup Master_Backup_DRC.json to Drive
+                  Backup Compact Master_Backup_DRC.json.gz to Drive
                 </button>
                 <button
                   type="button"
@@ -1106,7 +1430,7 @@ const BackupSettingsModuleInner: React.FC<BackupSettingsModuleProps> = ({
                   Live Version Sync Status: <span className="text-emerald-700">{versionInfo.message}</span>
                 </p>
                 <p className="text-slate-600">
-                  PWA Service Worker: <strong>autoUpdate (skipWaiting + clientsClaim)</strong> &bull; Local
+                  PWA Service Worker (sw.js): <strong>autoUpdate (skipWaiting + clientsClaim + 15s Poll)</strong> &bull; Local
                   Storage: <strong>IndexedDB Multi-MB Mirror</strong> &bull; Server Sync: <strong>SSE Real-Time</strong>
                 </p>
                 {versionInfo.lastCheckedAt && (
@@ -1937,6 +2261,105 @@ const BackupSettingsModuleInner: React.FC<BackupSettingsModuleProps> = ({
                     alt="Active Stamp Preview"
                     className="h-20 w-24 object-contain rounded border border-slate-300 bg-white p-1"
                   />
+                </div>
+              </div>
+
+              {/* Optional Sacred Dashboard Header Photos (Bhole Baba & Khatu Shyam Ji) */}
+              <div className="md:col-span-3 p-3.5 rounded-lg bg-amber-50/60 border border-amber-200 space-y-3">
+                <div className="flex flex-wrap items-center justify-between gap-2">
+                  <p className="font-bold text-slate-900 flex items-center gap-1.5">
+                    <Sparkles className="w-4 h-4 text-amber-600" />
+                    <span>Dashboard Top-Center Sacred Blessing Photos (Bhole Baba &amp; Khatu Shyam Ji — Optional Custom Upload)</span>
+                  </p>
+                  <span className="text-[11px] font-semibold text-amber-900">
+                    Shown side-by-side at top-center immediately after login
+                  </span>
+                </div>
+
+                <div className="grid grid-cols-1 md:grid-cols-2 gap-3">
+                  {/* Bhole Baba Slot */}
+                  <div className="p-3 rounded-lg bg-white border border-amber-200 flex items-center justify-between gap-3">
+                    <div className="space-y-1.5">
+                      <p className="font-bold text-slate-900">1. Bhole Baba (Lord Shiva — Blessing Hand)</p>
+                      <input
+                        ref={bholeBabaInputRef}
+                        type="file"
+                        accept="image/*"
+                        className="hidden"
+                        onChange={(e) => {
+                          handleUploadSacredPhoto('bholeBabaPhotoDataUrl', 'Bhole Baba', e.target.files?.[0]);
+                          e.target.value = '';
+                        }}
+                      />
+                      <div className="flex flex-wrap gap-2">
+                        <button
+                          type="button"
+                          onClick={() => bholeBabaInputRef.current?.click()}
+                          className="inline-flex items-center gap-1.5 px-3 py-1.5 rounded bg-blue-700 hover:bg-blue-800 text-white font-bold cursor-pointer"
+                        >
+                          <Upload className="w-3.5 h-3.5" />
+                          Upload Custom Photo
+                        </button>
+                        {compState.bholeBabaPhotoDataUrl && (
+                          <button
+                            type="button"
+                            onClick={() => void handleResetSacredPhoto('bholeBabaPhotoDataUrl', 'Bhole Baba')}
+                            className="px-2.5 py-1.5 rounded border border-slate-300 bg-white hover:bg-slate-100 text-slate-700 font-semibold cursor-pointer"
+                          >
+                            Reset Default
+                          </button>
+                        )}
+                      </div>
+                    </div>
+                    <img
+                      src={compState.bholeBabaPhotoDataUrl || DEFAULT_BHOLE_BABA_IMAGE}
+                      alt="Bhole Baba Header Preview"
+                      referrerPolicy="no-referrer"
+                      className="h-16 w-16 object-cover rounded-lg border-2 border-amber-400 bg-amber-50 shrink-0"
+                    />
+                  </div>
+
+                  {/* Khatu Shyam Ji Slot */}
+                  <div className="p-3 rounded-lg bg-white border border-amber-200 flex items-center justify-between gap-3">
+                    <div className="space-y-1.5">
+                      <p className="font-bold text-slate-900">2. Khatu Shyam Ji (Blessing Hand)</p>
+                      <input
+                        ref={khatuShyamInputRef}
+                        type="file"
+                        accept="image/*"
+                        className="hidden"
+                        onChange={(e) => {
+                          handleUploadSacredPhoto('khatuShyamPhotoDataUrl', 'Khatu Shyam Ji', e.target.files?.[0]);
+                          e.target.value = '';
+                        }}
+                      />
+                      <div className="flex flex-wrap gap-2">
+                        <button
+                          type="button"
+                          onClick={() => khatuShyamInputRef.current?.click()}
+                          className="inline-flex items-center gap-1.5 px-3 py-1.5 rounded bg-blue-700 hover:bg-blue-800 text-white font-bold cursor-pointer"
+                        >
+                          <Upload className="w-3.5 h-3.5" />
+                          Upload Custom Photo
+                        </button>
+                        {compState.khatuShyamPhotoDataUrl && (
+                          <button
+                            type="button"
+                            onClick={() => void handleResetSacredPhoto('khatuShyamPhotoDataUrl', 'Khatu Shyam Ji')}
+                            className="px-2.5 py-1.5 rounded border border-slate-300 bg-white hover:bg-slate-100 text-slate-700 font-semibold cursor-pointer"
+                          >
+                            Reset Default
+                          </button>
+                        )}
+                      </div>
+                    </div>
+                    <img
+                      src={compState.khatuShyamPhotoDataUrl || DEFAULT_KHATU_SHYAM_IMAGE}
+                      alt="Khatu Shyam Ji Header Preview"
+                      referrerPolicy="no-referrer"
+                      className="h-16 w-16 object-cover rounded-lg border-2 border-amber-400 bg-amber-50 shrink-0"
+                    />
+                  </div>
                 </div>
               </div>
             </div>

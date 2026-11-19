@@ -226,3 +226,44 @@ export function runSystemAutoFixAndClean(params: {
     summary: `System healthy (CRC ${checksumHash}). Cooled ${cooledBlobUrls} blob(s), cleared ${clearedScratchKeys} scratch key(s), scanned ${params.parties.length} party profiles (${contactIssues.length} contact guard notice(s)). Accounting records 100% preserved.`,
   };
 }
+
+const DAILY_JUNK_CLEANUP_KEY = 'drc_last_local_junk_cleanup_day_v1';
+
+export function shouldRunDailyJunkCleanup(): boolean {
+  try {
+    const todayKey = new Date().toISOString().slice(0, 10);
+    return localStorage.getItem(DAILY_JUNK_CLEANUP_KEY) !== todayKey;
+  } catch {
+    return false;
+  }
+}
+
+export function runDailyLocalJunkCleanup(): {
+  clearedScratchKeys: number;
+  cooledBlobUrls: number;
+} {
+  let clearedScratchKeys = 0;
+  try {
+    const keysToCheck: string[] = [];
+    for (let i = 0; i < localStorage.length; i += 1) {
+      const k = localStorage.key(i);
+      if (k) keysToCheck.push(k);
+    }
+    for (const k of keysToCheck) {
+      if (
+        k.startsWith('drc_tmp_') ||
+        k.startsWith('drc_scratch_') ||
+        k.startsWith('vite-plugin-pwa:tmp') ||
+        /scrap/i.test(k)
+      ) {
+        localStorage.removeItem(k);
+        clearedScratchKeys += 1;
+      }
+    }
+    localStorage.setItem(DAILY_JUNK_CLEANUP_KEY, new Date().toISOString().slice(0, 10));
+  } catch {
+    // Ignore storage constraints
+  }
+  const cooledBlobUrls = revokeThermalMemoryCooledUrls();
+  return { clearedScratchKeys, cooledBlobUrls };
+}

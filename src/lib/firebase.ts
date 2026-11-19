@@ -19,6 +19,39 @@ import firebaseConfig from '../../firebase-applet-config.json';
 
 export const DRIVE_SCOPE = 'https://www.googleapis.com/auth/drive.file';
 export const MASTER_ADMIN_EMAIL = 'drc.2015kolkata@gmail.com';
+export const VERCEL_APP_DOMAIN = 'dolphin-road-carrier.vercel.app';
+export const ALLOWLISTED_OAUTH_DOMAINS = [
+  VERCEL_APP_DOMAIN,
+  'dolphin-road-carrier.firebaseapp.com',
+  'dolphin-road-carrier.web.app',
+  'localhost',
+  '127.0.0.1',
+] as const;
+
+export function getOAuthDomainStatus(): {
+  hostname: string;
+  origin: string;
+  isVercelProduction: boolean;
+  isAllowlistedHost: boolean;
+  authDomain: string;
+} {
+  const hostname = typeof window !== 'undefined' ? window.location.hostname : VERCEL_APP_DOMAIN;
+  const origin = typeof window !== 'undefined' ? window.location.origin : `https://${VERCEL_APP_DOMAIN}`;
+  const isVercelProduction = hostname === VERCEL_APP_DOMAIN || hostname.endsWith('.vercel.app');
+  const isAllowlistedHost =
+    ALLOWLISTED_OAUTH_DOMAINS.some((d) => hostname === d) ||
+    hostname.endsWith('.vercel.app') ||
+    hostname.endsWith('.firebaseapp.com') ||
+    hostname.endsWith('.web.app') ||
+    hostname.endsWith('.run.app');
+  return {
+    hostname,
+    origin,
+    isVercelProduction,
+    isAllowlistedHost,
+    authDomain: String((firebaseConfig as { authDomain?: string }).authDomain || `${firebaseConfig.projectId}.firebaseapp.com`),
+  };
+}
 
 const app = initializeApp(firebaseConfig);
 const firestoreDbId = (firebaseConfig as { firestoreDatabaseId?: string }).firestoreDatabaseId;
@@ -159,8 +192,9 @@ export async function googleSignIn(forceAccountSelect = false): Promise<{
       );
     }
     if (code === 'auth/unauthorized-domain') {
+      const host = typeof window !== 'undefined' ? window.location.hostname : VERCEL_APP_DOMAIN;
       throw new Error(
-        'Current preview domain is not allowlisted for Google OAuth popups. Open the published app URL or use Export Local JSON in Backup / Restore.'
+        `Domain "${host}" is not yet authorized in Firebase Console → Authentication → Settings → Authorized domains. Add "${VERCEL_APP_DOMAIN}" (and "${host}") to Firebase Authorized Domains, or use Export Local JSON.`
       );
     }
     throw err;

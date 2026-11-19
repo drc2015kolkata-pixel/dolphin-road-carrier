@@ -17,6 +17,7 @@ import {
   ShieldAlert,
 } from 'lucide-react';
 import {
+  BankReceiptRecord,
   CompanySettings,
   ConsignmentNote,
   Driver,
@@ -27,6 +28,11 @@ import {
   TransactionRecord,
 } from '../types/erp';
 import { daysSinceDate, formatDateDDMMYYYY, formatINR, normalizeFyLabel, todayISO } from '../lib/formatters';
+import {
+  buildAutomaticNarration,
+  extractPaymentMetadata,
+  formatReferenceChain,
+} from '../lib/paymentNarration';
 import { upsertDocument } from '../lib/firestoreStore';
 import {
   downloadPdfDirect,
@@ -58,6 +64,7 @@ interface ReportsMisModuleProps {
   lorryHires: LorryHire[];
   consignments: ConsignmentNote[];
   transactions: TransactionRecord[];
+  bankReceipts?: BankReceiptRecord[];
   parties: Party[];
   drivers?: Driver[];
   company: CompanySettings;
@@ -101,6 +108,7 @@ const ReportsMisModuleInner: React.FC<ReportsMisModuleProps> = ({
   lorryHires,
   consignments,
   transactions,
+  bankReceipts = [],
   parties,
   drivers = [],
   company,
@@ -113,6 +121,7 @@ const ReportsMisModuleInner: React.FC<ReportsMisModuleProps> = ({
   const [statementKind, setStatementKind] = useState<FoxproStatementKind>('party');
   const [statementFilter, setStatementFilter] = useState('');
   const [tripDateFilter, setTripDateFilter] = useState('');
+  const [selectedPartyLedger, setSelectedPartyLedger] = useState<string>('ALL');
   const [statusMsg, setStatusMsg] = useState<string | null>(null);
   const [search, setSearch] = useState('');
   const debouncedSearch = useDebouncedValue(search, 200);
@@ -335,6 +344,427 @@ const ReportsMisModuleInner: React.FC<ReportsMisModuleProps> = ({
     [accountBookRows, q]
   );
 
+  // Next-Gen Party Ledger Dropdown Options & Detailed Chronological Entries
+  const partyLedgerOptions = useMemo(() => {
+    const names = new Set<string>();
+    parties.forEach((p) => p.name && names.add(p.name.trim()));
+    invoices.forEach((i) => i.partyName && names.add(i.partyName.trim()));
+    transactions.forEach((t) => t.partyName && names.add(t.partyName.trim()));
+    lorryHires.forEach((h) => h.ownerName && names.add(h.ownerName.trim()));
+    bankReceipts.forEach((b) => b.partyName && names.add(b.partyName.trim()));
+    return Array.from(names).filter(Boolean).sort((a, b) => a.localeCompare(b));
+  }, [parties, invoices, transactions, lorryHires, bankReceipts]);
+
+  const partyLedgerSummary = useMemo(() => {
+    const fyOpenings = company.fyOpeningBalances?.[normalizeFyLabel(activeFy)] || {};
+    const target = selectedPartyLedger !== 'ALL' ? selectedPartyLedger.trim().toLowerCase() : null;
+    const matchParty = (name?: string) => !target || (name || '').trim().toLowerCase() === target;
+
+    const entries: Array<{
+      id: string;
+      date: string;
+      voucherNo: string;
+      partyName: string;
+      type: 'Opening' | 'Bill' | 'Receipt' | 'LorryHire' | 'Voucher';
+      paymentMode: string;
+      upiRefId: string;
+      utrNo: string;
+      chequeNo: string;
+      referenceChain: string;
+      narration: string;
+      debit: number;
+      credit: number;
+      tdsAmount: number;
+      runningBalance: number;
+      balanceSide: 'Dr' | 'Cr';
+    }> = [];
+
+    // 1. Opening balances
+    if (target) {
+      const p = parties.find((x) => x.name.trim().toLowerCase() === target);
+      if (p) {
+        const cf = fyOpenings[p.name] || fyOpenings[p.id];
+        const ob = cf ? Number(cf.amount || 0) : Number(p.openingBalance || 0);
+        const bType = cf ? cf.balanceType : p.balanceType;
+        if (ob > 0) {
+          entries.push({
+            id: `ob_${p.id}`,
+            date: '',
+            voucherNo: 'OPENING',
+            partyName: p.name,
+            type: 'Opening',
+            paymentMode: '-',
+            upiRefId: '',
+            utrNo: '',
+            chequeNo: '',
+            referenceChain: 'Carried Forward Opening Balance',
+            narration: `Opening Balance b/f (${normalizeFyLabel(activeFy)}) for ${p.name}`,
+            debit: bType === 'Dr' ? ob : 0,
+            credit: bType === 'Cr' ? ob : 0,
+            tdsAmount: 0,
+            runningBalance: 0,
+            balanceSide: bType,
+          });
+        }
+      }
+    }
+
+    // Track applied bank receipts & invoice-linked transactions so receipts aren't double-counted
+    const receiptByInv = new Map<string, BankReceiptRecord[]>();
+    bankReceipts
+      .filter((r) => r.appliedToInvoice && matchParty(r.partyName))
+      .forEach((r) => {
+        if (r.matchedInvoiceNo) {
+          const list = receiptByInv.get(r.matchedInvoiceNo) || [];
+          list.push(r);
+          receiptByInv.set(r.matchedInvoiceNo, list);
+        }
+      });
+
+    const txByInv = new Map<string, TransactionRecord[]>();
+    transactions
+      .filter((t) => t.txType === 'Income' && t.linkedInvoiceNo && matchParty(t.partyName))
+      .forEach((t) => {
+        const list = txByInv.get(t.linkedInvoiceNo!) || [];
+        list.push(t);
+        txByInv.set(t.linkedInvoiceNo!, list);
+      });
+
+    let totalBilled = 0;
+    let totalReceived = 0;
+    let totalTds = 0;
+
+    // 2. Invoices (Debit) & Invoice Receipts (Credit)
+    invoices
+      .filter((inv) => matchParty(inv.partyName))
+      .forEach((inv) => {
+        const billAmt = Number(inv.grandTotal || 0);
+        totalBilled += billAmt;
+        const cns = (inv.consignmentRows || []).map((c) => c.cnNo).filter(Boolean).slice(0, 3).join(', ');
+        entries.push({
+          id: `inv_${inv.id}`,
+          date: inv.invoiceDate,
+          voucherNo: inv.invoiceNo,
+          partyName: inv.partyName,
+          type: 'Bill',
+          paymentMode: 'Credit Bill',
+          upiRefId: '',
+          utrNo: '',
+          chequeNo: '',
+          referenceChain: inv.invoiceNo,
+          narration: buildAutomaticNarration({
+            txType: 'Bill',
+            partyName: inv.partyName,
+            amount: billAmt,
+            linkedInvoiceNo: inv.invoiceNo,
+            linkedCnNo: cns || undefined,
+          }),
+          debit: billAmt,
+          credit: 0,
+          tdsAmount: 0,
+          runningBalance: 0,
+          balanceSide: 'Dr',
+        });
+
+        const matchedTxs = txByInv.get(inv.invoiceNo) || [];
+        const matchedBrs = receiptByInv.get(inv.invoiceNo) || [];
+        let coveredCredit = 0;
+
+        if (matchedTxs.length > 0) {
+          matchedTxs.forEach((tx, idx) => {
+            const br = matchedBrs[idx];
+            const netAmt = Number(tx.amount || 0);
+            const tdsAmt = Number(tx.tdsAmount ?? br?.tdsAmount ?? 0);
+            const meta = extractPaymentMetadata({
+              description: tx.narration || br?.narration || '',
+              referenceNo: tx.utrNo || tx.upiRefId || tx.chequeNo || tx.referenceNo || br?.referenceNo || '',
+              rawMode: tx.paymentMode || br?.paymentMode,
+            });
+            const mode = tx.paymentMode || br?.paymentMode || meta.paymentMode;
+            const upiRefId = tx.upiRefId || br?.upiRefId || meta.upiRefId || '';
+            const utrNo = tx.utrNo || br?.utrNo || meta.utrNo || '';
+            const chequeNo = tx.chequeNo || br?.chequeNo || meta.chequeNo || '';
+            const chain = formatReferenceChain({
+              upiRefId,
+              utrNo,
+              chequeNo,
+              referenceNo: tx.referenceNo || br?.referenceNo,
+            });
+            const invSettled = Math.min(Number(inv.paidAmount || 0) - coveredCredit, netAmt + tdsAmt);
+            coveredCredit += netAmt + tdsAmt;
+            totalReceived += netAmt;
+            totalTds += tdsAmt;
+            entries.push({
+              id: `tx_${tx.id}`,
+              date: tx.txDate,
+              voucherNo: tx.txCode || inv.invoiceNo,
+              partyName: tx.partyName,
+              type: 'Receipt',
+              paymentMode: mode,
+              upiRefId,
+              utrNo,
+              chequeNo,
+              referenceChain: chain,
+              narration:
+                tx.narration ||
+                buildAutomaticNarration({
+                  txType: 'Income',
+                  partyName: tx.partyName,
+                  amount: netAmt,
+                  tdsAmount: tdsAmt,
+                  paymentMode: mode,
+                  upiRefId,
+                  utrNo,
+                  chequeNo,
+                  linkedInvoiceNo: inv.invoiceNo,
+                }),
+              debit: 0,
+              credit: invSettled > 0 ? invSettled : netAmt + tdsAmt,
+              tdsAmount: tdsAmt,
+              runningBalance: 0,
+              balanceSide: 'Cr',
+            });
+          });
+        } else if (matchedBrs.length > 0) {
+          matchedBrs.forEach((br) => {
+            const netAmt = Number(br.creditAmount || 0);
+            const tdsAmt = Number(br.tdsAmount || 0);
+            const meta = extractPaymentMetadata({
+              description: br.narration || br.description,
+              referenceNo: br.referenceNo,
+              rawMode: br.paymentMode,
+            });
+            const mode = br.paymentMode || meta.paymentMode;
+            const upiRefId = br.upiRefId || meta.upiRefId || '';
+            const utrNo = br.utrNo || meta.utrNo || '';
+            const chequeNo = br.chequeNo || meta.chequeNo || '';
+            coveredCredit += netAmt + tdsAmt;
+            totalReceived += netAmt;
+            totalTds += tdsAmt;
+            entries.push({
+              id: `br_${br.id}`,
+              date: br.receiptDate,
+              voucherNo: utrNo || upiRefId || chequeNo || br.referenceNo || inv.invoiceNo,
+              partyName: inv.partyName,
+              type: 'Receipt',
+              paymentMode: mode,
+              upiRefId,
+              utrNo,
+              chequeNo,
+              referenceChain: formatReferenceChain({
+                upiRefId,
+                utrNo,
+                chequeNo,
+                referenceNo: br.referenceNo,
+              }),
+              narration: buildAutomaticNarration({
+                txType: 'Income',
+                partyName: inv.partyName,
+                amount: netAmt,
+                tdsAmount: tdsAmt,
+                paymentMode: mode,
+                upiRefId,
+                utrNo,
+                chequeNo,
+                linkedInvoiceNo: inv.invoiceNo,
+              }),
+              debit: 0,
+              credit: netAmt + tdsAmt,
+              tdsAmount: tdsAmt,
+              runningBalance: 0,
+              balanceSide: 'Cr',
+            });
+          });
+        }
+
+        const remainderPaid = Math.max(0, Number(inv.paidAmount || 0) - coveredCredit);
+        if (remainderPaid > 0.01) {
+          totalReceived += remainderPaid;
+          entries.push({
+            id: `inv_paid_${inv.id}`,
+            date: inv.invoiceDate,
+            voucherNo: inv.invoiceNo,
+            partyName: inv.partyName,
+            type: 'Receipt',
+            paymentMode: 'Bank Transfer',
+            upiRefId: '',
+            utrNo: '',
+            chequeNo: '',
+            referenceChain: `Against ${inv.invoiceNo}`,
+            narration: buildAutomaticNarration({
+              txType: 'Income',
+              partyName: inv.partyName,
+              amount: remainderPaid,
+              paymentMode: 'Bank Transfer',
+              linkedInvoiceNo: inv.invoiceNo,
+            }),
+            debit: 0,
+            credit: remainderPaid,
+            tdsAmount: 0,
+            runningBalance: 0,
+            balanceSide: 'Cr',
+          });
+        }
+      });
+
+    // 3. Unlinked / standalone transactions
+    const invoiceNoSet = new Set(invoices.map((i) => i.invoiceNo));
+    transactions
+      .filter((tx) => matchParty(tx.partyName))
+      .forEach((tx) => {
+        const isLinkedInvReceipt =
+          tx.txType === 'Income' && Boolean(tx.linkedInvoiceNo && invoiceNoSet.has(tx.linkedInvoiceNo));
+        const isAutoLorryBalanceTx =
+          tx.txType === 'Expense' &&
+          tx.ledgerAccount === 'Lorry Hire Payable A/c' &&
+          (Boolean(tx.linkedCnNo) || /^LH-/i.test(tx.txCode || ''));
+        if (isLinkedInvReceipt || isAutoLorryBalanceTx) return;
+
+        const amt = Number(tx.amount || 0);
+        const tdsAmt = Number(tx.tdsAmount || 0);
+        const meta = extractPaymentMetadata({
+          description: tx.narration || '',
+          referenceNo: tx.utrNo || tx.upiRefId || tx.chequeNo || tx.referenceNo || '',
+          rawMode: tx.paymentMode,
+        });
+        const mode = tx.paymentMode || meta.paymentMode;
+        const upiRefId = tx.upiRefId || meta.upiRefId || '';
+        const utrNo = tx.utrNo || meta.utrNo || '';
+        const chequeNo = tx.chequeNo || meta.chequeNo || '';
+        if (tx.txType === 'Income') {
+          totalReceived += amt;
+          totalTds += tdsAmt;
+        }
+        entries.push({
+          id: `vch_${tx.id}`,
+          date: tx.txDate,
+          voucherNo: tx.txCode || '-',
+          partyName: tx.partyName,
+          type: 'Voucher',
+          paymentMode: mode,
+          upiRefId,
+          utrNo,
+          chequeNo,
+          referenceChain: formatReferenceChain({
+            upiRefId,
+            utrNo,
+            chequeNo,
+            referenceNo: tx.referenceNo,
+          }),
+          narration:
+            tx.narration ||
+            buildAutomaticNarration({
+              txType: tx.txType,
+              partyName: tx.partyName,
+              amount: amt,
+              tdsAmount: tdsAmt,
+              paymentMode: mode,
+              upiRefId,
+              utrNo,
+              chequeNo,
+              linkedInvoiceNo: tx.linkedInvoiceNo,
+              linkedCnNo: tx.linkedCnNo,
+              ledgerAccount: tx.ledgerAccount,
+            }),
+          debit: tx.txType === 'Expense' ? amt : 0,
+          credit: tx.txType === 'Income' ? amt : 0,
+          tdsAmount: tdsAmt,
+          runningBalance: 0,
+          balanceSide: tx.txType === 'Expense' ? 'Dr' : 'Cr',
+        });
+      });
+
+    // 4. Lorry Hire entries (when viewing a Truck Owner or ALL)
+    lorryHires
+      .filter((h) => matchParty(h.ownerName))
+      .forEach((h) => {
+        if (!h.ownerName) return;
+        const paidTotal = Number(h.advancePaid || 0) + (h.balancePaid ? Number(h.balancePayable || 0) : 0);
+        entries.push({
+          id: `lh_${h.id}`,
+          date: h.cnDate || '',
+          voucherNo: h.cnNo,
+          partyName: h.ownerName,
+          type: 'LorryHire',
+          paymentMode: h.paymentMode || 'NEFT',
+          upiRefId: '',
+          utrNo: h.paymentRef || '',
+          chequeNo: '',
+          referenceChain: formatReferenceChain({
+            utrNo: h.paymentRef,
+            referenceNo: h.truckNo,
+          }),
+          narration: buildAutomaticNarration({
+            txType: 'LorryHire',
+            partyName: h.ownerName,
+            amount: Number(h.hireAmount || 0),
+            paymentMode: h.paymentMode || 'NEFT',
+            utrNo: h.paymentRef,
+            linkedCnNo: h.cnNo,
+          }),
+          debit: paidTotal,
+          credit: Number(h.hireAmount || 0),
+          tdsAmount: 0,
+          runningBalance: 0,
+          balanceSide: 'Cr',
+        });
+      });
+
+    entries.sort((a, b) => {
+      if (a.type === 'Opening' && b.type !== 'Opening') return -1;
+      if (b.type === 'Opening' && a.type !== 'Opening') return 1;
+      return (a.date || '').localeCompare(b.date || '');
+    });
+
+    let signedBal = 0;
+    const withRunning = entries.map((e) => {
+      signedBal += e.debit - e.credit;
+      return {
+        ...e,
+        runningBalance: Math.round(Math.abs(signedBal) * 100) / 100,
+        balanceSide: (signedBal >= 0 ? 'Dr' : 'Cr') as 'Dr' | 'Cr',
+      };
+    });
+
+    // When ALL parties are viewed, mirror accountBookRows totals if party opening balances exist
+    const bookAgg = accountBookRows.reduce(
+      (acc, r) => ({
+        dr: acc.dr + r.debit,
+        cr: acc.cr + r.credit,
+      }),
+      { dr: 0, cr: 0 }
+    );
+    const finalNet = target
+      ? Math.round(Math.abs(signedBal) * 100) / 100
+      : Math.round(Math.abs(bookAgg.dr - bookAgg.cr) * 100) / 100;
+    const finalSide: 'Dr' | 'Cr' = target
+      ? signedBal >= 0
+        ? 'Dr'
+        : 'Cr'
+      : bookAgg.dr >= bookAgg.cr
+      ? 'Dr'
+      : 'Cr';
+
+    return {
+      entries: withRunning,
+      totalBilled: Math.round(totalBilled * 100) / 100,
+      totalReceived: Math.round(totalReceived * 100) / 100,
+      totalTds: Math.round(totalTds * 100) / 100,
+      netBalance: finalNet,
+      netSide: finalSide,
+    };
+  }, [
+    selectedPartyLedger,
+    parties,
+    invoices,
+    transactions,
+    bankReceipts,
+    lorryHires,
+    company.fyOpeningBalances,
+    activeFy,
+    accountBookRows,
+  ]);
+
   // Build FoxPro Statement Specification dynamically for the 6 Statements
   const activeStatementSpec = useMemo<FoxproStatementSpec>(() => {
     const f = (statementFilter || search).trim().toLowerCase();
@@ -345,22 +775,43 @@ const ReportsMisModuleInner: React.FC<ReportsMisModuleProps> = ({
       );
       const totBill = list.reduce((s, i) => s + Number(i.grandTotal || 0), 0);
       const totPaid = list.reduce((s, i) => s + Number(i.paidAmount || 0), 0);
+      const totTds = bankReceipts
+        .filter((r) =>
+          f ? `${r.partyName || ''} ${r.matchedInvoiceNo || ''}`.toLowerCase().includes(f) : true
+        )
+        .reduce((s, r) => s + Number(r.tdsAmount || 0), 0);
       const totBal = Math.max(0, totBill - totPaid);
       return {
         title: 'P-A-R-T-Y   S-T-A-T-E-M-E-N-T   /   B-I-L-L   L-E-D-G-E-R',
         subtitle: `FY: ${activeFy} · Filter: ${statementFilter || 'All Parties'} · Bills: ${list.length}`,
         fileName: `Party_Statement_${todayISO()}.pdf`,
         orientation: 'l',
+        summaryLines: [
+          { label: 'Total Billed', value: `Rs. ${formatINR(totBill)}` },
+          { label: 'Total Received', value: `Rs. ${formatINR(Math.max(0, totPaid - totTds))}` },
+          { label: 'Total TDS Deducted', value: `Rs. ${formatINR(totTds)}` },
+          { label: 'Net Balance Due', value: `Rs. ${formatINR(totBal)}` },
+        ],
         columns: [
           { label: 'S.NO', widthPct: 6, align: 'center' },
           { label: 'BILL NO / DATE', widthPct: 16, align: 'left' },
-          { label: 'PARTY NAME / GSTIN', widthPct: 30, align: 'left' },
-          { label: 'BILL AMOUNT', widthPct: 16, align: 'right' },
-          { label: 'PAID AMOUNT', widthPct: 16, align: 'right' },
-          { label: 'BALANCE DUE', widthPct: 16, align: 'right' },
+          { label: 'PARTY NAME / AUTO NARRATION & REF', widthPct: 34, align: 'left' },
+          { label: 'BILL AMOUNT', widthPct: 15, align: 'right' },
+          { label: 'PAID + TDS', widthPct: 15, align: 'right' },
+          { label: 'BALANCE DUE', widthPct: 14, align: 'right' },
         ],
         rows: list.map((inv, idx) => {
           const bal = Math.max(0, Number(inv.grandTotal || 0) - Number(inv.paidAmount || 0));
+          const linkedTx = transactions.find((t) => t.linkedInvoiceNo === inv.invoiceNo);
+          const linkedBr = bankReceipts.find((b) => b.matchedInvoiceNo === inv.invoiceNo);
+          const refChain = linkedTx || linkedBr
+            ? formatReferenceChain({
+                upiRefId: linkedTx?.upiRefId || linkedBr?.upiRefId,
+                utrNo: linkedTx?.utrNo || linkedBr?.utrNo,
+                chequeNo: linkedTx?.chequeNo || linkedBr?.chequeNo,
+                referenceNo: linkedTx?.referenceNo || linkedBr?.referenceNo,
+              })
+            : inv.partyGstin || (inv.billingCountry || 'India');
           return {
             line1: [
               String(idx + 1),
@@ -373,9 +824,9 @@ const ReportsMisModuleInner: React.FC<ReportsMisModuleProps> = ({
             line2: [
               '',
               formatDateDDMMYYYY(inv.invoiceDate),
-              inv.partyGstin || (inv.billingCountry || 'India'),
+              refChain,
               `Tax: ${formatINR(inv.totalTax || 0)}`,
-              inv.status,
+              linkedBr?.tdsAmount ? `TDS: ${formatINR(linkedBr.tdsAmount)} · ${inv.status}` : inv.status,
               inv.dueDate ? `Due ${formatDateDDMMYYYY(inv.dueDate)}` : '-',
             ],
           };
@@ -711,6 +1162,8 @@ const ReportsMisModuleInner: React.FC<ReportsMisModuleProps> = ({
     consignments,
     lorryHires,
     drivers,
+    transactions,
+    bankReceipts,
     activeFy,
   ]);
 
@@ -909,20 +1362,117 @@ const ReportsMisModuleInner: React.FC<ReportsMisModuleProps> = ({
         fileName: `Party_Aging_Report_${todayISO()}.pdf`,
       });
     }
-    return generateTableReportPDF({
-      title: 'Account Book & Ledger Balances',
-      subtitle: `As of ${formatDateDDMMYYYY(todayISO())}`,
-      headers: ['Party / Account', 'Total Debit (Rs)', 'Total Credit (Rs)', 'Net Balance', 'Side'],
-      rows: filteredAccountBook.map((r) => [
-        r.party,
-        formatINR(r.debit),
-        formatINR(r.credit),
-        formatINR(r.netBalance),
-        r.side,
-      ]),
+    if (tab === 'accountBook' && selectedPartyLedger !== 'ALL') {
+      const entries = partyLedgerSummary.entries;
+      const totDr = entries.reduce((s, r) => s + r.debit, 0);
+      const totCr = entries.reduce((s, r) => s + r.credit, 0);
+      return generateFoxproStatementPDF(
+        {
+          title: 'N-E-X-T - G-E-N   P-A-R-T-Y   L-E-D-G-E-R   S-T-A-T-E-M-E-N-T',
+          subtitle: `Party: ${selectedPartyLedger} · FY: ${activeFy} · As of ${formatDateDDMMYYYY(todayISO())}`,
+          fileName: `Party_Ledger_${selectedPartyLedger.replace(/[^a-zA-Z0-9_-]/g, '_')}_${todayISO()}.pdf`,
+          orientation: 'l',
+          summaryLines: [
+            { label: 'Total Billed', value: `Rs. ${formatINR(partyLedgerSummary.totalBilled)}` },
+            { label: 'Total Received', value: `Rs. ${formatINR(partyLedgerSummary.totalReceived)}` },
+            { label: 'Total TDS Deducted', value: `Rs. ${formatINR(partyLedgerSummary.totalTds)}` },
+            {
+              label: 'Net Balance',
+              value: `Rs. ${formatINR(partyLedgerSummary.netBalance)} ${partyLedgerSummary.netSide}`,
+            },
+          ],
+          columns: [
+            { label: 'DATE / VOUCHER', widthPct: 13, align: 'left' },
+            { label: 'PARTICULARS & AUTO NARRATION', widthPct: 36, align: 'left' },
+            { label: 'MODE / UPI REF / UTR / CHEQUE', widthPct: 21, align: 'left' },
+            { label: 'DEBIT (INR)', widthPct: 10, align: 'right' },
+            { label: 'CREDIT (INR)', widthPct: 10, align: 'right' },
+            { label: 'BALANCE', widthPct: 10, align: 'right' },
+          ],
+          rows: entries.map((e) => ({
+            line1: [
+              e.date ? formatDateDDMMYYYY(e.date) : 'OPENING',
+              e.narration,
+              e.referenceChain,
+              e.debit > 0 ? formatINR(e.debit) : '-',
+              e.credit > 0 ? formatINR(e.credit) : '-',
+              `${formatINR(e.runningBalance)} ${e.balanceSide}`,
+            ],
+            line2: [
+              e.voucherNo,
+              `Type: ${e.type}${e.tdsAmount > 0 ? ` · Sec 194C TDS: Rs. ${formatINR(e.tdsAmount)}` : ''}`,
+              [
+                e.upiRefId ? `UPI:${e.upiRefId}` : '',
+                e.utrNo ? `UTR:${e.utrNo}` : '',
+                e.chequeNo ? `CHQ:${e.chequeNo}` : '',
+              ]
+                .filter(Boolean)
+                .join(' | ') || e.paymentMode,
+              '',
+              e.tdsAmount > 0 ? `TDS ${formatINR(e.tdsAmount)}` : '',
+              '',
+            ],
+          })),
+          totalsLabel: 'CLOSING LEDGER TOTALS :',
+          totalsLine1: [
+            '',
+            `TDS Deducted: Rs. ${formatINR(partyLedgerSummary.totalTds)}`,
+            '',
+            formatINR(totDr),
+            formatINR(totCr),
+            `${formatINR(partyLedgerSummary.netBalance)} ${partyLedgerSummary.netSide}`,
+          ],
+          totalAmountForWords: partyLedgerSummary.netBalance,
+        },
+        company,
+        'l'
+      );
+    }
+
+    return generateFoxproStatementPDF(
+      {
+        title: 'A-C-C-O-U-N-T   B-O-O-K   &   P-A-R-T-Y   L-E-D-G-E-R   S-U-M-M-A-R-Y',
+        subtitle: `FY: ${activeFy} · As of ${formatDateDDMMYYYY(todayISO())} · Accounts: ${filteredAccountBook.length}`,
+        fileName: `Account_Book_${todayISO()}.pdf`,
+        orientation: 'l',
+        summaryLines: [
+          { label: 'Total Billed', value: `Rs. ${formatINR(partyLedgerSummary.totalBilled)}` },
+          { label: 'Total Received', value: `Rs. ${formatINR(partyLedgerSummary.totalReceived)}` },
+          { label: 'Total TDS Deducted', value: `Rs. ${formatINR(partyLedgerSummary.totalTds)}` },
+          {
+            label: 'Net Balance',
+            value: `Rs. ${formatINR(partyLedgerSummary.netBalance)} ${partyLedgerSummary.netSide}`,
+          },
+        ],
+        columns: [
+          { label: 'S.NO', widthPct: 6, align: 'center' },
+          { label: 'PARTY / ACCOUNT NAME', widthPct: 40, align: 'left' },
+          { label: 'TOTAL DEBIT (INR)', widthPct: 18, align: 'right' },
+          { label: 'TOTAL CREDIT (INR)', widthPct: 18, align: 'right' },
+          { label: 'NET BALANCE', widthPct: 18, align: 'right' },
+        ],
+        rows: filteredAccountBook.map((r, idx) => ({
+          line1: [
+            String(idx + 1),
+            r.party,
+            formatINR(r.debit),
+            formatINR(r.credit),
+            `${formatINR(r.netBalance)} ${r.side}`,
+          ],
+        })),
+        totalsLabel: 'TOTAL IN RUPEES :',
+        totalsLine1: [
+          '',
+          '',
+          formatINR(filteredAccountBook.reduce((s, r) => s + r.debit, 0)),
+          formatINR(filteredAccountBook.reduce((s, r) => s + r.credit, 0)),
+          `${formatINR(partyLedgerSummary.netBalance)} ${partyLedgerSummary.netSide}`,
+        ],
+        totalAmountForWords: partyLedgerSummary.netBalance,
+      },
       company,
-      fileName: `Account_Book_${todayISO()}.pdf`,
-    });
+      'l'
+    );
   };
 
   const handleReportPdfAction = async (mode: 'preview' | 'print' | 'download') => {
@@ -1022,6 +1572,22 @@ const ReportsMisModuleInner: React.FC<ReportsMisModuleProps> = ({
         headerClassName: 'text-right',
         cellClassName: 'text-right font-mono-num font-bold',
         render: (r) => `₹ ${formatINR(r.netBalance)} ${r.side}`,
+      },
+      {
+        key: 'ledger',
+        header: 'Next-Gen Ledger',
+        headerClassName: 'text-right',
+        cellClassName: 'text-right whitespace-nowrap',
+        render: (r) => (
+          <button
+            type="button"
+            onClick={() => setSelectedPartyLedger(r.party)}
+            className="inline-flex items-center gap-1 px-2.5 py-1 rounded bg-blue-50 hover:bg-blue-100 text-blue-800 text-[11px] font-bold cursor-pointer"
+          >
+            <Eye className="w-3 h-3" />
+            View Ledger
+          </button>
+        ),
       },
     ],
     []
@@ -1734,36 +2300,169 @@ const ReportsMisModuleInner: React.FC<ReportsMisModuleProps> = ({
 
       {tab === 'accountBook' && (
         <div className="space-y-3">
-          <div className="flex flex-wrap gap-2">
-            <button
-              type="button"
-              disabled={readOnly}
-              onClick={handleRecalculateBalances}
-              className="inline-flex items-center gap-1.5 px-3.5 py-2 rounded-lg bg-blue-700 hover:bg-blue-800 text-white text-xs font-bold cursor-pointer disabled:opacity-50"
-            >
-              <Calculator className="w-4 h-4" />
-              Recalculate Party Balances
-            </button>
-            <button
-              type="button"
-              disabled={readOnly}
-              onClick={handleAutoTransferBalances}
-              className="inline-flex items-center gap-1.5 px-3.5 py-2 rounded-lg bg-purple-700 hover:bg-purple-800 text-white text-xs font-bold cursor-pointer disabled:opacity-50"
-            >
-              <RefreshCw className="w-4 h-4" />
-              Auto Transfer Balances (FY Carry Forward)
-            </button>
+          {/* Next-Gen Party Ledger Top Summary KPI Cards */}
+          <div className="grid grid-cols-2 lg:grid-cols-4 gap-3">
+            <div className="bg-white rounded-xl border border-slate-200 shadow-sm p-3.5">
+              <div className="text-[11px] font-bold uppercase tracking-wide text-slate-500">
+                Total Billed
+              </div>
+              <div className="text-lg font-extrabold font-mono-num text-blue-900 mt-0.5">
+                ₹ {formatINR(partyLedgerSummary.totalBilled)}
+              </div>
+            </div>
+            <div className="bg-white rounded-xl border border-slate-200 shadow-sm p-3.5">
+              <div className="text-[11px] font-bold uppercase tracking-wide text-slate-500">
+                Total Received
+              </div>
+              <div className="text-lg font-extrabold font-mono-num text-emerald-700 mt-0.5">
+                ₹ {formatINR(partyLedgerSummary.totalReceived)}
+              </div>
+            </div>
+            <div className="bg-white rounded-xl border border-slate-200 shadow-sm p-3.5">
+              <div className="text-[11px] font-bold uppercase tracking-wide text-slate-500">
+                Total TDS Deducted
+              </div>
+              <div className="text-lg font-extrabold font-mono-num text-amber-700 mt-0.5">
+                ₹ {formatINR(partyLedgerSummary.totalTds)}
+              </div>
+            </div>
+            <div className="bg-white rounded-xl border border-slate-200 shadow-sm p-3.5">
+              <div className="text-[11px] font-bold uppercase tracking-wide text-slate-500">
+                Net Balance ({partyLedgerSummary.netSide})
+              </div>
+              <div className="text-lg font-extrabold font-mono-num text-slate-900 mt-0.5">
+                ₹ {formatINR(partyLedgerSummary.netBalance)} {partyLedgerSummary.netSide}
+              </div>
+            </div>
           </div>
 
-          <div className="bg-white rounded-xl border border-slate-200 shadow-sm overflow-hidden">
-            <PaginatedDataTable
-              data={filteredAccountBook}
-              columns={accountBookCols}
-              getRowId={(r) => r.party}
-              defaultPageSize={50}
-              emptyMessage="No ledger entries."
-            />
+          <div className="bg-white rounded-xl border border-slate-200 shadow-sm p-3 flex flex-wrap items-center justify-between gap-2.5 text-xs">
+            <div className="flex flex-wrap items-center gap-2">
+              <label className="font-bold text-slate-800">Next-Gen Party Ledger:</label>
+              <select
+                aria-label="Select Party Ledger"
+                value={selectedPartyLedger}
+                onChange={(e) => setSelectedPartyLedger(e.target.value)}
+                className="px-3 py-1.5 rounded-lg border border-slate-300 bg-white font-bold text-slate-900 min-w-[240px]"
+              >
+                <option value="ALL">All Parties Account Summary ({filteredAccountBook.length})</option>
+                {partyLedgerOptions.map((pName) => (
+                  <option key={pName} value={pName}>
+                    {pName}
+                  </option>
+                ))}
+              </select>
+              {selectedPartyLedger !== 'ALL' && (
+                <button
+                  type="button"
+                  onClick={() => setSelectedPartyLedger('ALL')}
+                  className="px-2.5 py-1.5 rounded-lg border border-slate-300 bg-slate-50 hover:bg-slate-100 font-semibold text-slate-700 cursor-pointer"
+                >
+                  Back to All Parties
+                </button>
+              )}
+            </div>
+
+            <div className="flex flex-wrap gap-2">
+              <button
+                type="button"
+                disabled={readOnly}
+                onClick={handleRecalculateBalances}
+                className="inline-flex items-center gap-1.5 px-3 py-1.5 rounded-lg bg-blue-700 hover:bg-blue-800 text-white text-xs font-bold cursor-pointer disabled:opacity-50"
+              >
+                <Calculator className="w-3.5 h-3.5" />
+                Recalculate Balances
+              </button>
+              <button
+                type="button"
+                disabled={readOnly}
+                onClick={handleAutoTransferBalances}
+                className="inline-flex items-center gap-1.5 px-3 py-1.5 rounded-lg bg-purple-700 hover:bg-purple-800 text-white text-xs font-bold cursor-pointer disabled:opacity-50"
+              >
+                <RefreshCw className="w-3.5 h-3.5" />
+                FY Carry Forward
+              </button>
+            </div>
           </div>
+
+          {selectedPartyLedger === 'ALL' ? (
+            <div className="bg-white rounded-xl border border-slate-200 shadow-sm overflow-hidden">
+              <PaginatedDataTable
+                data={filteredAccountBook}
+                columns={accountBookCols}
+                getRowId={(r) => r.party}
+                defaultPageSize={50}
+                emptyMessage="No ledger entries."
+              />
+            </div>
+          ) : (
+            <div className="bg-white rounded-xl border border-slate-200 shadow-sm overflow-x-auto">
+              <div className="bg-slate-800 text-white px-4 py-2 flex flex-wrap items-center justify-between gap-2 text-xs font-bold">
+                <span>
+                  Party Statement: {selectedPartyLedger} ({partyLedgerSummary.entries.length} entries)
+                </span>
+                <span className="font-mono-num">
+                  Closing: ₹ {formatINR(partyLedgerSummary.netBalance)} {partyLedgerSummary.netSide}
+                </span>
+              </div>
+              <table className="w-full text-xs text-left border-collapse">
+                <thead className="bg-slate-100 text-slate-700 border-b border-slate-200">
+                  <tr>
+                    <th className="py-2 px-3">Date / Ref</th>
+                    <th className="py-2 px-3">Type</th>
+                    <th className="py-2 px-3">Automatic Accounting Narration</th>
+                    <th className="py-2 px-3">Mode / UPI Ref / UTR / Cheque</th>
+                    <th className="py-2 px-3 text-right">Debit (₹)</th>
+                    <th className="py-2 px-3 text-right">Credit (₹)</th>
+                    <th className="py-2 px-3 text-right">TDS (₹)</th>
+                    <th className="py-2 px-3 text-right">Running Balance</th>
+                  </tr>
+                </thead>
+                <tbody className="divide-y divide-slate-200">
+                  {partyLedgerSummary.entries.length === 0 ? (
+                    <tr>
+                      <td colSpan={8} className="p-8 text-center text-slate-500">
+                        No ledger transactions recorded for {selectedPartyLedger}.
+                      </td>
+                    </tr>
+                  ) : (
+                    partyLedgerSummary.entries.map((e) => (
+                      <tr key={e.id} className="hover:bg-slate-50">
+                        <td className="py-2 px-3 font-mono-num whitespace-nowrap">
+                          <div className="font-semibold text-slate-900">
+                            {e.date ? formatDateDDMMYYYY(e.date) : 'OPENING'}
+                          </div>
+                          <div className="text-[10px] text-blue-700 font-bold">{e.voucherNo}</div>
+                        </td>
+                        <td className="py-2 px-3 whitespace-nowrap">
+                          <span className="px-2 py-0.5 rounded bg-slate-100 text-slate-800 text-[10px] font-bold">
+                            {e.type}
+                          </span>
+                        </td>
+                        <td className="py-2 px-3 text-slate-800 max-w-md">{e.narration}</td>
+                        <td className="py-2 px-3 font-mono-num text-[11px] text-slate-700">
+                          <div className="font-bold text-slate-900">{e.paymentMode}</div>
+                          <div className="text-[10px] text-slate-600">{e.referenceChain}</div>
+                        </td>
+                        <td className="py-2 px-3 text-right font-mono-num font-semibold text-blue-900">
+                          {e.debit > 0 ? formatINR(e.debit) : '-'}
+                        </td>
+                        <td className="py-2 px-3 text-right font-mono-num font-semibold text-emerald-700">
+                          {e.credit > 0 ? formatINR(e.credit) : '-'}
+                        </td>
+                        <td className="py-2 px-3 text-right font-mono-num text-amber-700">
+                          {e.tdsAmount > 0 ? formatINR(e.tdsAmount) : '-'}
+                        </td>
+                        <td className="py-2 px-3 text-right font-mono-num font-extrabold text-slate-900 whitespace-nowrap">
+                          ₹ {formatINR(e.runningBalance)} {e.balanceSide}
+                        </td>
+                      </tr>
+                    ))
+                  )}
+                </tbody>
+              </table>
+            </div>
+          )}
         </div>
       )}
 

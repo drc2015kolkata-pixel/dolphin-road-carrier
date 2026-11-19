@@ -359,6 +359,10 @@ export interface TransactionRecord {
   narration?: string;
   paymentMode: string;
   referenceNo?: string;
+  upiRefId?: string;
+  utrNo?: string;
+  chequeNo?: string;
+  tdsAmount?: number;
   linkedCnNo?: string;
   linkedInvoiceNo?: string;
   branchCode?: string;
@@ -460,7 +464,12 @@ export interface BankReceiptRecord {
   receiptDate: string;
   bankAccountName: string;
   partyName: string;
+  paymentMode?: string;
   referenceNo: string;
+  upiRefId?: string;
+  utrNo?: string;
+  chequeNo?: string;
+  narration?: string;
   description: string;
   creditAmount: number;
   tdsRatePct: number;
@@ -541,6 +550,8 @@ export interface CompanySettings {
   fyOpeningBalances?: Record<string, Record<string, FyOpeningBalanceEntry>>;
   dropdownMaster?: DropdownMasterConfig;
   customStampDataUrl?: string;
+  bholeBabaPhotoDataUrl?: string;
+  khatuShyamPhotoDataUrl?: string;
   autoLockMinutes?: number;
   lockSourceInspection?: boolean;
   last90DayAutoFixAt?: number;

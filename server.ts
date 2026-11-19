@@ -321,10 +321,27 @@ app.get('/api/health', (_req, res) => {
 
 app.get('/api/version', (_req, res) => {
   res.setHeader('Cache-Control', 'no-store, no-cache, must-revalidate');
+  let buildTime = process.env.NODE_ENV === 'production' ? SERVER_BOOT_ISO : 'dev';
+  let version = APP_VERSION;
+  if (process.env.NODE_ENV === 'production') {
+    try {
+      const versionJsonPath = path.resolve(__dirname, 'dist', 'version.json');
+      if (fs.existsSync(versionJsonPath)) {
+        const parsed = JSON.parse(fs.readFileSync(versionJsonPath, 'utf8')) as {
+          version?: string;
+          buildTime?: string;
+        };
+        if (parsed.buildTime) buildTime = parsed.buildTime;
+        if (parsed.version) version = parsed.version;
+      }
+    } catch {
+      // Fallback to server boot timestamp
+    }
+  }
   res.json({
     ok: true,
-    version: APP_VERSION,
-    buildTime: process.env.NODE_ENV === 'production' ? SERVER_BOOT_ISO : 'dev',
+    version,
+    buildTime,
     serverBootAt: SERVER_BOOT_ISO,
   });
 });
@@ -1577,8 +1594,24 @@ export class ErrorOverlay extends HTMLElement {}
     app.use(vite.middlewares);
   } else {
     const distPath = path.resolve(__dirname, 'dist');
-    app.use(express.static(distPath));
+    app.use(
+      express.static(distPath, {
+        setHeaders: (res, filePath) => {
+          const base = path.basename(filePath);
+          if (
+            base === 'sw.js' ||
+            base === 'registerSW.js' ||
+            base === 'manifest.webmanifest' ||
+            base === 'version.json' ||
+            base === 'index.html'
+          ) {
+            res.setHeader('Cache-Control', 'no-store, no-cache, must-revalidate');
+          }
+        },
+      })
+    );
     app.get('*', (_req, res) => {
+      res.setHeader('Cache-Control', 'no-store, no-cache, must-revalidate');
       res.sendFile(path.join(distPath, 'index.html'));
     });
   }
