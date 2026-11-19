@@ -1,206 +1,519 @@
-export interface StateDistrictEntry {
+export interface StateDistrictGroup {
   code: string;
   name: string;
   label: string;
   districts: string[];
 }
 
-export const ALL_INDIA_STATES_DISTRICTS: StateDistrictEntry[] = new Array(
-  {
-    code: "WB",
-    name: "West Bengal",
-    label: "19 - West Bengal",
-    districts: new Array("Kolkata", "Howrah", "Hooghly", "North 24 Parganas", "South 24 Parganas", "Purba Bardhaman", "Paschim Bardhaman", "Siliguri", "Durgapur", "Asansol", "Malda", "Murshidabad", "Nadia", "Purba Medinipur", "Paschim Medinipur")
-  },
-  {
-    code: "MH",
-    name: "Maharashtra",
-    label: "27 - Maharashtra",
-    districts: new Array("Mumbai", "Pune", "Nagpur", "Thane", "Nashik", "Aurangabad", "Solapur", "Kolhapur", "Bhiwandi")
-  },
-  {
-    code: "DL",
-    name: "Delhi",
-    label: "07 - Delhi",
-    districts: new Array("New Delhi", "North Delhi", "South Delhi", "East Delhi", "West Delhi")
-  },
-  {
-    code: "GJ",
-    name: "Gujarat",
-    label: "24 - Gujarat",
-    districts: new Array("Ahmedabad", "Surat", "Vadodara", "Rajkot", "Vapi", "Ankleshwar", "Gandhidham")
-  },
-  {
-    code: "TN",
-    name: "Tamil Nadu",
-    label: "33 - Tamil Nadu",
-    districts: new Array("Chennai", "Coimbatore", "Madurai", "Salem", "Tiruchirappalli", "Hosur")
-  },
-  {
-    code: "KA",
-    name: "Karnataka",
-    label: "29 - Karnataka",
-    districts: new Array("Bengaluru", "Mysuru", "Hubballi", "Mangaluru", "Belagavi")
-  },
-  {
-    code: "UP",
-    name: "Uttar Pradesh",
-    label: "09 - Uttar Pradesh",
-    districts: new Array("Lucknow", "Kanpur", "Ghaziabad", "Noida", "Varanasi", "Agra", "Prayagraj")
-  },
-  {
-    code: "BR",
-    name: "Bihar",
-    label: "10 - Bihar",
-    districts: new Array("Patna", "Gaya", "Muzaffarpur", "Bhagalpur", "Purnia")
-  },
-  {
-    code: "JH",
-    name: "Jharkhand",
-    label: "20 - Jharkhand",
-    districts: new Array("Ranchi", "Jamshedpur", "Dhanbad", "Bokaro", "Hazaribagh")
-  },
-  {
-    code: "OD",
-    name: "Odisha",
-    label: "21 - Odisha",
-    districts: new Array("Bhubaneswar", "Cuttack", "Rourkela", "Sambalpur", "Balasore")
-  },
-  {
-    code: "AS",
-    name: "Assam",
-    label: "18 - Assam",
-    districts: new Array("Guwahati", "Silchar", "Dibrugarh", "Jorhat", "Tinsukia")
-  },
-  {
-    code: "RJ",
-    name: "Rajasthan",
-    label: "08 - Rajasthan",
-    districts: new Array("Jaipur", "Jodhpur", "Udaipur", "Kota", "Bhiwadi")
-  },
-  {
-    code: "HR",
-    name: "Haryana",
-    label: "06 - Haryana",
-    districts: new Array("Gurugram", "Faridabad", "Panipat", "Ambala", "Hisar")
-  },
-  {
-    code: "PB",
-    name: "Punjab",
-    label: "03 - Punjab",
-    districts: new Array("Ludhiana", "Amritsar", "Jalandhar", "Patiala", "Bathinda")
-  },
-  {
-    code: "TS",
-    name: "Telangana",
-    label: "36 - Telangana",
-    districts: new Array("Hyderabad", "Warangal", "Nizamabad", "Secunderabad")
-  },
-  {
-    code: "AP",
-    name: "Andhra Pradesh",
-    label: "37 - Andhra Pradesh",
-    districts: new Array("Visakhapatnam", "Vijayawada", "Guntur", "Tirupati", "Nellore")
-  },
-  {
-    code: "MP",
-    name: "Madhya Pradesh",
-    label: "23 - Madhya Pradesh",
-    districts: new Array("Indore", "Bhopal", "Jabalpur", "Gwalior", "Ujjain")
-  },
-  {
-    code: "CG",
-    name: "Chhattisgarh",
-    label: "22 - Chhattisgarh",
-    districts: new Array("Raipur", "Bilaspur", "Durg", "Korba")
-  },
-  {
-    code: "KL",
-    name: "Kerala",
-    label: "32 - Kerala",
-    districts: new Array("Kochi", "Thiruvananthapuram", "Kozhikode", "Thrissur")
-  }
-);
+export const ALL_INDIA_NON_LIQUID_GOODS: string[] = [
+  'MS Steel Pipes & Tubes',
+  'TMT Bars & Iron Rods',
+  'Structural Steel & Plates',
+  'HR / CR Steel Coils & Sheets',
+  'Iron Ingots / Billets / Pig Iron',
+  'Cement Bags (OPC/PPC)',
+  'Fly Ash & Bricks',
+  'Coal & Coke',
+  'Hardware & Machinery Parts',
+  'Electrical Transformers & Cables',
+  'FMCG & Packaged Food',
+  'Rice, Wheat & Food Grains',
+  'Sugar, Flour & Spices (Bags)',
+  'Tea Chests & Jute Bales',
+  'Fertilizer & Agro Seeds',
+  'Paper Rolls & Packaging Material',
+  'Garments & Textiles',
+  'Plastic Granules & PVC Pipes',
+  'Auto Spare Parts & Tyres',
+  'Electronics & Home Appliances',
+  'Solar Panels, Batteries & Inverters',
+  'Pharmaceuticals & Medical Boxes',
+  'Plyboard, Timber & Furniture',
+  'Aluminium Ingots & Extrusions',
+  'Ceramic Tiles, Marbles & Sanitaryware',
+  'Solid Industrial Chemicals (Bags/Drums)',
+  'General Cargo / Sundry Goods',
+];
 
-export const ALL_INDIA_NON_LIQUID_GOODS: string[] = new Array(
-  "FMCG & Packaged Foods",
-  "Industrial Machinery & Spare Parts",
-  "Electrical & Electronic Appliances",
-  "Textiles, Garments & Fabrics",
-  "Pharmaceuticals & Medical Supplies",
-  "Hardware, Steel & Iron Rods",
-  "Plastic Granules & Polymer Bags",
-  "Paper Rolls & Packaging Material",
-  "Automobile Parts & Tyres",
-  "Agricultural Produce & Grains",
-  "Furniture & Wooden Items",
-  "Ceramic Tiles & Sanitaryware",
-  "Paints & Dry Chemicals (Non-Hazardous)",
-  "General Merchandise & Parcel"
-);
+export const ALL_INDIA_STATES_DISTRICTS: StateDistrictGroup[] = [
+  {
+    code: '19',
+    name: 'West Bengal',
+    label: '19 - West Bengal',
+    districts: [
+      'Kolkata',
+      'Howrah',
+      'Hooghly',
+      'North 24 Parganas',
+      'South 24 Parganas',
+      'Purba Bardhaman',
+      'Paschim Bardhaman',
+      'Durgapur',
+      'Asansol',
+      'Siliguri',
+      'Darjeeling',
+      'Jalpaiguri',
+      'Alipurduar',
+      'Cooch Behar',
+      'Malda',
+      'Uttar Dinajpur (Raiganj)',
+      'Dakshin Dinajpur',
+      'Murshidabad',
+      'Nadia',
+      'Birbhum',
+      'Bankura',
+      'Purulia',
+      'Purba Medinipur (Haldia)',
+      'Paschim Medinipur',
+      'Jhargram',
+      'Kalimpong',
+    ],
+  },
+  {
+    code: '18',
+    name: 'Assam',
+    label: '18 - Assam',
+    districts: [
+      'Guwahati (Kamrup Metro)',
+      'Kamrup',
+      'Dibrugarh',
+      'Tinsukia',
+      'Jorhat',
+      'Silchar (Cachar)',
+      'Nagaon',
+      'Tezpur (Sonitpur)',
+      'Bongaigaon',
+      'Barpeta',
+      'Goalpara',
+      'Dhubri',
+      'Kokrajhar',
+      'Sivasagar',
+      'Lakhimpur',
+      'Karimganj',
+    ],
+  },
+  {
+    code: '10',
+    name: 'Bihar',
+    label: '10 - Bihar',
+    districts: [
+      'Patna',
+      'Gaya',
+      'Muzaffarpur',
+      'Bhagalpur',
+      'Purnia',
+      'Darbhanga',
+      'Begusarai',
+      'Katihar',
+      'Araria',
+      'Kishanganj',
+      'Chapra (Saran)',
+      'Hajipur (Vaishali)',
+      'Motihari',
+      'Bettiah',
+      'Samastipur',
+      'Munger',
+      'Sasaram (Rohtas)',
+    ],
+  },
+  {
+    code: '20',
+    name: 'Jharkhand',
+    label: '20 - Jharkhand',
+    districts: [
+      'Ranchi',
+      'Jamshedpur (East Singhbhum)',
+      'Dhanbad',
+      'Bokaro',
+      'Hazaribagh',
+      'Deoghar',
+      'Giridih',
+      'Ramgarh',
+      'Chaibasa (West Singhbhum)',
+      'Dumka',
+      'Palamu (Daltonganj)',
+      'Adityapur (Seraikela)',
+    ],
+  },
+  {
+    code: '21',
+    name: 'Odisha',
+    label: '21 - Odisha',
+    districts: [
+      'Bhubaneswar (Khordha)',
+      'Cuttack',
+      'Rourkela (Sundargarh)',
+      'Sambalpur',
+      'Berhampur (Ganjam)',
+      'Balasore',
+      'Bhadrak',
+      'Jajpur (Kalinganagar)',
+      'Angul',
+      'Jharsuguda',
+      'Paradip (Jagatsinghpur)',
+      'Keonjhar',
+      'Baripada (Mayurbhanj)',
+    ],
+  },
+  {
+    code: '33',
+    name: 'Tamil Nadu',
+    label: '33 - Tamil Nadu',
+    districts: [
+      'Chennai',
+      'Coimbatore',
+      'Madurai',
+      'Tiruchirappalli',
+      'Salem',
+      'Tiruppur',
+      'Erode',
+      'Vellore',
+      'Thoothukudi (Tuticorin)',
+      'Hosur (Krishnagiri)',
+      'Tirunelveli',
+      'Thanjavur',
+      'Kanchipuram',
+    ],
+  },
+  {
+    code: '09',
+    name: 'Uttar Pradesh',
+    label: '09 - Uttar Pradesh',
+    districts: [
+      'Lucknow',
+      'Kanpur',
+      'Varanasi',
+      'Prayagraj',
+      'Ghaziabad',
+      'Noida (Gautam Buddha Nagar)',
+      'Agra',
+      'Meerut',
+      'Gorakhpur',
+      'Bareilly',
+      'Aligarh',
+      'Moradabad',
+    ],
+  },
+  {
+    code: '27',
+    name: 'Maharashtra',
+    label: '27 - Maharashtra',
+    districts: [
+      'Mumbai',
+      'Pune',
+      'Nagpur',
+      'Thane',
+      'Nashik',
+      'Aurangabad',
+      'Solapur',
+      'Kolhapur',
+      'Bhiwandi',
+      'Raigad (Panvel)',
+    ],
+  },
+  {
+    code: '24',
+    name: 'Gujarat',
+    label: '24 - Gujarat',
+    districts: [
+      'Ahmedabad',
+      'Surat',
+      'Vadodara',
+      'Rajkot',
+      'Gandhidham (Kutch)',
+      'Vapi (Valsad)',
+      'Jamnagar',
+      'Bhavnagar',
+      'Ankleshwar (Bharuch)',
+    ],
+  },
+  {
+    code: '22',
+    name: 'Chhattisgarh',
+    label: '22 - Chhattisgarh',
+    districts: ['Raipur', 'Bhilai (Durg)', 'Bilaspur', 'Korba', 'Raigarh', 'Rajnandgaon', 'Jagdalpur'],
+  },
+  {
+    code: '07',
+    name: 'Delhi NCR',
+    label: '07 - Delhi NCR',
+    districts: ['New Delhi', 'North Delhi', 'South Delhi', 'East Delhi', 'West Delhi', 'Gurugram', 'Faridabad'],
+  },
+  {
+    code: '06',
+    name: 'Haryana',
+    label: '06 - Haryana',
+    districts: ['Ambala', 'Panipat', 'Karnal', 'Hisar', 'Rohtak', 'Sonipat', 'Yamunanagar', 'Gurugram', 'Faridabad'],
+  },
+  {
+    code: '03',
+    name: 'Punjab',
+    label: '03 - Punjab',
+    districts: ['Ludhiana', 'Amritsar', 'Jalandhar', 'Patiala', 'Bathinda', 'Mohali', 'Mandi Gobindgarh'],
+  },
+  {
+    code: '08',
+    name: 'Rajasthan',
+    label: '08 - Rajasthan',
+    districts: ['Jaipur', 'Jodhpur', 'Udaipur', 'Kota', 'Bhiwadi (Alwar)', 'Ajmer', 'Bikaner'],
+  },
+  {
+    code: '23',
+    name: 'Madhya Pradesh',
+    label: '23 - Madhya Pradesh',
+    districts: ['Indore', 'Bhopal', 'Jabalpur', 'Gwalior', 'Ujjain', 'Satna', 'Singrauli'],
+  },
+  {
+    code: '37',
+    name: 'Andhra Pradesh',
+    label: '37 - Andhra Pradesh',
+    districts: ['Visakhapatnam', 'Vijayawada', 'Guntur', 'Nellore', 'Tirupati', 'Kakinada'],
+  },
+  {
+    code: '36',
+    name: 'Telangana',
+    label: '36 - Telangana',
+    districts: ['Hyderabad', 'Secunderabad', 'Warangal', 'Nizamabad', 'Karimnagar'],
+  },
+  {
+    code: '29',
+    name: 'Karnataka',
+    label: '29 - Karnataka',
+    districts: ['Bengaluru', 'Hubballi-Dharwad', 'Mangaluru', 'Belagavi', 'Mysuru', 'Ballari'],
+  },
+  {
+    code: '32',
+    name: 'Kerala',
+    label: '32 - Kerala',
+    districts: ['Kochi (Ernakulam)', 'Thiruvananthapuram', 'Kozhikode', 'Thrissur', 'Kollam'],
+  },
+  {
+    code: '16',
+    name: 'Tripura',
+    label: '16 - Tripura',
+    districts: ['Agartala', 'Udaipur', 'Dharmanagar'],
+  },
+  {
+    code: '17',
+    name: 'Meghalaya',
+    label: '17 - Meghalaya',
+    districts: ['Shillong', 'Byrnihat', 'Tura'],
+  },
+  {
+    code: '14',
+    name: 'Manipur',
+    label: '14 - Manipur',
+    districts: ['Imphal'],
+  },
+  {
+    code: '13',
+    name: 'Nagaland',
+    label: '13 - Nagaland',
+    districts: ['Dimapur', 'Kohima'],
+  },
+  {
+    code: '12',
+    name: 'Arunachal Pradesh',
+    label: '12 - Arunachal Pradesh',
+    districts: ['Itanagar', 'Naharlagun'],
+  },
+  {
+    code: '15',
+    name: 'Mizoram',
+    label: '15 - Mizoram',
+    districts: ['Aizawl'],
+  },
+  {
+    code: '11',
+    name: 'Sikkim',
+    label: '11 - Sikkim',
+    districts: ['Gangtok', 'Rangpo'],
+  },
+  {
+    code: '05',
+    name: 'Uttarakhand',
+    label: '05 - Uttarakhand',
+    districts: ['Dehradun', 'Haridwar', 'Rudrapur'],
+  },
+  {
+    code: '02',
+    name: 'Himachal Pradesh',
+    label: '02 - Himachal Pradesh',
+    districts: ['Baddi', 'Shimla', 'Solan'],
+  },
+  {
+    code: '01',
+    name: 'Jammu & Kashmir',
+    label: '01 - Jammu & Kashmir',
+    districts: ['Jammu', 'Srinagar'],
+  },
+  {
+    code: '30',
+    name: 'Goa',
+    label: '30 - Goa',
+    districts: ['Panaji (North Goa)', 'Vasco / Margao (South Goa)'],
+  },
+  {
+    code: '04',
+    name: 'Chandigarh',
+    label: '04 - Chandigarh',
+    districts: ['Chandigarh Industrial Area'],
+  },
+  {
+    code: '26',
+    name: 'Dadra & Nagar Haveli and Daman & Diu',
+    label: '26 - Dadra & Nagar Haveli and Daman & Diu',
+    districts: ['Silvassa', 'Daman', 'Diu'],
+  },
+  {
+    code: '34',
+    name: 'Puducherry',
+    label: '34 - Puducherry',
+    districts: ['Puducherry', 'Karaikal'],
+  },
+  {
+    code: '35',
+    name: 'Andaman & Nicobar Islands',
+    label: '35 - Andaman & Nicobar Islands',
+    districts: ['Port Blair'],
+  },
+  {
+    code: '38',
+    name: 'Ladakh',
+    label: '38 - Ladakh',
+    districts: ['Leh', 'Kargil'],
+  },
+  {
+    code: '31',
+    name: 'Lakshadweep',
+    label: '31 - Lakshadweep',
+    districts: ['Kavaratti'],
+  },
+  {
+    code: '99',
+    name: 'International (Nepal / Bangladesh / Bhutan)',
+    label: '99 - International (Nepal / Bangladesh / Bhutan)',
+    districts: [
+      'Birgunj (Nepal)',
+      'Biratnagar (Nepal)',
+      'Kathmandu (Nepal)',
+      'Kakarvitta (Nepal)',
+      'Bhairahawa (Nepal)',
+      'Benapole (Bangladesh)',
+      'Petrapole Border',
+      'Chittagong (Bangladesh)',
+      'Dhaka (Bangladesh)',
+      'Phuentsholing (Bhutan)',
+      'Thimphu (Bhutan)',
+      'Jaigaon Border',
+    ],
+  },
+];
 
-export const DEFAULT_CREDIT_DAY_PRESETS: number[] = new Array(15, 30, 45, 60);
+export const DEFAULT_PACKAGE_MODES: string[] = [
+  'Bags / Sacks',
+  'Boxes / Cartons',
+  'Bundles',
+  'Coils',
+  'Wooden Crates',
+  'Pallets',
+  'Loose / Bulk',
+  'Bales',
+  'Rolls / Reels',
+  'Sheets / Plates',
+  'Drums (Dry/Powder)',
+  'Tins / Cases',
+  'Full Truck Load (FTL)',
+  'Part Load',
+];
 
-export const DEFAULT_DELIVERY_PLACES: string[] = new Array(
-  "Kolkata",
-  "Howrah",
-  "Dankuni",
-  "Siliguri",
-  "Durgapur",
-  "Asansol",
-  "Mumbai",
-  "Bhiwandi",
-  "Delhi",
-  "Gurugram",
-  "Ahmedabad",
-  "Surat",
-  "Chennai",
-  "Bengaluru",
-  "Hyderabad",
-  "Patna",
-  "Ranchi",
-  "Jamshedpur",
-  "Bhubaneswar",
-  "Guwahati"
-);
+export const DEFAULT_RATE_MODES: string[] = [
+  'Fixed Lorry Freight (Lump Sum)',
+  'Per Ton / MT',
+  'Per Quintal',
+  'Per Kg',
+  'Per Package / Box',
+  'Per Trip',
+  'Per Km',
+];
 
-export const DEFAULT_PACKAGE_MODES: string[] = new Array(
-  "Carton Box",
-  "Gunny Bag / Bora",
-  "Plastic Drum",
-  "Wooden Crate / Case",
-  "Pallet",
-  "Bundle / Roll",
-  "Loose",
-  "Tin / Can"
-);
+export const DEFAULT_CREDIT_DAY_PRESETS: number[] = [10, 15, 20, 30, 45, 60];
 
-export const DEFAULT_RATE_MODES: string[] = new Array(
-  "Per Kg",
-  "Per Quintal",
-  "Per Ton (MT)",
-  "Per Package / Box",
-  "Fixed Freight (FTL)"
-);
+export const DEFAULT_DELIVERY_PLACES: string[] = [
+  'Kolkata (Dankuni / Dhulagarh)',
+  'Siliguri (Fulbari / Sevoke Road)',
+  'Cooch Behar',
+  'Alipurduar',
+  'Malda',
+  'Raiganj',
+  'Durgapur',
+  'Asansol',
+  'Haldia',
+  'Guwahati (Assam)',
+  'Tinsukia (Assam)',
+  'Dibrugarh (Assam)',
+  'Silchar (Assam)',
+  'Patna (Bihar)',
+  'Purnia (Bihar)',
+  'Muzaffarpur (Bihar)',
+  'Ranchi (Jharkhand)',
+  'Jamshedpur (Jharkhand)',
+  'Dhanbad (Jharkhand)',
+  'Bhubaneswar (Odisha)',
+  'Cuttack (Odisha)',
+  'Rourkela (Odisha)',
+  'Kalinganagar (Odisha)',
+  'Raipur (Chhattisgarh)',
+  'Delhi NCR',
+  'Mumbai / Bhiwandi (Maharashtra)',
+  'Ahmedabad (Gujarat)',
+  'Chennai (Tamil Nadu)',
+  'Coimbatore (Tamil Nadu)',
+  'Bengaluru (Karnataka)',
+  'Hyderabad (Telangana)',
+  'Birgunj (Nepal)',
+  'Biratnagar (Nepal)',
+  'Kathmandu (Nepal)',
+  'Benapole (Bangladesh)',
+  'Dhaka (Bangladesh)',
+  'Phuentsholing (Bhutan)',
+];
 
-export const DEFAULT_DELIVERY_TYPES: string[] = new Array(
-  "Door Delivery",
-  "Godown Delivery",
-  "Door to Door",
-  "Godown to Godown",
-  "Door to Godown",
-  "Godown to Door"
-);
+export const DEFAULT_DELIVERY_LOCATIONS: string[] = DEFAULT_DELIVERY_PLACES;
 
-export function mergeDropdownOptions(defaults: string[], custom?: string[]): string[] {
-  const combined = new Array<string>();
-  for (const item of defaults) {
-    if (item && !combined.includes(item)) combined.push(item);
-  }
-  if (custom && Array.isArray(custom)) {
-    for (const item of custom) {
-      if (item && !combined.includes(item)) combined.push(item);
+export const DEFAULT_DELIVERY_TYPES: string[] = [
+  'Door Delivery',
+  'Godown Delivery',
+  'Factory / Plant Gate Delivery',
+  'Port / ICD Delivery',
+  'Border / Export Crossing Delivery',
+];
+
+export function mergeDropdownOptions(existing: string[], additions: string[]): string[] {
+  const seen = new Set<string>();
+  const result: string[] = [];
+
+  for (const raw of [...(existing || []), ...(additions || [])]) {
+    const clean = String(raw || '').trim();
+    if (!clean) continue;
+    const key = clean.toLowerCase();
+    if (!seen.has(key)) {
+      seen.add(key);
+      result.push(clean);
     }
   }
-  return combined;
+
+  return result;
 }
+
+export default {
+  ALL_INDIA_NON_LIQUID_GOODS,
+  ALL_INDIA_STATES_DISTRICTS,
+  DEFAULT_PACKAGE_MODES,
+  DEFAULT_RATE_MODES,
+  DEFAULT_CREDIT_DAY_PRESETS,
+  DEFAULT_DELIVERY_PLACES,
+  DEFAULT_DELIVERY_LOCATIONS,
+  DEFAULT_DELIVERY_TYPES,
+  mergeDropdownOptions,
+};
