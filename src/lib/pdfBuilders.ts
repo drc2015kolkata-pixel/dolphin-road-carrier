@@ -216,6 +216,48 @@ function drawVectorUpiQr(
   doc.text('BANK QR', boxX + qrSizeMm / 2, boxY + qrSizeMm / 2 + 2, { align: 'center' });
 }
 
+function drawVectorVerificationQr(
+  doc: jsPDF,
+  payload: string,
+  boxX: number,
+  boxY: number,
+  qrSizeMm = 16,
+  label = 'VERIFY QR'
+) {
+  try {
+    const qr = QRCode.create(payload, { errorCorrectionLevel: 'M' });
+    const count = qr.modules.size;
+    if (count > 0) {
+      doc.setFillColor(255, 255, 255);
+      doc.setDrawColor(15, 23, 42);
+      doc.setLineWidth(0.32);
+      doc.rect(boxX - 1.1, boxY - 1.1, qrSizeMm + 2.2, qrSizeMm + 5.8, 'FD');
+
+      const cell = qrSizeMm / count;
+      doc.setFillColor(15, 23, 42);
+      for (let r = 0; r < count; r += 1) {
+        for (let c = 0; c < count; c += 1) {
+          if (qr.modules.get(r, c)) {
+            doc.rect(boxX + c * cell, boxY + r * cell, cell + 0.04, cell + 0.04, 'F');
+          }
+        }
+      }
+      doc.setFont('helvetica', 'bold');
+      doc.setFontSize(5.9);
+      doc.setTextColor(15, 23, 42);
+      doc.text(label, boxX + qrSizeMm / 2, boxY + qrSizeMm + 3.4, { align: 'center' });
+      return;
+    }
+  } catch {
+    // Fallback box if QR encoding throws
+  }
+  doc.setDrawColor(15, 23, 42);
+  doc.rect(boxX, boxY, qrSizeMm, qrSizeMm + 4);
+  doc.setFont('helvetica', 'bold');
+  doc.setFontSize(5.8);
+  doc.text(label, boxX + qrSizeMm / 2, boxY + qrSizeMm / 2 + 2, { align: 'center' });
+}
+
 function getJsPdfImageFormat(dataUrl: string): 'PNG' | 'JPEG' | 'WEBP' {
   if (/^data:image\/png/i.test(dataUrl)) return 'PNG';
   if (/^data:image\/webp/i.test(dataUrl)) return 'WEBP';
@@ -498,7 +540,7 @@ function buildInvoiceDoc(
       ['INVOICE NO', invoice.invoiceNo],
       ['DATE', formatDateDDMMYYYY(invoice.invoiceDate)],
       ['DUE / FY', `${formatDateDDMMYYYY(invoice.dueDate) || '-'} / ${invoice.financialYear || company.currentFy}`],
-      ['COUNTRY', billingCountry.toUpperCase()],
+      ['COUNTRY', `${billingCountry.toUpperCase()}${invoice.division === 'LOGISTICS' ? ' · LOGISTICS' : ''}`],
       ['SAC / CODE', `${invoice.sac || company.hsn || '996791'} / ${isCrossBorderExempt ? 'EXPORT 0%' : (invoice.interstate ? 'IGST' : 'CGST+SGST')}`],
     ];
     metas.forEach(([k, v], i) => {
@@ -722,20 +764,28 @@ function buildInvoiceDoc(
     doc.rect(M, bankBoxY, cw, 27);
     doc.setTextColor(0, 0, 0);
     doc.setFont('helvetica', 'bold');
-    doc.setFontSize(7.4);
-    doc.text(`Bank   : ${selectedBank.bankName}`, M + 2, bankBoxY + 5);
+    doc.setFontSize(7.2);
+    doc.text(`Bank   : ${String(selectedBank.bankName || '').slice(0, 42)}`, M + 2, bankBoxY + 5);
     doc.text(
-      `Branch : ${selectedBank.branch}${selectedBank.swift ? ` (SWIFT: ${selectedBank.swift})` : ''}`,
+      `Branch : ${String(selectedBank.branch || '').slice(0, 26)}${selectedBank.swift ? ` (SWIFT: ${selectedBank.swift})` : ''}`,
       M + 2,
       bankBoxY + 9.8
     );
     doc.text(`A/c No : ${selectedBank.accountNo}`, M + 2, bankBoxY + 14.6);
-    doc.text(`IFSC   : ${selectedBank.ifsc}   |   A/c Name: ${selectedBank.accountName}`, M + 2, bankBoxY + 19.4);
+    doc.text(
+      `IFSC   : ${selectedBank.ifsc}  |  A/c: ${String(selectedBank.accountName || '').slice(0, 22)}`,
+      M + 2,
+      bankBoxY + 19.4
+    );
     if (selectedBank.upiId) {
       doc.setFont('helvetica', 'normal');
-      doc.setFontSize(6.8);
-      doc.text(`UPI ID : ${selectedBank.upiId}`, M + 2, bankBoxY + 24.2);
+      doc.setFontSize(6.6);
+      doc.text(`UPI ID : ${String(selectedBank.upiId).slice(0, 44)}`, M + 2, bankBoxY + 24.2);
     }
+
+    // Scannable DRC Document Verification QR
+    const verifyPayload = `DRC|INV|${invoice.invoiceNo || ''}|${invoice.invoiceDate || ''}|${Number(invoice.grandTotal || 0).toFixed(2)}|${invoice.partyGstin || invoice.partyPan || 'NA'}|${company.gstin || ''}`;
+    drawVectorVerificationQr(doc, verifyPayload, M + cw - 92, bankBoxY + 2.4, 16.5, 'VERIFY QR');
 
     // Scannable Vector UPI BANK QR right beside Bank Details
     const qrBoxX = M + cw - 68;
@@ -865,7 +915,9 @@ function buildLR3CopyDoc(
       : []),
   ];
   const allEwbs = [
-    ...(cn.ewayBillNo ? [{ no: cn.ewayBillNo, date: cn.ewayBillDate || '' }] : []),
+    ...(cn.ewayBillNo
+      ? [{ no: cn.ewayBillNo, date: cn.ewayBillDate || '', validUpto: cn.ewayBillValidUpto || '' }]
+      : []),
     ...(cn.extraEwayBills || []).filter((x) => String(x?.no || '').trim()),
   ];
 
@@ -892,7 +944,7 @@ function buildLR3CopyDoc(
     doc.setTextColor(30, 41, 59);
     doc.text(`GSTIN : ${company.gstin}   |   PAN : ${company.pan}`, x0 + 3, y0 + 4.5);
     doc.text(
-      cn.stockTransfer ? '!! OM SAI RAM !!   [STOCK TRANSFER]' : '!! OM SAI RAM !!',
+      `${cn.stockTransfer ? '!! OM SAI RAM !!   [STOCK TRANSFER]' : '!! OM SAI RAM !!'}${cn.division === 'LOGISTICS' ? '   [LOGISTICS DIVISION]' : ''}`,
       x0 + cw / 2,
       y0 + 4.5,
       { align: 'center' }
@@ -959,9 +1011,12 @@ function buildLR3CopyDoc(
         ? allInvoices.map((x) => x.no).join(', ')
         : '-';
     const ewbSummary = allEwbs.length > 0 ? allEwbs.map((x) => x.no).join(', ') : '-';
+    const ewbValidShort = cn.ewayBillValidUpto
+      ? ` (Valid: ${cn.ewayBillValidUpto.replace('T', ' ').slice(0, 16)})`
+      : '';
     doc.text(`TAX INV. No : ${invSummary.slice(0, 34)}`, x0 + b1W + b2W + 2.5, row1Y + 5);
     doc.text(`STOCK TRF   : ${cn.stockTransfer ? 'YES' : 'NO'}   |   INV DT: ${formatDateDDMMYYYY(cn.taxInvDate) || '-'}`, x0 + b1W + b2W + 2.5, row1Y + 9.8);
-    doc.text(`E-WAY BILL  : ${ewbSummary.slice(0, 34)}`, x0 + b1W + b2W + 2.5, row1Y + 14.6);
+    doc.text(`E-WAY BILL  : ${(ewbSummary + ewbValidShort).slice(0, 36)}`, x0 + b1W + b2W + 2.5, row1Y + 14.6);
     doc.text(
       `ROUTE : ${(originText || cn.fromCity).slice(0, 18)} -> ${(destText || cn.toCity).slice(0, 18)}`,
       x0 + b1W + b2W + 2.5,
@@ -1142,7 +1197,16 @@ function buildLR3CopyDoc(
       });
     }
 
-    // Company Stamp BOTTOM-RIGHT corner
+    // Scannable DRC LR Verification QR + Company Stamp BOTTOM-RIGHT corner
+    const lrVerifyPayload = `DRC|LR|${cn.cnNo || ''}|${cn.cnDate || ''}|${cn.truckNo || ''}|${cn.fromCity || ''}->${cn.toCity || ''}|${Number(cn.totalFreight || 0).toFixed(2)}|${company.gstin || ''}`;
+    drawVectorVerificationQr(
+      doc,
+      lrVerifyPayload,
+      x0 + cw - 55,
+      y0 + ch - 23.5,
+      orientation === 'l' ? 14 : 13,
+      'VERIFY QR'
+    );
     drawBottomRightStampAndSign(doc, assets, x0 + cw - 2, y0 + ch - 24, 27, 15.5);
 
     // EXACT BOTTOM-CENTER FOOTER BORDER LABEL IN BOLD UPPERCASE
@@ -1221,7 +1285,7 @@ function buildLR3CopyDoc(
         sy = SAFE_MARGIN + 14;
       }
       doc.text(
-        `${i + 1}. E-Way Bill No: ${ewbRow.no}   |   Date: ${formatDateDDMMYYYY(ewbRow.date) || '-'}`,
+        `${i + 1}. E-Way Bill No: ${ewbRow.no}   |   Date: ${formatDateDDMMYYYY(ewbRow.date) || '-'}${ewbRow.validUpto ? `   |   Valid Upto: ${ewbRow.validUpto.replace('T', ' ')}` : ''}`,
         SAFE_MARGIN + 3,
         sy
       );
@@ -1313,6 +1377,7 @@ function buildQuotationDoc(
   doc.text(quote.validityText || '7 Days', pw - SAFE_MARGIN, SAFE_MARGIN + 62, { align: 'right' });
 
   const rows: Array<[string, string]> = [
+    ...(quote.division === 'LOGISTICS' ? [['Division', 'LOGISTICS DIVISION'] as [string, string]] : []),
     ['Vehicle Type', quote.vehicleType || '-'],
     ...(quote.goodsType ? [['Goods Type', quote.goodsType] as [string, string]] : []),
     ['Freight', `Rs. ${formatINR(quote.freight || 0)}${quote.rateMode ? ` (${quote.rateMode})` : ''}`],
@@ -1324,57 +1389,114 @@ function buildQuotationDoc(
     ['Destination', quote.destination || '-'],
     ['Advance Pay', quote.advancePay || 'No Advance Before Lorry Loading'],
     ['Entry Point', quote.entryPoint || 'As Applicable'],
+    [
+      'Payment Guarantor',
+      quote.guarantorName
+        ? `${quote.guarantorName}${quote.guarantorPhone ? ` (Mob: ${quote.guarantorPhone})` : ''}`
+        : 'As per Agreed Party Signatory',
+    ],
   ];
 
-  let ty = SAFE_MARGIN + 78;
+  let ty = SAFE_MARGIN + 77;
   const labelW = cw * 0.28;
   const valW = cw - labelW;
-  const rowH = orientation === 'l' ? 5.5 : 6.4;
+  const rowH = orientation === 'l' ? 5.1 : 5.7;
   doc.setLineWidth(0.3);
 
   rows.forEach(([k, v]) => {
     doc.rect(SAFE_MARGIN, ty, labelW, rowH);
     doc.rect(SAFE_MARGIN + labelW, ty, valW, rowH);
     doc.setFont('helvetica', 'bold');
-    doc.setFontSize(8.2);
-    doc.text(String(k ?? ''), SAFE_MARGIN + 2.5, ty + rowH - 2.1);
+    doc.setFontSize(8);
+    doc.text(String(k ?? ''), SAFE_MARGIN + 2.5, ty + rowH - 1.9);
     doc.setFont('helvetica', 'normal');
-    doc.text(String(v ?? '-'), SAFE_MARGIN + labelW + 3, ty + rowH - 2.1);
+    doc.text(String(v ?? '-'), SAFE_MARGIN + labelW + 3, ty + rowH - 1.9);
     ty += rowH;
   });
 
-  ty += 4;
-  if (ty + 48 > ph - 12) {
+  ty += 3.5;
+  if (ty + 76 > ph - 10) {
     doc.addPage();
     ty = SAFE_MARGIN + 10;
   }
 
   const qBank = resolveInvoiceBankAccount(company);
-  doc.rect(SAFE_MARGIN, ty, cw * 0.52, 28);
+  doc.rect(SAFE_MARGIN, ty, cw * 0.52, 26);
   doc.setFont('helvetica', 'bold');
-  doc.setFontSize(8.2);
-  doc.text('Bank Details', SAFE_MARGIN + 2.5, ty + 5.5);
+  doc.setFontSize(8);
+  doc.text('Bank Details', SAFE_MARGIN + 2.5, ty + 5);
   doc.setFont('helvetica', 'normal');
-  doc.setFontSize(7.8);
-  doc.text(`A/C Name   : ${company.companyName}`, SAFE_MARGIN + 2.5, ty + 11);
-  doc.text(`Bank Name  : ${qBank.bankName}`, SAFE_MARGIN + 2.5, ty + 16);
-  doc.text(`A/C No     : ${qBank.accountNo}`, SAFE_MARGIN + 2.5, ty + 21);
-  doc.text(`IFSC Code  : ${qBank.ifsc} (${qBank.branch})`, SAFE_MARGIN + 2.5, ty + 26);
+  doc.setFontSize(7.6);
+  doc.text(`A/C Name   : ${company.companyName}`, SAFE_MARGIN + 2.5, ty + 10.2);
+  doc.text(`Bank Name  : ${qBank.bankName}`, SAFE_MARGIN + 2.5, ty + 15);
+  doc.text(`A/C No     : ${qBank.accountNo}`, SAFE_MARGIN + 2.5, ty + 19.8);
+  doc.text(`IFSC Code  : ${qBank.ifsc} (${qBank.branch})`, SAFE_MARGIN + 2.5, ty + 24.4);
 
   // BOTTOM-RIGHT Company Stamp & Signature
-  drawBottomRightStampAndSign(doc, assets, pw - SAFE_MARGIN, ty + 5, 29, 18);
+  drawBottomRightStampAndSign(doc, assets, pw - SAFE_MARGIN, ty + 4.5, 29, 17);
 
-  const ny = ty + 34;
+  // Strict Email-Only Official Quotation Acceptance Box
+  const accY = ty + 29;
+  const accH = 34;
+  doc.setDrawColor(15, 23, 42);
+  doc.setLineWidth(0.4);
+  doc.rect(SAFE_MARGIN, accY, cw, accH);
+  doc.setFillColor(241, 245, 249);
+  doc.rect(SAFE_MARGIN, accY, cw, 6.2, 'FD');
   doc.setFont('helvetica', 'bold');
-  doc.setFontSize(7.6);
+  doc.setFontSize(8.1);
+  doc.setTextColor(15, 76, 129);
+  doc.text(
+    'OFFICIAL QUOTATION ACCEPTANCE FORM (RETURN ACCEPTED ONLY VIA OFFICIAL EMAIL)',
+    pw / 2,
+    accY + 4.3,
+    { align: 'center' }
+  );
+
+  doc.setFontSize(7.4);
+  doc.setTextColor(180, 25, 25);
+  doc.text(
+    `STRICT RULE: Signed & stamped acceptance must be emailed ONLY to ${company.email || 'drc.kolkata1@gmail.com'} — Acceptance via WhatsApp / SMS is NOT valid.`,
+    SAFE_MARGIN + 2.5,
+    accY + 11.2
+  );
+
+  doc.setTextColor(15, 23, 42);
+  doc.setFont('helvetica', 'bold');
+  doc.setFontSize(7.8);
+  doc.text('Payment Responsible / Guarantor :', SAFE_MARGIN + 2.5, accY + 17.5);
+  doc.setFont('helvetica', 'normal');
+  doc.text(
+    quote.guarantorName
+      ? `${quote.guarantorName}${quote.guarantorPhone ? `   |   Mob: ${quote.guarantorPhone}` : ''}`
+      : '________________________________________________',
+    SAFE_MARGIN + 2.5,
+    accY + 22.5
+  );
+  doc.text('Acceptance Date : ____ / ____ / 20____', SAFE_MARGIN + 2.5, accY + 29.5);
+
+  const stampBoxW = cw * 0.36;
+  const stampBoxX = SAFE_MARGIN + cw - stampBoxW - 2.5;
+  doc.setDrawColor(100, 116, 139);
+  doc.rect(stampBoxX, accY + 13.5, stampBoxW, 18.5);
+  doc.setFont('helvetica', 'bold');
+  doc.setFontSize(7);
+  doc.text('Customer Stamp & Signature (Signatory)', stampBoxX + stampBoxW / 2, accY + 30.2, {
+    align: 'center',
+  });
+
+  const ny = accY + accH + 4.5;
+  doc.setFont('helvetica', 'bold');
+  doc.setFontSize(7.3);
+  doc.setTextColor(15, 23, 42);
   const notices = [
     'Notice: (Leakage, Damage, Breakage & Shortage Not Transporter Risk) Lorry Owner Risk.',
     'Vehicle Border Pass & Detention beyond free time (Rs.1000/day) borne separately.',
     'Payment Terms: Balance within 7 days of lorry unloading (No Discount / No Adjustment).',
   ];
   notices.forEach((line, idx) => {
-    if (ny + idx * 5 < ph - 10) {
-      doc.text(line, SAFE_MARGIN, ny + idx * 5);
+    if (ny + idx * 4.5 < ph - 9) {
+      doc.text(line, SAFE_MARGIN, ny + idx * 4.5);
     }
   });
 
@@ -1487,32 +1609,40 @@ function buildDeclaration194CDoc(
   doc.setFontSize(9.2);
   doc.text(`Place : ${decl.place || 'Kolkata'}`, SAFE_MARGIN + 2, footerY);
   doc.text(`Date  : ${formatDateDDMMYYYY(decl.declarationDate)}`, SAFE_MARGIN + 2, footerY + 6);
+  doc.setFont('helvetica', 'italic');
+  doc.setFontSize(8);
+  doc.setTextColor(71, 85, 105);
+  doc.text('Enclosed: Proprietor PAN Card Copy (u/s 194C(6))', SAFE_MARGIN + 2, footerY + 14);
+  doc.setTextColor(15, 23, 42);
 
+  doc.setFont('helvetica', 'bold');
+  doc.setFontSize(9.5);
+  doc.text('DECLARANT DETAILS', pw - SAFE_MARGIN - 30, footerY, { align: 'center' });
+  doc.text('SUBHAJIT SAHA (Proprietor)', pw - SAFE_MARGIN - 30, footerY + 5.5, { align: 'center' });
+  doc.text(`PAN NO : ${company.pan}`, pw - SAFE_MARGIN - 30, footerY + 11, { align: 'center' });
+
+  // Embed Proprietor PAN Card Photo on the RIGHT side under DECLARANT DETAILS
+  const panBoxX = pw - SAFE_MARGIN - 58;
+  const panBoxY = footerY + 14.5;
   if (assets.panCropDataUrl) {
     doc.addImage(
       assets.panCropDataUrl,
       getJsPdfImageFormat(assets.panCropDataUrl),
-      SAFE_MARGIN + 2,
-      footerY + 11,
+      panBoxX,
+      panBoxY,
       56,
       34,
       undefined,
       'FAST'
     );
   } else {
-    doc.rect(SAFE_MARGIN + 2, footerY + 11, 56, 34);
+    doc.rect(panBoxX, panBoxY, 56, 34);
     doc.setFont('helvetica', 'bold');
     doc.setFontSize(8);
-    doc.text('INCOME TAX DEPARTMENT - INDIA', SAFE_MARGIN + 5, footerY + 18);
-    doc.text('SUBHAJIT SAHA', SAFE_MARGIN + 5, footerY + 25);
-    doc.text(`PAN: ${company.pan}`, SAFE_MARGIN + 5, footerY + 32);
+    doc.text('INCOME TAX DEPARTMENT - INDIA', panBoxX + 3, panBoxY + 8);
+    doc.text('SUBHAJIT SAHA', panBoxX + 3, panBoxY + 15);
+    doc.text(`PAN: ${company.pan}`, panBoxX + 3, panBoxY + 22);
   }
-
-  doc.setFont('helvetica', 'bold');
-  doc.setFontSize(9.5);
-  doc.text('DECLARANT DETAILS', pw - SAFE_MARGIN - 30, footerY, { align: 'center' });
-  doc.text('SUBHAJIT SAHA (Proprietor)', pw - SAFE_MARGIN - 30, footerY + 6, { align: 'center' });
-  doc.text(`PAN NO : ${company.pan}`, pw - SAFE_MARGIN - 30, footerY + 12, { align: 'center' });
   // STRICT RULE #5: No stamp or digital signature image at the bottom of Section 194C Declaration.
 
   stampAllPageNumbers(doc);

@@ -143,6 +143,14 @@ async function getAssets(company?: CompanySettings): Promise<PdfAssets> {
     }
   }
 
+  let panCropDataUrl = cachedPanCropDataUrl;
+  if (company?.panCardPhotoDataUrl) {
+    const normalizedPan = await loadImageToCompressedDataUrl(company.panCardPhotoDataUrl, 640, 0.94);
+    if (normalizedPan) {
+      panCropDataUrl = normalizedPan;
+    }
+  }
+
   const watermarkDataUrl =
     typeof OffscreenCanvas !== 'undefined'
       ? undefined
@@ -151,7 +159,7 @@ async function getAssets(company?: CompanySettings): Promise<PdfAssets> {
   return {
     logoDataUrl: cachedLogoDataUrl,
     stampDataUrl,
-    panCropDataUrl: cachedPanCropDataUrl,
+    panCropDataUrl,
     watermarkDataUrl,
   };
 }

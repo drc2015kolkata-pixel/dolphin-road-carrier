@@ -182,6 +182,7 @@ const BackupSettingsModuleInner: React.FC<BackupSettingsModuleProps> = ({
   onShowConfirm,
 }) => {
   const stampInputRef = useRef<HTMLInputElement | null>(null);
+  const panCardInputRef = useRef<HTMLInputElement | null>(null);
   const bholeBabaInputRef = useRef<HTMLInputElement | null>(null);
   const khatuShyamInputRef = useRef<HTMLInputElement | null>(null);
   const excelInputRef = useRef<HTMLInputElement | null>(null);
@@ -602,6 +603,7 @@ const BackupSettingsModuleInner: React.FC<BackupSettingsModuleProps> = ({
         availableFys: mergedFys,
         fyOpeningBalances: compState.fyOpeningBalances || {},
         customStampDataUrl: compState.customStampDataUrl || '',
+        panCardPhotoDataUrl: compState.panCardPhotoDataUrl || '',
         autoLockMinutes: Number(compState.autoLockMinutes ?? 5),
         lockSourceInspection: compState.lockSourceInspection !== false,
         ...(compState.dropdownMaster ? { dropdownMaster: compState.dropdownMaster } : {}),
@@ -681,6 +683,40 @@ const BackupSettingsModuleInner: React.FC<BackupSettingsModuleProps> = ({
         setDriveStatus('Company Stamp & Digital Signature loaded — click "Save Company Settings" to apply across all Bills, Bilty (LR) & Quotations.');
       };
       img.onerror = () => setDriveError('Could not read the selected Stamp image file.');
+      img.src = String(reader.result || '');
+    };
+    reader.readAsDataURL(file);
+  };
+
+  const handleUploadPanCard = (file: File | undefined) => {
+    if (!file) return;
+    setDriveError(null);
+    const reader = new FileReader();
+    reader.onload = () => {
+      const img = new Image();
+      img.onload = () => {
+        const maxSide = 680;
+        const scale = Math.min(1, maxSide / Math.max(img.width, img.height));
+        const w = Math.max(120, Math.round(img.width * scale));
+        const h = Math.max(80, Math.round(img.height * scale));
+        const canvas = document.createElement('canvas');
+        canvas.width = w;
+        canvas.height = h;
+        const ctx = canvas.getContext('2d');
+        if (!ctx) return;
+        ctx.fillStyle = '#ffffff';
+        ctx.fillRect(0, 0, w, h);
+        ctx.drawImage(img, 0, 0, w, h);
+        let quality = 0.86;
+        let dataUrl = canvas.toDataURL('image/jpeg', quality);
+        while (dataUrl.length > 435000 && quality > 0.35) {
+          quality -= 0.1;
+          dataUrl = canvas.toDataURL('image/jpeg', quality);
+        }
+        setCompState((prev) => ({ ...prev, panCardPhotoDataUrl: dataUrl.slice(0, 439500) }));
+        setDriveStatus('Proprietor PAN Card photo loaded — click "Save Company Settings" to embed on right side of all Section 194C Declarations.');
+      };
+      img.onerror = () => setDriveError('Could not read the selected PAN Card image file.');
       img.src = String(reader.result || '');
     };
     reader.readAsDataURL(file);
@@ -2262,6 +2298,55 @@ const BackupSettingsModuleInner: React.FC<BackupSettingsModuleProps> = ({
                     className="h-20 w-24 object-contain rounded border border-slate-300 bg-white p-1"
                   />
                 </div>
+              </div>
+
+              {/* Proprietor PAN Card Photo Upload (Right Side of 194C Declaration) */}
+              <div className="md:col-span-3 p-3.5 rounded-lg bg-slate-50 border border-slate-200 flex flex-wrap items-center justify-between gap-4">
+                <div className="space-y-1">
+                  <p className="font-bold text-slate-900 flex items-center gap-1.5">
+                    <ImagePlus className="w-4 h-4 text-emerald-700" />
+                    <span>Proprietor PAN Card Photo (Auto-Attached on RIGHT of Sec 194C Declaration)</span>
+                  </p>
+                  <p className="text-[11px] text-slate-600">
+                    Optional override for Subhajit Saha PAN card image (compressed &lt;440KB). Uses built-in PAN scan if left empty.
+                  </p>
+                  <input
+                    ref={panCardInputRef}
+                    type="file"
+                    accept="image/*"
+                    className="hidden"
+                    onChange={(e) => {
+                      handleUploadPanCard(e.target.files?.[0]);
+                      e.target.value = '';
+                    }}
+                  />
+                  <div className="flex flex-wrap gap-2 pt-1">
+                    <button
+                      type="button"
+                      onClick={() => panCardInputRef.current?.click()}
+                      className="inline-flex items-center gap-1.5 px-3 py-1.5 rounded bg-emerald-700 hover:bg-emerald-800 text-white font-bold cursor-pointer"
+                    >
+                      <Upload className="w-3.5 h-3.5" />
+                      Upload PAN Card Photo
+                    </button>
+                    {compState.panCardPhotoDataUrl && (
+                      <button
+                        type="button"
+                        onClick={() => setCompState({ ...compState, panCardPhotoDataUrl: '' })}
+                        className="px-3 py-1.5 rounded border border-slate-300 bg-white hover:bg-slate-100 text-slate-700 font-semibold cursor-pointer"
+                      >
+                        Reset Default PAN Scan
+                      </button>
+                    )}
+                  </div>
+                </div>
+                {compState.panCardPhotoDataUrl && (
+                  <img
+                    src={compState.panCardPhotoDataUrl}
+                    alt="Proprietor PAN Preview"
+                    className="h-20 w-32 object-contain rounded border border-slate-300 bg-white p-1"
+                  />
+                )}
               </div>
 
               {/* Optional Sacred Dashboard Header Photos (Bhole Baba & Khatu Shyam Ji) */}

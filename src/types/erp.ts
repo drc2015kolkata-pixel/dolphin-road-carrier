@@ -109,6 +109,7 @@ export interface Vehicle {
   fitnessExpiry?: string;
   insuranceExpiry?: string;
   permitExpiry?: string;
+  roadTaxExpiry?: string;
   pucExpiry?: string;
   ownerUid: string;
   createdAt?: unknown;
@@ -135,6 +136,7 @@ export interface Driver {
 export interface ExtraEwayBill {
   no: string;
   date: string;
+  validUpto?: string;
 }
 
 export interface ExtraTaxInvoice {
@@ -148,6 +150,7 @@ export interface ConsignmentNote {
   cnNo: string;
   cnDate: string;
   financialYear?: string;
+  division?: 'FTL' | 'LOGISTICS' | string;
   deliveryOffice?: string;
   stockTransfer?: boolean;
   billingPartyName?: string;
@@ -179,6 +182,7 @@ export interface ConsignmentNote {
   taxInvDate?: string;
   ewayBillNo?: string;
   ewayBillDate?: string;
+  ewayBillValidUpto?: string;
   extraTaxInvoices?: ExtraTaxInvoice[];
   extraEwayBills?: ExtraEwayBill[];
   extraVehicles?: string[];
@@ -235,6 +239,7 @@ export interface Invoice {
   invoiceDate: string;
   dueDate?: string;
   financialYear?: string;
+  division?: 'FTL' | 'LOGISTICS' | string;
   partyName: string;
   partyAddress?: string;
   partyGstin?: string;
@@ -274,11 +279,15 @@ export interface Quotation {
   quotationNo: string;
   quotationDate: string;
   financialYear?: string;
+  division?: 'FTL' | 'LOGISTICS' | string;
   partyName: string;
   partyAddress?: string;
   partyGstin?: string;
   partyPhone?: string;
   partyEmail?: string;
+  guarantorName?: string;
+  guarantorPhone?: string;
+  acceptanceEmailOnly?: boolean;
   goodsType?: string;
   rateMode?: 'Fixed' | 'Per Ton' | string;
   subject?: string;
@@ -313,6 +322,7 @@ export interface LorryHire {
   cnNo: string;
   cnDate?: string;
   financialYear?: string;
+  division?: 'FTL' | 'LOGISTICS' | string;
   truckNo: string;
   ownerName?: string;
   brokerName?: string;
@@ -550,6 +560,7 @@ export interface CompanySettings {
   fyOpeningBalances?: Record<string, Record<string, FyOpeningBalanceEntry>>;
   dropdownMaster?: DropdownMasterConfig;
   customStampDataUrl?: string;
+  panCardPhotoDataUrl?: string;
   bholeBabaPhotoDataUrl?: string;
   khatuShyamPhotoDataUrl?: string;
   autoLockMinutes?: number;
@@ -573,6 +584,7 @@ export type SheetTabId =
   | 'backup'
   | 'staffAccess'
   | 'settings'
+  | 'guide'
   | 'about';
 
 export type DriveFolderName =

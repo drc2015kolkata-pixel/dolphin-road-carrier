@@ -187,6 +187,7 @@ const BillingQuotesModuleInner: React.FC<BillingQuotesModuleProps> = ({
 
   // ---- TAX INVOICE STATE ----
   const branchTag = activeBranchCode && activeBranchCode !== 'ALL' ? activeBranchCode.slice(0, 3) : 'KOL';
+  const [invDivision, setInvDivision] = useState<'FTL' | 'LOGISTICS'>('FTL');
   const [autoAtomicInvoice, setAutoAtomicInvoice] = useState(true);
   const [invoiceNo, setInvoiceNo] = useState(`${branchTag}/${105 + invoices.length}/${fyShort}`);
   const [invoiceDate, setInvoiceDate] = useState(todayISO());
@@ -286,6 +287,9 @@ const BillingQuotesModuleInner: React.FC<BillingQuotesModuleProps> = ({
   useEffect(() => {
     if (!pendingCnForInvoice) return;
     setSubTab('invoice');
+    if (pendingCnForInvoice.division === 'LOGISTICS') {
+      setInvDivision('LOGISTICS');
+    }
     const targetBillingName =
       pendingCnForInvoice.billingPartyName?.trim() || pendingCnForInvoice.consignorName;
 
@@ -538,6 +542,7 @@ const BillingQuotesModuleInner: React.FC<BillingQuotesModuleProps> = ({
     invoiceDate,
     dueDate,
     financialYear: normalizeFyLabel(activeFy),
+    division: invDivision,
     partyName: partyName.trim(),
     partyAddress: partyAddress.trim(),
     partyGstin: partyGstin.trim(),
@@ -614,6 +619,7 @@ const BillingQuotesModuleInner: React.FC<BillingQuotesModuleProps> = ({
           invoiceDate: invObj.invoiceDate,
           dueDate: invObj.dueDate,
           financialYear: normalizeFyLabel(activeFy),
+          division: invDivision,
           partyName: invObj.partyName,
           partyAddress: invObj.partyAddress,
           partyGstin: invObj.partyGstin,
@@ -667,6 +673,7 @@ const BillingQuotesModuleInner: React.FC<BillingQuotesModuleProps> = ({
 
   // ---- QUOTATION STATE (10-Second Auto-Fill) ----
   const [autoAtomicQuotation, setAutoAtomicQuotation] = useState(true);
+  const [qDivision, setQDivision] = useState<'FTL' | 'LOGISTICS'>('FTL');
   const [qNo, setQNo] = useState(`QTN/2026/${String(19 + quotations.length).padStart(3, '0')}`);
   const [qDate, setQDate] = useState(todayISO());
   const [qParty, setQParty] = useState('');
@@ -674,6 +681,8 @@ const BillingQuotesModuleInner: React.FC<BillingQuotesModuleProps> = ({
   const [qGstin, setQGstin] = useState('');
   const [qPhone, setQPhone] = useState('');
   const [qEmail, setQEmail] = useState('');
+  const [qGuarantorName, setQGuarantorName] = useState('');
+  const [qGuarantorPhone, setQGuarantorPhone] = useState('');
   const [qSubject] = useState('To Vehicles Freight Rate Quotation');
   const [qValidity, setQValidity] = useState('7 Days After Lorry Unloading');
   const [qVehicleType, setQVehicleType] = useState('09 TON Open / Closed Truck');
@@ -718,11 +727,15 @@ const BillingQuotesModuleInner: React.FC<BillingQuotesModuleProps> = ({
       quotationNo: finalQNo,
       quotationDate: qDate,
       financialYear: normalizeFyLabel(activeFy),
+      division: qDivision,
       partyName: qParty.trim(),
       partyAddress: qAddr.trim(),
       partyGstin: qGstin.trim(),
       partyPhone: qPhone.trim(),
       partyEmail: qEmail.trim(),
+      guarantorName: qGuarantorName.trim(),
+      guarantorPhone: qGuarantorPhone.trim(),
+      acceptanceEmailOnly: true,
       subject: qSubject.trim(),
       validityText: qValidity.trim(),
       vehicleType: qVehicleType.trim(),
@@ -748,11 +761,15 @@ const BillingQuotesModuleInner: React.FC<BillingQuotesModuleProps> = ({
         quotationNo: qObj.quotationNo,
         quotationDate: qObj.quotationDate,
         financialYear: normalizeFyLabel(activeFy),
+        division: qDivision,
         partyName: qObj.partyName,
         partyAddress: qObj.partyAddress,
         partyGstin: qObj.partyGstin,
         partyPhone: qObj.partyPhone || '',
         partyEmail: qObj.partyEmail || '',
+        guarantorName: qObj.guarantorName || '',
+        guarantorPhone: qObj.guarantorPhone || '',
+        acceptanceEmailOnly: true,
         subject: qObj.subject,
         validityText: qObj.validityText,
         vehicleType: qObj.vehicleType,
@@ -1250,6 +1267,15 @@ const BillingQuotesModuleInner: React.FC<BillingQuotesModuleProps> = ({
                 Tax Invoice / Bill of Supply Builder ({activeBranchCode}) — Background PDF &amp; Atomic Serials
               </span>
               <div className="flex flex-wrap items-center gap-2">
+                <select
+                  aria-label="Invoice Division"
+                  value={invDivision}
+                  onChange={(e) => setInvDivision(e.target.value === 'LOGISTICS' ? 'LOGISTICS' : 'FTL')}
+                  className="px-2 py-1 rounded bg-white text-[#0D47A1] text-xs font-extrabold cursor-pointer"
+                >
+                  <option value="FTL">FTL Division</option>
+                  <option value="LOGISTICS">LOGISTICS Division</option>
+                </select>
                 <label className="inline-flex items-center gap-1.5 text-[11px] bg-white/10 px-2.5 py-1 rounded cursor-pointer">
                   <input
                     type="checkbox"
@@ -1976,14 +2002,25 @@ const BillingQuotesModuleInner: React.FC<BillingQuotesModuleProps> = ({
           >
             <div className="bg-gradient-to-r from-[#0D47A1] to-[#1976D2] text-white px-4 py-2.5 flex flex-wrap items-center justify-between gap-2">
               <span className="text-sm font-bold">Proforma Invoice / Rate of Quotation Generator</span>
-              <label className="inline-flex items-center gap-1.5 text-[11px] bg-white/10 px-2.5 py-1 rounded cursor-pointer">
-                <input
-                  type="checkbox"
-                  checked={autoAtomicQuotation}
-                  onChange={(e) => setAutoAtomicQuotation(e.target.checked)}
-                />
-                Auto Atomic Serial
-              </label>
+              <div className="flex flex-wrap items-center gap-2">
+                <select
+                  aria-label="Quotation Division"
+                  value={qDivision}
+                  onChange={(e) => setQDivision(e.target.value === 'LOGISTICS' ? 'LOGISTICS' : 'FTL')}
+                  className="px-2 py-1 rounded bg-white text-[#0D47A1] text-xs font-extrabold cursor-pointer"
+                >
+                  <option value="FTL">FTL Division</option>
+                  <option value="LOGISTICS">LOGISTICS Division</option>
+                </select>
+                <label className="inline-flex items-center gap-1.5 text-[11px] bg-white/10 px-2.5 py-1 rounded cursor-pointer">
+                  <input
+                    type="checkbox"
+                    checked={autoAtomicQuotation}
+                    onChange={(e) => setAutoAtomicQuotation(e.target.checked)}
+                  />
+                  Auto Atomic Serial
+                </label>
+              </div>
             </div>
             <div className="p-4 grid grid-cols-1 md:grid-cols-3 gap-3 text-xs">
               <div>
@@ -2073,6 +2110,32 @@ const BillingQuotesModuleInner: React.FC<BillingQuotesModuleProps> = ({
                   placeholder="dispatch@party.com"
                   className="w-full px-2.5 py-1.5 rounded border border-slate-300"
                 />
+              </div>
+              <div className="md:col-span-2 p-2.5 rounded-lg bg-amber-50 border border-amber-300 grid grid-cols-1 sm:grid-cols-2 gap-2.5">
+                <div>
+                  <label className="block font-extrabold text-amber-950 mb-1 text-xs">
+                    Payment Responsible / Guarantor *
+                  </label>
+                  <input
+                    type="text"
+                    value={qGuarantorName}
+                    onChange={(e) => setQGuarantorName(e.target.value)}
+                    placeholder="Authorized Director / Payment Signatory Name"
+                    className="w-full px-3 py-2 rounded border border-amber-400 bg-white text-sm font-bold text-slate-900"
+                  />
+                </div>
+                <div>
+                  <label className="block font-extrabold text-amber-950 mb-1 text-xs">
+                    Guarantor Contact No / Email Ref
+                  </label>
+                  <input
+                    type="text"
+                    value={qGuarantorPhone}
+                    onChange={(e) => setQGuarantorPhone(e.target.value)}
+                    placeholder="Mobile / Direct Contact"
+                    className="w-full px-3 py-2 rounded border border-amber-400 bg-white text-sm font-mono-num font-bold text-slate-900"
+                  />
+                </div>
               </div>
               <div>
                 <label className="block font-semibold text-slate-700 mb-1">Destination Route *</label>
@@ -2205,6 +2268,12 @@ const BillingQuotesModuleInner: React.FC<BillingQuotesModuleProps> = ({
                 />
               </div>
             </div>
+            <div className="mx-4 mb-3 px-3.5 py-2.5 rounded-lg bg-red-50 border border-red-200 text-xs font-bold text-red-900 flex items-center gap-2">
+              <Mail className="w-4 h-4 text-red-700 shrink-0" />
+              <span>
+                EMAIL-ONLY ACCEPTANCE POLICY PRINTED ON A4 PDF: Signed Quotation acceptance is valid ONLY via Official Email ({company.email}) — WhatsApp / SMS acceptance is NOT accepted.
+              </span>
+            </div>
             <div className="px-4 py-3 bg-slate-50 border-t border-slate-200 flex justify-end">
               <button
                 type="submit"
@@ -2331,7 +2400,7 @@ const BillingQuotesModuleInner: React.FC<BillingQuotesModuleProps> = ({
               </div>
             </div>
             <div className="px-4 py-2.5 bg-blue-50 border-t border-blue-200 text-xs text-blue-900">
-              Includes PAN Card attachment (PAN: {company.pan}), Dolphin Road Carrier diagonal
+              Includes Proprietor PAN Card photo auto-attached on the RIGHT below Declarant Details (PAN: {company.pan}), Dolphin Road Carrier diagonal
               watermark, Verification block, and TOP-LEFT Triangular DRC Logo (strictly NO stamp or signature at bottom).
             </div>
             <div className="px-4 py-3 bg-slate-50 border-t border-slate-200 flex justify-end">

@@ -67,6 +67,14 @@ const renderExpiryStatus = (dateStr?: string, label?: string) => {
       </span>
     );
   }
+  if (days <= 15) {
+    return (
+      <span className="inline-flex items-center gap-1 px-1.5 py-0.5 rounded bg-amber-100 border border-amber-300 text-amber-900 font-extrabold">
+        <AlertTriangle className="w-3 h-3 text-amber-700" />
+        {label ? `${label}: ` : ''}15d Alert ({days}d)
+      </span>
+    );
+  }
   if (days <= 30) {
     return (
       <span className="text-amber-700 font-semibold">
@@ -156,6 +164,7 @@ const MasterModuleInner: React.FC<MasterModuleProps> = ({
   const [vFit, setVFit] = useState('');
   const [vIns, setVIns] = useState('');
   const [vPermit, setVPermit] = useState('');
+  const [vRoadTax, setVRoadTax] = useState('');
   const [vPuc, setVPuc] = useState('');
 
   // Driver form (with Aadhaar, PAN & Bank Account KYC)
@@ -363,6 +372,7 @@ const MasterModuleInner: React.FC<MasterModuleProps> = ({
         fitnessExpiry: vFit,
         insuranceExpiry: vIns,
         permitExpiry: vPermit,
+        roadTaxExpiry: vRoadTax,
         pucExpiry: vPuc,
         ownerUid,
       },
@@ -373,6 +383,11 @@ const MasterModuleInner: React.FC<MasterModuleProps> = ({
     setVPhone('');
     setVEngine('');
     setVChassis('');
+    setVFit('');
+    setVIns('');
+    setVPermit('');
+    setVRoadTax('');
+    setVPuc('');
   };
 
   const handleSaveDriver = async (e: React.FormEvent) => {
@@ -612,8 +627,8 @@ const MasterModuleInner: React.FC<MasterModuleProps> = ({
           { label: 'S.NO', widthPct: 6, align: 'center' },
           { label: 'TRUCK NO / TYPE', widthPct: 22, align: 'left' },
           { label: 'OWNER NAME / PHONE', widthPct: 24, align: 'left' },
-          { label: 'ENGINE / CHASSIS NO', widthPct: 22, align: 'left' },
-          { label: 'FITNESS / INS / PERMIT / PUC', widthPct: 26, align: 'left' },
+          { label: 'ENGINE / CHASSIS NO', widthPct: 20, align: 'left' },
+          { label: 'FITNESS / INS / PERMIT / TAX / PUC', widthPct: 28, align: 'left' },
         ],
         rows: list.map((v, idx) => ({
           line1: [
@@ -628,7 +643,7 @@ const MasterModuleInner: React.FC<MasterModuleProps> = ({
             v.vehicleType || '-',
             `Ph: ${v.ownerPhone || '-'}`,
             `Chs: ${v.chassisNo || '-'}`,
-            `Prm: ${formatDateDDMMYYYY(v.permitExpiry) || '-'} | PUC: ${formatDateDDMMYYYY(v.pucExpiry) || '-'}`,
+            `Prm: ${formatDateDDMMYYYY(v.permitExpiry) || '-'} | Tax: ${formatDateDDMMYYYY(v.roadTaxExpiry) || '-'} | PUC: ${formatDateDDMMYYYY(v.pucExpiry) || '-'}`,
           ],
         })),
       },
@@ -875,6 +890,7 @@ const MasterModuleInner: React.FC<MasterModuleProps> = ({
       { key: 'fitness', header: 'Fitness', render: (v) => renderExpiryStatus(v.fitnessExpiry) },
       { key: 'insurance', header: 'Insurance', render: (v) => renderExpiryStatus(v.insuranceExpiry) },
       { key: 'permit', header: 'Permit', render: (v) => renderExpiryStatus(v.permitExpiry) },
+      { key: 'roadTax', header: 'Road Tax', render: (v) => renderExpiryStatus(v.roadTaxExpiry) },
       { key: 'puc', header: 'PUC', render: (v) => renderExpiryStatus(v.pucExpiry) },
       {
         key: 'action',
@@ -1585,6 +1601,15 @@ const MasterModuleInner: React.FC<MasterModuleProps> = ({
                   type="date"
                   value={vPermit}
                   onChange={(e) => setVPermit(e.target.value)}
+                  className="w-full px-2.5 py-1.5 rounded border border-slate-300 font-mono-num"
+                />
+              </div>
+              <div>
+                <label className="block font-semibold text-slate-700 mb-1">Road Tax Expiry</label>
+                <input
+                  type="date"
+                  value={vRoadTax}
+                  onChange={(e) => setVRoadTax(e.target.value)}
                   className="w-full px-2.5 py-1.5 rounded border border-slate-300 font-mono-num"
                 />
               </div>

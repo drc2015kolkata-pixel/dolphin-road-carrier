@@ -4,10 +4,13 @@ import {
   Camera,
   CheckCircle2,
   Edit3,
+  ExternalLink,
+  FileCode2,
   FilePlus2,
   Lock,
   Plus,
   Printer,
+  QrCode,
   Save,
   ScanLine,
   Search,
@@ -56,6 +59,8 @@ import { GeneratedPdfResult, generateLR3CopyPDF } from '../lib/pdfEngine';
 import { useDebouncedValue } from '../hooks/useDebounce';
 import { PaginatedDataTable, TableColumn } from './PaginatedDataTable';
 import { EditableSearchSelect, YesNoSelect } from './EditableSearchSelect';
+import { downloadNicPartBJson, getEwayBillExpiryState, ParsedQrPayload } from '../lib/ewayBillUtils';
+import { CameraPodQrScannerModal } from './CameraPodQrScannerModal';
 
 interface ConsignmentModuleProps {
   ownerUid: string;
@@ -119,6 +124,7 @@ const ConsignmentModuleInner: React.FC<ConsignmentModuleProps> = ({
 
   const [editingId, setEditingId] = useState<string | null>(null);
   const [editingBilled, setEditingBilled] = useState(false);
+  const [division, setDivision] = useState<'FTL' | 'LOGISTICS'>('FTL');
   const [autoAtomicCn, setAutoAtomicCn] = useState(true);
   const [cnNo, setCnNo] = useState(`${branchPrefix}-${147 + consignments.length}/${fyShort}`);
   const [cnDate, setCnDate] = useState(todayISO());
@@ -161,6 +167,9 @@ const ConsignmentModuleInner: React.FC<ConsignmentModuleProps> = ({
   const [taxInvDate, setTaxInvDate] = useState('');
   const [ewayBillNo, setEwayBillNo] = useState('');
   const [ewayBillDate, setEwayBillDate] = useState('');
+  const [ewayBillValidUpto, setEwayBillValidUpto] = useState('');
+  const [ewbQrModalOpen, setEwbQrModalOpen] = useState(false);
+  const [ewbTrackerMsg, setEwbTrackerMsg] = useState<string | null>(null);
   const [extraTaxInvoices, setExtraTaxInvoices] = useState<ExtraTaxInvoice[]>([]);
   const [extraEwayBills, setExtraEwayBills] = useState<ExtraEwayBill[]>([]);
   const [extraVehicles, setExtraVehicles] = useState<string[]>([]);
@@ -581,6 +590,7 @@ const ConsignmentModuleInner: React.FC<ConsignmentModuleProps> = ({
   const resetForm = () => {
     setEditingId(null);
     setEditingBilled(false);
+    setDivision('FTL');
     setAutoAtomicCn(true);
     setCnNo(`${branchPrefix}-${147 + consignments.length}/${fyShort}`);
     setCnDate(todayISO());
@@ -617,6 +627,8 @@ const ConsignmentModuleInner: React.FC<ConsignmentModuleProps> = ({
     setTaxInvDate('');
     setEwayBillNo('');
     setEwayBillDate('');
+    setEwayBillValidUpto('');
+    setEwbTrackerMsg(null);
     setExtraTaxInvoices([]);
     setExtraEwayBills([]);
     setExtraVehicles([]);
@@ -643,6 +655,7 @@ const ConsignmentModuleInner: React.FC<ConsignmentModuleProps> = ({
     if (!isMasterAdmin && cn.billed) return;
     setEditingId(cn.id);
     setEditingBilled(Boolean(cn.billed));
+    setDivision(cn.division === 'LOGISTICS' ? 'LOGISTICS' : 'FTL');
     setAutoAtomicCn(false);
     setCnNo(cn.cnNo);
     setCnDate(cn.cnDate || todayISO());
@@ -689,6 +702,8 @@ const ConsignmentModuleInner: React.FC<ConsignmentModuleProps> = ({
     setTaxInvDate(cn.taxInvDate || '');
     setEwayBillNo(cn.ewayBillNo || '');
     setEwayBillDate(cn.ewayBillDate || '');
+    setEwayBillValidUpto(cn.ewayBillValidUpto || '');
+    setEwbTrackerMsg(null);
     setExtraTaxInvoices(cn.extraTaxInvoices || []);
     setExtraEwayBills(cn.extraEwayBills || []);
     setExtraVehicles(cn.extraVehicles || []);
@@ -733,6 +748,7 @@ const ConsignmentModuleInner: React.FC<ConsignmentModuleProps> = ({
     cnNo: (resolvedCnNo || cnNo).trim().slice(0, 40),
     cnDate,
     financialYear: normalizeFyLabel(activeFy),
+    division,
     deliveryOffice: deliveryOffice.trim().slice(0, 200),
     stockTransfer,
     billingPartyName: billingPartyName.trim().slice(0, 180),
@@ -764,6 +780,7 @@ const ConsignmentModuleInner: React.FC<ConsignmentModuleProps> = ({
     taxInvDate: hasTaxInvoice ? taxInvDate.trim().slice(0, 20) : '',
     ewayBillNo: ewayBillNo.trim().slice(0, 60),
     ewayBillDate: ewayBillDate.trim().slice(0, 20),
+    ewayBillValidUpto: ewayBillValidUpto.trim().slice(0, 30),
     extraTaxInvoices: hasTaxInvoice
       ? extraTaxInvoices
           .filter((x) => x.no.trim())
@@ -772,7 +789,11 @@ const ConsignmentModuleInner: React.FC<ConsignmentModuleProps> = ({
     extraEwayBills: hasMultiEwayBill
       ? extraEwayBills
           .filter((x) => x.no.trim())
-          .map((x) => ({ no: x.no.trim(), date: x.date.trim() }))
+          .map((x) => ({
+            no: x.no.trim(),
+            date: x.date.trim(),
+            ...(x.validUpto ? { validUpto: x.validUpto.trim() } : {}),
+          }))
       : [],
     extraVehicles: hasMultiVehicle
       ? extraVehicles.map((v) => v.trim().toUpperCase()).filter(Boolean)
@@ -865,6 +886,11 @@ const ConsignmentModuleInner: React.FC<ConsignmentModuleProps> = ({
         render: (cn) => (
           <div>
             <span>{cn.cnNo}</span>
+            {cn.division === 'LOGISTICS' && (
+              <span className="ml-1 px-1.5 py-0.5 rounded bg-indigo-100 text-indigo-800 text-[10px]">
+                LOGISTICS
+              </span>
+            )}
             {cn.branchCode && (
               <span className="ml-1.5 px-1.5 py-0.5 rounded bg-slate-100 text-slate-600 text-[10px]">
                 {cn.branchCode}
@@ -915,13 +941,48 @@ const ConsignmentModuleInner: React.FC<ConsignmentModuleProps> = ({
       },
       {
         key: 'billed',
-        header: 'Status',
+        header: 'Status & EWB Tracker',
         cellClassName: 'whitespace-nowrap',
-        render: (cn) => (
-          <span className={`font-semibold ${cn.billed ? 'text-emerald-700' : 'text-orange-700'}`}>
-            {cn.billed ? 'Billed (Locked)' : 'Unbilled'}
-          </span>
-        ),
+        render: (cn) => {
+          const allEwbStates = [
+            cn.ewayBillValidUpto,
+            ...(cn.extraEwayBills || []).map((e) => e.validUpto),
+          ]
+            .map((dt) => getEwayBillExpiryState(dt))
+            .filter((st) => st.status === 'expired' || st.status === 'expiringSoon');
+          const ewbSt =
+            allEwbStates.find((s) => s.status === 'expired') ||
+            allEwbStates[0] ||
+            getEwayBillExpiryState(cn.ewayBillValidUpto);
+          return (
+            <div className="flex flex-wrap items-center gap-1">
+              <span className={`font-semibold ${cn.billed ? 'text-emerald-700' : 'text-orange-700'}`}>
+                {cn.billed ? 'Billed (Locked)' : 'Unbilled'}
+              </span>
+              {(ewbSt.status === 'expired' || ewbSt.status === 'expiringSoon') && (
+                <span
+                  className={`px-1.5 py-0.5 rounded text-[10px] font-extrabold ${
+                    ewbSt.status === 'expired'
+                      ? 'bg-red-600 text-white'
+                      : 'bg-amber-400 text-slate-950'
+                  }`}
+                >
+                  {ewbSt.label}
+                </span>
+              )}
+              {cn.ewayBillNo && (
+                <button
+                  type="button"
+                  onClick={() => downloadNicPartBJson(cn, company)}
+                  className="px-1.5 py-0.5 rounded bg-slate-100 hover:bg-blue-100 text-slate-800 text-[10px] font-bold cursor-pointer"
+                  title="Download NIC Part-B Vehicle Update JSON"
+                >
+                  Part-B
+                </button>
+              )}
+            </div>
+          );
+        },
       },
       {
         key: 'actions',
@@ -1119,6 +1180,15 @@ const ConsignmentModuleInner: React.FC<ConsignmentModuleProps> = ({
               : `New Consignment Note (Branch: ${activeBranchCode} · ${activeFy})`}
           </span>
           <div className="flex flex-wrap items-center gap-2.5">
+            <select
+              aria-label="Division Selector"
+              value={division}
+              onChange={(e) => setDivision(e.target.value === 'LOGISTICS' ? 'LOGISTICS' : 'FTL')}
+              className="px-2 py-1 rounded bg-white text-[#0D47A1] text-xs font-extrabold cursor-pointer"
+            >
+              <option value="FTL">FTL Division</option>
+              <option value="LOGISTICS">LOGISTICS Division</option>
+            </select>
             {!editingId && (
               <label className="inline-flex items-center gap-1.5 text-xs font-semibold text-blue-100 cursor-pointer">
                 <input
@@ -1656,30 +1726,94 @@ const ConsignmentModuleInner: React.FC<ConsignmentModuleProps> = ({
             />
           </div>
 
-          <div>
-            <div className="flex items-center justify-between gap-2 mb-1">
-              <label className="font-semibold text-slate-700">E-Way Bill No</label>
-              <div className="inline-flex items-center gap-1">
-                <span className="text-[10px] font-bold text-slate-600">Multi EWB:</span>
+          <div className="md:col-span-2 p-2.5 rounded-lg bg-slate-50 border border-slate-200 space-y-2">
+            <div className="flex flex-wrap items-center justify-between gap-2">
+              <div className="flex items-center gap-2">
+                <label className="font-bold text-slate-800">E-Way Bill Tracker</label>
+                {ewayBillValidUpto && (() => {
+                  const st = getEwayBillExpiryState(ewayBillValidUpto);
+                  return (
+                    <span
+                      className={`px-1.5 py-0.5 rounded text-[10px] font-extrabold ${
+                        st.status === 'expired'
+                          ? 'bg-red-600 text-white'
+                          : st.status === 'expiringSoon'
+                            ? 'bg-amber-400 text-slate-950'
+                            : 'bg-emerald-100 text-emerald-800'
+                      }`}
+                    >
+                      {st.label}
+                    </span>
+                  );
+                })()}
+              </div>
+              <div className="inline-flex flex-wrap items-center gap-1.5">
+                <button
+                  type="button"
+                  onClick={() => setEwbQrModalOpen(true)}
+                  className="inline-flex items-center gap-1 px-2 py-0.5 rounded bg-emerald-600 hover:bg-emerald-700 text-white text-[10px] font-bold cursor-pointer"
+                >
+                  <QrCode className="w-3 h-3" />
+                  Scan EWB QR
+                </button>
+                <button
+                  type="button"
+                  onClick={() => downloadNicPartBJson(buildPayload(), company)}
+                  className="inline-flex items-center gap-1 px-2 py-0.5 rounded bg-blue-700 hover:bg-blue-800 text-white text-[10px] font-bold cursor-pointer"
+                >
+                  <FileCode2 className="w-3 h-3" />
+                  Part-B JSON
+                </button>
+                <a
+                  href="https://ewaybillgst.gov.in"
+                  target="_blank"
+                  rel="noopener noreferrer"
+                  className="inline-flex items-center gap-1 px-2 py-0.5 rounded border border-blue-300 bg-white hover:bg-blue-50 text-blue-800 text-[10px] font-bold"
+                >
+                  <span>NIC Portal</span>
+                  <ExternalLink className="w-2.5 h-2.5" />
+                </a>
+                <span className="text-[10px] font-bold text-slate-600 ml-1">Multi EWB:</span>
                 <YesNoSelect
                   ariaLabel="Multi E-Way Bill (Yes/No)"
                   value={hasMultiEwayBill}
                   onChange={(next) => {
                     setHasMultiEwayBill(next);
                     if (next && extraEwayBills.length === 0) {
-                      setExtraEwayBills([{ no: '', date: ewayBillDate || todayISO() }]);
+                      setExtraEwayBills([{ no: '', date: ewayBillDate || todayISO(), validUpto: ewayBillValidUpto || '' }]);
                     }
                   }}
                 />
               </div>
             </div>
-            <input
-              type="text"
-              value={ewayBillNo}
-              onChange={(e) => setEwayBillNo(e.target.value)}
-              placeholder="12-Digit E-Way Bill No"
-              className="w-full px-2.5 py-1.5 rounded border border-slate-300 font-mono-num"
-            />
+            <div className="grid grid-cols-1 sm:grid-cols-3 gap-2">
+              <input
+                type="text"
+                value={ewayBillNo}
+                onChange={(e) => setEwayBillNo(e.target.value)}
+                placeholder="12-Digit E-Way Bill No"
+                className="w-full px-2.5 py-1.5 rounded border border-slate-300 bg-white font-mono-num"
+              />
+              <input
+                type="date"
+                aria-label="E-Way Bill Date"
+                value={ewayBillDate}
+                onChange={(e) => setEwayBillDate(e.target.value)}
+                title="E-Way Bill Date"
+                className="w-full px-2.5 py-1.5 rounded border border-slate-300 bg-white font-mono-num"
+              />
+              <input
+                type="datetime-local"
+                aria-label="E-Way Bill Valid Upto"
+                value={ewayBillValidUpto}
+                onChange={(e) => setEwayBillValidUpto(e.target.value)}
+                title="E-Way Bill Valid Upto Date & Time"
+                className="w-full px-2 py-1.5 rounded border border-slate-300 bg-white font-mono-num text-[11px]"
+              />
+            </div>
+            {ewbTrackerMsg && (
+              <p className="text-[11px] font-semibold text-emerald-800">{ewbTrackerMsg}</p>
+            )}
           </div>
 
           <div>
@@ -1853,7 +1987,7 @@ const ConsignmentModuleInner: React.FC<ConsignmentModuleProps> = ({
               {hasMultiEwayBill && extraEwayBills.length > 0 && (
                 <div className="grid grid-cols-1 sm:grid-cols-2 md:grid-cols-3 gap-2">
                   {extraEwayBills.map((ewb, idx) => (
-                    <div key={idx} className="flex items-center gap-1 bg-white border border-slate-300 rounded px-2 py-1">
+                    <div key={idx} className="flex flex-wrap items-center gap-1 bg-white border border-slate-300 rounded px-2 py-1">
                       <input
                         type="text"
                         value={ewb.no}
@@ -1863,7 +1997,7 @@ const ConsignmentModuleInner: React.FC<ConsignmentModuleProps> = ({
                           )
                         }
                         placeholder={`EWB #${idx + 2}`}
-                        className="flex-1 min-w-0 font-mono-num focus:outline-none"
+                        className="flex-1 min-w-[90px] font-mono-num focus:outline-none"
                       />
                       <input
                         type="date"
@@ -1874,6 +2008,17 @@ const ConsignmentModuleInner: React.FC<ConsignmentModuleProps> = ({
                           )
                         }
                         className="w-28 font-mono-num text-[11px] focus:outline-none"
+                      />
+                      <input
+                        type="datetime-local"
+                        value={ewb.validUpto || ''}
+                        onChange={(e) =>
+                          setExtraEwayBills((prev) =>
+                            prev.map((x, i) => (i === idx ? { ...x, validUpto: e.target.value } : x))
+                          )
+                        }
+                        title="Valid Upto"
+                        className="w-36 font-mono-num text-[10px] focus:outline-none"
                       />
                       <button
                         type="button"
@@ -2020,6 +2165,21 @@ const ConsignmentModuleInner: React.FC<ConsignmentModuleProps> = ({
           </div>
         </div>
       )}
+      <CameraPodQrScannerModal
+        open={ewbQrModalOpen}
+        mode="qr"
+        title="NIC E-Way Bill & DRC Verification QR Scanner"
+        onClose={() => setEwbQrModalOpen(false)}
+        onQrDecoded={(parsed: ParsedQrPayload) => {
+          if (parsed.ewbNo) setEwayBillNo(parsed.ewbNo);
+          if (parsed.ewbDate) setEwayBillDate(parsed.ewbDate);
+          if (parsed.validUpto) setEwayBillValidUpto(parsed.validUpto);
+          if (parsed.vehicleNo && !truckNo.trim()) {
+            handleSelectVehicle(parsed.vehicleNo);
+          }
+          setEwbTrackerMsg(`QR Decoded: ${parsed.summary}`);
+        }}
+      />
     </div>
   );
 };

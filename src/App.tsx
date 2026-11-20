@@ -129,6 +129,8 @@ import { BackupSettingsModule } from './components/BackupSettingsModule';
 import { StaffAccessMatrixModule } from './components/StaffAccessMatrixModule';
 import { StaffCommissionModule } from './components/StaffCommissionModule';
 import { BankReceiptImportModule } from './components/BankReceiptImportModule';
+import { UserGuideModule } from './components/UserGuideModule';
+import { getEwayBillExpiryState } from './lib/ewayBillUtils';
 
 type SidebarNavId = SheetTabId | 'transactions';
 
@@ -151,6 +153,7 @@ const TAB_LABELS: Record<SheetTabId, string> = {
   staffAccess: 'Staff Sheet Access Control',
   backup: 'Backup / Restore',
   settings: 'Settings',
+  guide: 'User Guide (অপারেটিং বুক)',
   about: 'About DRC',
 };
 
@@ -589,19 +592,36 @@ export default function App() {
       .slice(0, 80);
   }, [activityLogs, effectiveBranchFilter]);
 
-  // Real-time Red Alert Badges Computation
+  // Real-time Red & 15-Day Advance Alert Badges Computation
   const alerts = useMemo(() => {
     const failedVehicles = vehicles.filter((v) => {
-      const checks = [v.fitnessExpiry, v.insuranceExpiry, v.permitExpiry, v.pucExpiry];
+      const checks = [
+        v.fitnessExpiry,
+        v.insuranceExpiry,
+        v.permitExpiry,
+        v.roadTaxExpiry,
+        v.pucExpiry,
+      ];
       return checks.some((dt) => {
         const d = daysUntilDate(dt);
-        return d !== null && d < 0;
+        return d !== null && d <= 15;
       });
     });
 
     const failedDrivers = drivers.filter((d) => {
       const days = daysUntilDate(d.dlExpiry);
-      return days !== null && days < 0;
+      return days !== null && days <= 15;
+    });
+
+    const expiringEwbs = visibleConsignments.filter((cn) => {
+      const dates = [
+        cn.ewayBillValidUpto,
+        ...(cn.extraEwayBills || []).map((e) => e.validUpto),
+      ];
+      return dates.some((dt) => {
+        const st = getEwayBillExpiryState(dt);
+        return st.status === 'expired' || st.status === 'expiringSoon';
+      });
     });
 
     const overdueInvoices = visibleInvoices.filter((inv) => {
@@ -614,10 +634,15 @@ export default function App() {
     return {
       failedVehicles,
       failedDrivers,
+      expiringEwbs,
       overdueInvoices,
-      totalCount: failedVehicles.length + failedDrivers.length + overdueInvoices.length,
+      totalCount:
+        failedVehicles.length +
+        failedDrivers.length +
+        expiringEwbs.length +
+        overdueInvoices.length,
     };
-  }, [vehicles, drivers, visibleInvoices]);
+  }, [vehicles, drivers, visibleConsignments, visibleInvoices]);
 
   const getSheetAccess = useCallback(
     (sheetKey: SheetPermissionKey) => {
@@ -645,7 +670,7 @@ export default function App() {
   const hasPermission = useCallback(
     (perm: SheetTabId): boolean => {
       if (!erpSession) return false;
-      if (perm === 'dashboard' || perm === 'about') return true;
+      if (perm === 'dashboard' || perm === 'about' || perm === 'guide') return true;
       if (perm === 'staffAccess') return isEffectiveMasterAdmin;
       if (!isEffectiveMasterAdmin && (perm === 'settings' || perm === 'mis')) return false;
       if (isEffectiveMasterAdmin || activeStaffSession?.role === 'Admin') return true;
@@ -675,7 +700,7 @@ export default function App() {
   // Strict route guard: redirect non-admin staff away from restricted tabs immediately
   useEffect(() => {
     if (!erpSession) return;
-    if (activeTab === 'dashboard' || activeTab === 'about') return;
+    if (activeTab === 'dashboard' || activeTab === 'about' || activeTab === 'guide') return;
     if (!hasPermission(activeTab)) {
       setActiveTab('dashboard');
     }
@@ -873,6 +898,73 @@ export default function App() {
     window.location.reload();
   };
 
+  const handleSwitchOffExitApp = useCallback(async () => {
+    try {
+      if (isOnline && offlineSyncStatus.pendingCount > 0) {
+        await Promise.race([
+          flushOfflineSyncQueue(),
+          new Promise<void>((resolve) => setTimeout(resolve, 1500)),
+        ]);
+      }
+    } catch {
+      // Ignore network timeout on exit
+    }
+    try {
+      runDailyLocalJunkCleanup();
+      revokeThermalMemoryCooledUrls();
+    } catch {
+      // Ignore cleanup errors
+    }
+    if (erpSession) {
+      try {
+        await Promise.race([
+          upsertStaffPresence({
+            ownerUid: workspaceUid,
+            staffCode: activeStaffCode,
+            displayName: activeStaffName,
+            role: activeStaffRole,
+            branchCode: activeOperationalBranch,
+            activeModule: TAB_LABELS[activeTab] || activeTab,
+            deviceType: detectDeviceType(),
+            status: 'offline',
+          }),
+          new Promise<void>((resolve) => setTimeout(resolve, 1200)),
+        ]);
+      } catch {
+        // Ignore presence update error on exit
+      }
+    }
+    clearErpSession();
+    setPreviewPdf((prev) => {
+      if (prev?.pdf.blobUrl) URL.revokeObjectURL(prev.pdf.blobUrl);
+      return null;
+    });
+    setIsScreenLocked(false);
+    setSidebarOpen(false);
+    setNotifOpen(false);
+    setLiveMonitorOpen(false);
+    setActiveStaffSession(null);
+    setErpSession(null);
+    setOpenTabs([{ id: 'dashboard', label: 'Dashboard' }]);
+    setActiveTab('dashboard');
+    setAppClosedOverlay(true);
+    try {
+      window.close();
+    } catch {
+      // Browser tab close may require manual dismissal
+    }
+  }, [
+    isOnline,
+    offlineSyncStatus.pendingCount,
+    erpSession,
+    workspaceUid,
+    activeStaffCode,
+    activeStaffName,
+    activeStaffRole,
+    activeOperationalBranch,
+    activeTab,
+  ]);
+
   const handlePreviewPdf = useCallback((pdf: GeneratedPdfResult, folder: DriveFolderName) => {
     if (pdf.blobUrl) registerManagedBlobUrl(pdf.blobUrl);
     setPreviewPdf((prev) => {
@@ -1031,6 +1123,24 @@ export default function App() {
         action: () => openOrSwitchTab('reports'),
       },
       {
+        id: 'pg-gst-hub',
+        title: 'GST & RCM Report & Online Filing Hub',
+        keywords: 'gst gstr1 gstr3b rcm pmt06 filing portal hub',
+        allowed: hasPermission('reports'),
+        action: () => {
+          setReportInitialTab('gstFilingHub');
+          setReportFocusNonce((n) => n + 1);
+          openOrSwitchTab('reports');
+        },
+      },
+      {
+        id: 'pg-guide',
+        title: 'User Guide (অপারেটিং বুক)',
+        keywords: 'guide manual help bengali bangla operating book',
+        allowed: true,
+        action: () => openOrSwitchTab('guide'),
+      },
+      {
         id: 'pg-master',
         title: 'Party, Owner, Broker, Lorry & Driver Master',
         keywords: 'party master owner broker lorry vehicle driver',
@@ -1167,6 +1277,31 @@ export default function App() {
     return `${dateStr}  ${timeStr}`;
   }, [now]);
 
+  if (appClosedOverlay) {
+    return (
+      <div className="min-h-screen flex items-center justify-center bg-slate-950 p-4">
+        <div className="w-full max-w-sm bg-white rounded-2xl border border-slate-300 shadow-2xl p-6 text-center space-y-4">
+          <DrcTriangleLogo className="w-16 h-16 mx-auto" />
+          <div>
+            <h2 className="text-base font-extrabold text-slate-900">
+              DRC ERP Safely Switched Off
+            </h2>
+            <p className="text-xs text-slate-600 mt-1.5 leading-relaxed">
+              Final offline sync flushed, temporary memory cleaned, session logged out, and all background listeners stopped. You may close this window or sign back in below.
+            </p>
+          </div>
+          <button
+            type="button"
+            onClick={() => setAppClosedOverlay(false)}
+            className="w-full px-4 py-2.5 rounded-lg bg-[#0D47A1] hover:bg-[#0A3882] text-white text-xs font-bold cursor-pointer"
+          >
+            Sign Back In / Wake App
+          </button>
+        </div>
+      </div>
+    );
+  }
+
   if (!erpSession) {
     return (
       <SignInScreen
@@ -1205,6 +1340,7 @@ export default function App() {
     },
     { id: 'settings', label: 'Settings', icon: Settings, perm: 'settings' },
     { id: 'backup', label: 'Backup / Restore', icon: DatabaseBackup, perm: 'backup' },
+    { id: 'guide', label: 'User Guide (অপারেটিং বুক)', icon: BookOpen },
     { id: 'about', label: 'About', icon: Info },
   ];
 
@@ -1446,7 +1582,7 @@ export default function App() {
                             <div>
                               <p className="font-bold text-slate-900">Vehicle {v.truckNo}</p>
                               <p className="text-[11px] text-red-700">
-                                Expired document (Fitness / Insurance / Permit / PUC)
+                                15d Alert / Expired (Fitness / Ins / Permit / Road Tax / PUC)
                               </p>
                             </div>
                           </button>
@@ -1467,11 +1603,45 @@ export default function App() {
                             <div>
                               <p className="font-bold text-slate-900">Driver: {d.name}</p>
                               <p className="text-[11px] text-red-700">
-                                D/L {d.dlNo} expired ({formatDateDDMMYYYY(d.dlExpiry)})
+                                D/L {d.dlNo} due/expired ({formatDateDDMMYYYY(d.dlExpiry)})
                               </p>
                             </div>
                           </button>
                         ))}
+                        {alerts.expiringEwbs.map((cn) => {
+                          const allEwbStates = [
+                            cn.ewayBillValidUpto,
+                            ...(cn.extraEwayBills || []).map((e) => e.validUpto),
+                          ]
+                            .map((dt) => getEwayBillExpiryState(dt))
+                            .filter((st) => st.status === 'expired' || st.status === 'expiringSoon');
+                          const worstSt =
+                            allEwbStates.find((s) => s.status === 'expired') ||
+                            allEwbStates[0] ||
+                            getEwayBillExpiryState(cn.ewayBillValidUpto);
+                          return (
+                            <button
+                              key={`ewb-${cn.id}`}
+                              type="button"
+                              onClick={() => {
+                                setNotifOpen(false);
+                                openOrSwitchTab('lr');
+                              }}
+                              className="w-full text-left px-3.5 py-2.5 hover:bg-amber-50 flex items-start gap-2 cursor-pointer"
+                            >
+                              <AlertTriangle className="w-4 h-4 text-amber-600 shrink-0 mt-0.5" />
+                              <div>
+                                <p className="font-bold text-slate-900">
+                                  EWB {cn.ewayBillNo || cn.cnNo} ({cn.truckNo})
+                                  {cn.division === 'LOGISTICS' ? ' · LOGISTICS' : ''}
+                                </p>
+                                <p className="text-[11px] text-amber-800 font-semibold">
+                                  {worstSt.label}
+                                </p>
+                              </div>
+                            </button>
+                          );
+                        })}
                         {alerts.overdueInvoices.map((inv) => (
                           <button
                             key={inv.id}
@@ -1548,6 +1718,17 @@ export default function App() {
                 <span>Install App</span>
               </button>
             )}
+
+            {/* Prominent Red Switch Off / Exit App Button */}
+            <button
+              type="button"
+              onClick={() => void handleSwitchOffExitApp()}
+              className="inline-flex items-center gap-1 px-2.5 py-1.5 rounded-lg bg-red-600 hover:bg-red-700 text-white text-xs font-extrabold shadow-sm cursor-pointer whitespace-nowrap shrink-0"
+              title="Flush sync, clean temp cache, sign out, stop listeners and switch off app"
+            >
+              <Power className="w-3.5 h-3.5" />
+              <span>Switch Off / Exit App</span>
+            </button>
           </div>
         </div>
 
@@ -1673,6 +1854,19 @@ export default function App() {
               <button
                 type="button"
                 onClick={() => {
+                  setReportInitialTab('gstFilingHub');
+                  setReportFocusNonce((n) => n + 1);
+                  openOrSwitchTab('reports');
+                }}
+                className="px-2.5 py-1 rounded bg-indigo-600 hover:bg-indigo-700 text-white cursor-pointer whitespace-nowrap"
+              >
+                GST &amp; RCM Filing Hub
+              </button>
+            )}
+            {hasPermission('reports') && (
+              <button
+                type="button"
+                onClick={() => {
                   setReportInitialTab('partyFollowUp');
                   setReportFocusNonce((n) => n + 1);
                   openOrSwitchTab('reports');
@@ -1691,6 +1885,13 @@ export default function App() {
                 Staff Access Control
               </button>
             )}
+            <button
+              type="button"
+              onClick={() => openOrSwitchTab('guide')}
+              className="px-2.5 py-1 rounded bg-slate-800 hover:bg-slate-900 text-amber-200 cursor-pointer whitespace-nowrap"
+            >
+              অপারেটিং বুক / Guide
+            </button>
           </div>
 
           <div className="flex flex-wrap items-center gap-1.5">
@@ -1889,19 +2090,12 @@ export default function App() {
 
               <button
                 type="button"
-                onClick={() => {
-                  try {
-                    window.close();
-                  } catch {
-                    // ignore if browser blocks programmatic window close
-                  }
-                  setAppClosedOverlay(true);
-                }}
+                onClick={() => void handleSwitchOffExitApp()}
                 className="w-full flex items-center gap-2.5 px-3 py-2 rounded-lg text-xs font-extrabold bg-red-600 hover:bg-red-700 text-white shadow-sm transition-all cursor-pointer"
-                title="Close App Window without signing out"
+                title="Flush sync, clean temp cache, sign out, stop listeners and switch off app"
               >
                 <Power className="w-4 h-4 shrink-0" />
-                <span>Close App</span>
+                <span>Switch Off / Exit App</span>
               </button>
             </div>
           </div>
@@ -2185,6 +2379,8 @@ export default function App() {
                 onShowConfirm={handleShowConfirm}
               />
             )}
+
+            {activeTab === 'guide' && <UserGuideModule />}
 
             {activeTab === 'about' && (
               <div className="bg-white rounded-xl border border-slate-200 shadow-sm overflow-hidden max-w-4xl">

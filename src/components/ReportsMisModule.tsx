@@ -54,6 +54,7 @@ import {
 } from '../lib/shareUtils';
 import { useDebouncedValue } from '../hooks/useDebounce';
 import { PaginatedDataTable, TableColumn } from './PaginatedDataTable';
+import { GstFilingHubModule } from './GstFilingHubModule';
 
 interface ReportsMisModuleProps {
   ownerUid: string;
@@ -81,6 +82,7 @@ interface ReportsMisModuleProps {
 
 export type ReportTab =
   | 'gstRegister'
+  | 'gstFilingHub'
   | 'foxproStatements'
   | 'invoiceRegister'
   | 'purchaseRegister'
@@ -1651,6 +1653,7 @@ const ReportsMisModuleInner: React.FC<ReportsMisModuleProps> = ({
 
   const tabs: Array<{ id: ReportTab; label: string; adminOnly?: boolean }> = [
     { id: 'gstRegister', label: 'G-S-T R-E-G-I-S-T-E-R' },
+    { id: 'gstFilingHub', label: 'GST & RCM Filing Hub' },
     { id: 'foxproStatements', label: 'FoxPro Statements (6)' },
     { id: 'invoiceRegister', label: 'Invoice Register' },
     { id: 'purchaseRegister', label: 'Purchase / Lorry Hire' },
@@ -1666,7 +1669,10 @@ const ReportsMisModuleInner: React.FC<ReportsMisModuleProps> = ({
   const visibleTabs = tabs.filter((t) => isMasterAdmin || !t.adminOnly);
 
   const isTableTab =
-    tab !== 'finalResults' && tab !== 'aiAdvisor' && tab !== 'partyFollowUp';
+    tab !== 'finalResults' &&
+    tab !== 'aiAdvisor' &&
+    tab !== 'partyFollowUp' &&
+    tab !== 'gstFilingHub';
 
   return (
     <div className="space-y-4">
@@ -1702,7 +1708,7 @@ const ReportsMisModuleInner: React.FC<ReportsMisModuleProps> = ({
             </div>
           )}
 
-          {tab !== 'aiAdvisor' && (
+          {tab !== 'aiAdvisor' && tab !== 'gstFilingHub' && (
             <>
               <button
                 type="button"
@@ -1850,6 +1856,17 @@ const ReportsMisModuleInner: React.FC<ReportsMisModuleProps> = ({
             </table>
           </div>
         </div>
+      )}
+
+      {/* TAB: GST & RCM REPORT & ONLINE FILING HUB */}
+      {tab === 'gstFilingHub' && (
+        <GstFilingHubModule
+          invoices={invoices}
+          consignments={consignments}
+          company={company}
+          activeFy={activeFy}
+          onPreviewPdf={onPreviewPdf}
+        />
       )}
 
       {/* TAB: FOXPRO STATEMENTS CENTER (PARTY, DRIVER, BROKER, OWNER, DAILY TRIP, LOGISTICS BILL) */}

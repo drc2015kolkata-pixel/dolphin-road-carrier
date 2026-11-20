@@ -117,7 +117,7 @@ service cloud.firestore {
 
     function isValidVehicle(data) {
       return data.keys().hasAll(['truckNo', 'ownerName', 'ownerUid', 'createdAt', 'updatedAt']) &&
-        data.keys().hasOnly(['id', 'truckNo', 'vehicleType', 'ownerName', 'ownerPhone', 'engineNo', 'chassisNo', 'fitnessExpiry', 'insuranceExpiry', 'permitExpiry', 'pucExpiry', 'ownerUid', 'createdAt', 'updatedAt']) &&
+        data.keys().hasOnly(['id', 'truckNo', 'vehicleType', 'ownerName', 'ownerPhone', 'engineNo', 'chassisNo', 'fitnessExpiry', 'insuranceExpiry', 'permitExpiry', 'roadTaxExpiry', 'pucExpiry', 'ownerUid', 'createdAt', 'updatedAt']) &&
         isValidOptStr(data, 'id', 128) &&
         data.truckNo is string && data.truckNo.size() >= 4 && data.truckNo.size() <= 24 &&
         isValidOptStr(data, 'vehicleType', 80) &&
@@ -128,6 +128,7 @@ service cloud.firestore {
         isValidOptStr(data, 'fitnessExpiry', 20) &&
         isValidOptStr(data, 'insuranceExpiry', 20) &&
         isValidOptStr(data, 'permitExpiry', 20) &&
+        isValidOptStr(data, 'roadTaxExpiry', 20) &&
         isValidOptStr(data, 'pucExpiry', 20) &&
         data.ownerUid is string && data.ownerUid.size() >= 6 && data.ownerUid.size() <= 128 &&
         data.createdAt is timestamp &&
@@ -156,12 +157,12 @@ service cloud.firestore {
     function isValidConsignment(data) {
       return data.keys().hasAll(['cnNo', 'cnDate', 'consignorName', 'consigneeName', 'truckNo', 'fromCity', 'toCity', 'totalFreight', 'billed', 'ownerUid', 'createdAt', 'updatedAt']) &&
         data.keys().hasOnly([
-          'id', 'cnNo', 'cnDate', 'financialYear', 'deliveryOffice', 'stockTransfer', 'billingPartyName', 'creditDays',
+          'id', 'cnNo', 'cnDate', 'financialYear', 'division', 'deliveryOffice', 'stockTransfer', 'billingPartyName', 'creditDays',
           'consignorName', 'consignorAddress', 'consignorGstin',
           'consigneeName', 'consigneeAddress', 'consigneeGstin', 'packages', 'packageMode', 'particulars',
           'rateMode', 'ratePerUnit', 'nettWeight', 'grossWeight', 'loadingCharge', 'unloadingCharge',
           'returnLorryCharge', 'sttCharge', 'totalFreight', 'paidAmount', 'toPayAmount',
-          'hasTaxInvoice', 'hasMultiEwayBill', 'hasMultiVehicle', 'taxInvNo', 'taxInvDate', 'ewayBillNo', 'ewayBillDate',
+          'hasTaxInvoice', 'hasMultiEwayBill', 'hasMultiVehicle', 'taxInvNo', 'taxInvDate', 'ewayBillNo', 'ewayBillDate', 'ewayBillValidUpto',
           'extraTaxInvoices', 'extraEwayBills', 'extraVehicles',
           'valueOfGoods', 'truckNo', 'fromState', 'fromDistrict', 'fromCity', 'toState', 'toDistrict', 'toCity',
           'engineNo', 'chassisNo', 'ownerName', 'driverName', 'driverDlNo', 'gstPaidBy', 'insuranceStatus',
@@ -172,6 +173,7 @@ service cloud.firestore {
         data.cnNo is string && data.cnNo.size() >= 2 && data.cnNo.size() <= 40 &&
         data.cnDate is string && data.cnDate.size() >= 8 && data.cnDate.size() <= 20 &&
         isValidOptStr(data, 'financialYear', 16) &&
+        isValidOptStr(data, 'division', 20) &&
         isValidOptStr(data, 'deliveryOffice', 200) &&
         isValidOptBool(data, 'stockTransfer') &&
         isValidOptStr(data, 'billingPartyName', 180) &&
@@ -203,6 +205,7 @@ service cloud.firestore {
         isValidOptStr(data, 'taxInvDate', 20) &&
         isValidOptStr(data, 'ewayBillNo', 60) &&
         isValidOptStr(data, 'ewayBillDate', 20) &&
+        isValidOptStr(data, 'ewayBillValidUpto', 30) &&
         isValidOptList(data, 'extraTaxInvoices', 50) &&
         isValidOptList(data, 'extraEwayBills', 50) &&
         isValidOptList(data, 'extraVehicles', 30) &&
@@ -235,7 +238,7 @@ service cloud.firestore {
     function isValidInvoice(data) {
       return data.keys().hasAll(['invoiceNo', 'invoiceDate', 'partyName', 'grandTotal', 'paidAmount', 'status', 'consignmentRows', 'ownerUid', 'createdAt', 'updatedAt']) &&
         data.keys().hasOnly([
-          'id', 'invoiceNo', 'invoiceDate', 'dueDate', 'financialYear', 'partyName', 'partyAddress', 'partyGstin', 'partyPan',
+          'id', 'invoiceNo', 'invoiceDate', 'dueDate', 'financialYear', 'division', 'partyName', 'partyAddress', 'partyGstin', 'partyPan',
           'billingCountry', 'sac', 'reverseCharge', 'interstate', 'gstPaidBy', 'gstRate', 'cgstAmt', 'sgstAmt', 'igstAmt', 'totalTax',
           'freightCharges', 'detentionCharges', 'unloadingCharges', 'stCharges', 'grandTotal',
           'paidAmount', 'status', 'remarks', 'copyCount', 'consignmentRows', 'annexureLorries',
@@ -246,6 +249,7 @@ service cloud.firestore {
         data.invoiceDate is string && data.invoiceDate.size() >= 8 && data.invoiceDate.size() <= 20 &&
         isValidOptStr(data, 'dueDate', 20) &&
         isValidOptStr(data, 'financialYear', 16) &&
+        isValidOptStr(data, 'division', 20) &&
         data.partyName is string && data.partyName.size() >= 1 && data.partyName.size() <= 180 &&
         isValidOptStr(data, 'partyAddress', 350) &&
         isValidOptStr(data, 'partyGstin', 24) &&
@@ -284,8 +288,9 @@ service cloud.firestore {
     function isValidQuotation(data) {
       return data.keys().hasAll(['quotationNo', 'quotationDate', 'partyName', 'vehicleType', 'freight', 'destination', 'ownerUid', 'createdAt', 'updatedAt']) &&
         data.keys().hasOnly([
-          'id', 'quotationNo', 'quotationDate', 'financialYear', 'partyName', 'partyAddress', 'partyGstin',
-          'partyPhone', 'partyEmail', 'goodsType', 'rateMode', 'subject',
+          'id', 'quotationNo', 'quotationDate', 'financialYear', 'division', 'partyName', 'partyAddress', 'partyGstin',
+          'partyPhone', 'partyEmail', 'guarantorName', 'guarantorPhone', 'acceptanceEmailOnly',
+          'goodsType', 'rateMode', 'subject',
           'validityText', 'vehicleType', 'freight', 'loadingCharge', 'unloadingCharge',
           'parkingCharge', 'detentionCharge', 'tonGuarantee', 'destination', 'advancePay',
           'entryPoint', 'branchCode', 'createdByStaff', 'ownerUid', 'createdAt', 'updatedAt'
@@ -294,11 +299,15 @@ service cloud.firestore {
         data.quotationNo is string && data.quotationNo.size() >= 2 && data.quotationNo.size() <= 40 &&
         data.quotationDate is string && data.quotationDate.size() >= 8 && data.quotationDate.size() <= 20 &&
         isValidOptStr(data, 'financialYear', 16) &&
+        isValidOptStr(data, 'division', 20) &&
         data.partyName is string && data.partyName.size() >= 1 && data.partyName.size() <= 180 &&
         isValidOptStr(data, 'partyAddress', 350) &&
         isValidOptStr(data, 'partyGstin', 24) &&
         isValidOptStr(data, 'partyPhone', 30) &&
         isValidOptStr(data, 'partyEmail', 160) &&
+        isValidOptStr(data, 'guarantorName', 140) &&
+        isValidOptStr(data, 'guarantorPhone', 30) &&
+        isValidOptBool(data, 'acceptanceEmailOnly') &&
         isValidOptStr(data, 'goodsType', 120) &&
         isValidOptStr(data, 'rateMode', 40) &&
         isValidOptStr(data, 'subject', 200) &&
@@ -323,7 +332,7 @@ service cloud.firestore {
     function isValidLorryHire(data) {
       return data.keys().hasAll(['cnNo', 'truckNo', 'hireAmount', 'advancePaid', 'balancePayable', 'podReceived', 'balancePaid', 'ownerUid', 'createdAt', 'updatedAt']) &&
         data.keys().hasOnly([
-          'id', 'cnNo', 'cnDate', 'financialYear', 'truckNo', 'ownerName', 'brokerName', 'fromCity', 'toCity',
+          'id', 'cnNo', 'cnDate', 'financialYear', 'division', 'truckNo', 'ownerName', 'brokerName', 'fromCity', 'toCity',
           'bookedPkgs', 'deliveredPkgs', 'shortageDamagePkgs', 'hasMultiAdvance', 'advances',
           'hireAmount', 'advancePaid', 'loadingCharge', 'unloadingCharge', 'parkingCharge', 'kataCharge',
           'shortageCharge', 'damageCharge', 'balancePayable', 'podReceived', 'podReceiveDate',
@@ -334,6 +343,7 @@ service cloud.firestore {
         data.cnNo is string && data.cnNo.size() >= 2 && data.cnNo.size() <= 40 &&
         isValidOptStr(data, 'cnDate', 20) &&
         isValidOptStr(data, 'financialYear', 16) &&
+        isValidOptStr(data, 'division', 20) &&
         data.truckNo is string && data.truckNo.size() >= 1 && data.truckNo.size() <= 30 &&
         isValidOptStr(data, 'ownerName', 140) &&
         isValidOptStr(data, 'brokerName', 140) &&
@@ -495,7 +505,7 @@ service cloud.firestore {
           'phones', 'email', 'bankName', 'bankBranch', 'accountNo', 'ifsc', 'swift', 'upiId',
           'bankAccounts', 'branches', 'whatsappCloud',
           'currentFy', 'availableFys', 'fyOpeningBalances', 'dropdownMaster',
-          'customStampDataUrl', 'bholeBabaPhotoDataUrl', 'khatuShyamPhotoDataUrl',
+          'customStampDataUrl', 'panCardPhotoDataUrl', 'bholeBabaPhotoDataUrl', 'khatuShyamPhotoDataUrl',
           'autoLockMinutes', 'lockSourceInspection', 'last90DayAutoFixAt',
           'ownerUid', 'updatedAt'
         ]) &&
@@ -523,6 +533,7 @@ service cloud.firestore {
         isValidOptMap(data, 'fyOpeningBalances', 50) &&
         isValidOptMap(data, 'dropdownMaster', 20) &&
         isValidOptStr(data, 'customStampDataUrl', 450000) &&
+        isValidOptStr(data, 'panCardPhotoDataUrl', 450000) &&
         isValidOptStr(data, 'bholeBabaPhotoDataUrl', 450000) &&
         isValidOptStr(data, 'khatuShyamPhotoDataUrl', 450000) &&
         isValidOptNum(data, 'autoLockMinutes') &&
@@ -638,7 +649,7 @@ service cloud.firestore {
         incoming().createdAt == existing().createdAt &&
         incoming().updatedAt == request.time && (
           isAdmin() ||
-          incoming().diff(existing()).affectedKeys().hasOnly(['truckNo', 'vehicleType', 'ownerName', 'ownerPhone', 'engineNo', 'chassisNo', 'fitnessExpiry', 'insuranceExpiry', 'permitExpiry', 'pucExpiry', 'updatedAt'])
+          incoming().diff(existing()).affectedKeys().hasOnly(['truckNo', 'vehicleType', 'ownerName', 'ownerPhone', 'engineNo', 'chassisNo', 'fitnessExpiry', 'insuranceExpiry', 'permitExpiry', 'roadTaxExpiry', 'pucExpiry', 'updatedAt'])
         );
       allow delete: if isValidId(vehicleId) && isOwnerOrAdmin();
     }
@@ -673,12 +684,12 @@ service cloud.firestore {
         incoming().updatedAt == request.time && (
           isAdmin() ||
           incoming().diff(existing()).affectedKeys().hasOnly([
-            'cnNo', 'cnDate', 'financialYear', 'deliveryOffice', 'stockTransfer', 'billingPartyName', 'creditDays',
+            'cnNo', 'cnDate', 'financialYear', 'division', 'deliveryOffice', 'stockTransfer', 'billingPartyName', 'creditDays',
             'consignorName', 'consignorAddress', 'consignorGstin',
             'consigneeName', 'consigneeAddress', 'consigneeGstin', 'packages', 'packageMode', 'particulars',
             'rateMode', 'ratePerUnit', 'nettWeight', 'grossWeight', 'loadingCharge', 'unloadingCharge',
             'returnLorryCharge', 'sttCharge', 'totalFreight', 'paidAmount', 'toPayAmount',
-            'hasTaxInvoice', 'hasMultiEwayBill', 'hasMultiVehicle', 'taxInvNo', 'taxInvDate', 'ewayBillNo', 'ewayBillDate',
+            'hasTaxInvoice', 'hasMultiEwayBill', 'hasMultiVehicle', 'taxInvNo', 'taxInvDate', 'ewayBillNo', 'ewayBillDate', 'ewayBillValidUpto',
             'extraTaxInvoices', 'extraEwayBills', 'extraVehicles',
             'valueOfGoods', 'truckNo', 'fromState', 'fromDistrict', 'fromCity', 'toState', 'toDistrict', 'toCity',
             'engineNo', 'chassisNo', 'ownerName', 'driverName', 'driverDlNo', 'gstPaidBy', 'insuranceStatus',
@@ -702,7 +713,7 @@ service cloud.firestore {
           isAdmin() ||
           (incoming().diff(existing()).affectedKeys().hasOnly(['paidAmount', 'status', 'updatedAt'])) ||
           (existing().status != 'Paid' && incoming().diff(existing()).affectedKeys().hasOnly([
-            'invoiceDate', 'dueDate', 'financialYear', 'partyName', 'partyAddress', 'partyGstin', 'partyPan',
+            'invoiceDate', 'dueDate', 'financialYear', 'division', 'partyName', 'partyAddress', 'partyGstin', 'partyPan',
             'billingCountry', 'sac', 'reverseCharge', 'interstate', 'gstPaidBy', 'gstRate', 'cgstAmt', 'sgstAmt', 'igstAmt', 'totalTax',
             'freightCharges', 'detentionCharges', 'unloadingCharges', 'stCharges', 'grandTotal',
             'paidAmount', 'status', 'remarks', 'copyCount', 'consignmentRows', 'annexureLorries',
@@ -725,8 +736,9 @@ service cloud.firestore {
         incoming().updatedAt == request.time && (
           isAdmin() ||
           incoming().diff(existing()).affectedKeys().hasOnly([
-            'quotationDate', 'financialYear', 'partyName', 'partyAddress', 'partyGstin',
-            'partyPhone', 'partyEmail', 'goodsType', 'rateMode', 'subject',
+            'quotationDate', 'financialYear', 'division', 'partyName', 'partyAddress', 'partyGstin',
+            'partyPhone', 'partyEmail', 'guarantorName', 'guarantorPhone', 'acceptanceEmailOnly',
+            'goodsType', 'rateMode', 'subject',
             'validityText', 'vehicleType', 'freight', 'loadingCharge', 'unloadingCharge',
             'parkingCharge', 'detentionCharge', 'tonGuarantee', 'destination', 'advancePay',
             'entryPoint', 'branchCode', 'updatedAt'

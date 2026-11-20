@@ -37,6 +37,7 @@ import { GeneratedPdfResult, generateFoxproStatementPDF } from '../lib/pdfEngine
 import { useDebouncedValue } from '../hooks/useDebounce';
 import { PaginatedDataTable, TableColumn } from './PaginatedDataTable';
 import { StaffCommissionModule } from './StaffCommissionModule';
+import { CameraPodQrScannerModal } from './CameraPodQrScannerModal';
 
 interface LorryHirePodModuleProps {
   ownerUid: string;
@@ -169,6 +170,7 @@ const LorryHirePodModuleInner: React.FC<LorryHirePodModuleProps> = ({
 
   // Edit / Form state
   const [editingHireId, setEditingHireId] = useState<string | null>(null);
+  const [division, setDivision] = useState<'FTL' | 'LOGISTICS'>('FTL');
   const [cnNo, setCnNo] = useState('');
   const [cnDate, setCnDate] = useState(todayISO());
   const [truckNo, setTruckNo] = useState('');
@@ -207,6 +209,7 @@ const LorryHirePodModuleInner: React.FC<LorryHirePodModuleProps> = ({
   const [podFileName, setPodFileName] = useState('');
   const [podScanStatus, setPodScanStatus] = useState<string | null>(null);
   const [podUploading, setPodUploading] = useState(false);
+  const [camScannerOpen, setCamScannerOpen] = useState(false);
 
   // Balance payment modal state
   const [payTarget, setPayTarget] = useState<LorryHire | null>(null);
@@ -285,6 +288,7 @@ const LorryHirePodModuleInner: React.FC<LorryHirePodModuleProps> = ({
     setCnNo(selectedCnNo);
     const cn = consignments.find((c) => c.cnNo.toLowerCase() === selectedCnNo.toLowerCase());
     if (cn) {
+      setDivision(cn.division === 'LOGISTICS' ? 'LOGISTICS' : 'FTL');
       setCnDate(cn.cnDate);
       setTruckNo(cn.truckNo);
       setOwnerName(cn.ownerName || '');
@@ -304,6 +308,7 @@ const LorryHirePodModuleInner: React.FC<LorryHirePodModuleProps> = ({
 
   const resetForm = () => {
     setEditingHireId(null);
+    setDivision('FTL');
     setCnNo('');
     setCnDate(todayISO());
     setTruckNo('');
@@ -326,6 +331,7 @@ const LorryHirePodModuleInner: React.FC<LorryHirePodModuleProps> = ({
 
   const handleLoadForEdit = (h: LorryHire) => {
     setEditingHireId(h.id);
+    setDivision(h.division === 'LOGISTICS' ? 'LOGISTICS' : 'FTL');
     setCnNo(h.cnNo || '');
     setCnDate(h.cnDate || todayISO());
     setTruckNo(h.truckNo || '');
@@ -375,6 +381,7 @@ const LorryHirePodModuleInner: React.FC<LorryHirePodModuleProps> = ({
           cnNo: cnNo.trim().slice(0, 40),
           cnDate,
           financialYear: normalizeFyLabel(activeFy),
+          division,
           truckNo: truckNo.trim().toUpperCase().slice(0, 30),
           ownerName: ownerName.trim().slice(0, 140),
           brokerName: brokerName.trim().slice(0, 140),
@@ -655,6 +662,11 @@ const LorryHirePodModuleInner: React.FC<LorryHirePodModuleProps> = ({
         render: (h) => (
           <div>
             <span>{h.cnNo}</span>
+            {h.division === 'LOGISTICS' && (
+              <span className="ml-1 px-1.5 py-0.5 rounded bg-indigo-100 text-indigo-800 text-[10px]">
+                LOGISTICS
+              </span>
+            )}
             {h.branchCode && (
               <span className="ml-1.5 px-1.5 py-0.5 rounded bg-slate-100 text-slate-600 text-[10px]">
                 {h.branchCode}
@@ -891,7 +903,16 @@ const LorryHirePodModuleInner: React.FC<LorryHirePodModuleProps> = ({
                 : `Lorry Hire & POD Reconciliation (${activeBranchCode})`}
             </span>
           </div>
-          <div className="flex items-center gap-2">
+          <div className="flex flex-wrap items-center gap-2">
+            <select
+              aria-label="Lorry Hire Division"
+              value={division}
+              onChange={(e) => setDivision(e.target.value === 'LOGISTICS' ? 'LOGISTICS' : 'FTL')}
+              className="px-2 py-1 rounded bg-white text-[#0D47A1] text-xs font-extrabold cursor-pointer"
+            >
+              <option value="FTL">FTL Division</option>
+              <option value="LOGISTICS">LOGISTICS Division</option>
+            </select>
             <span className="text-xs text-blue-100">
               Booked vs Delivered Pkgs · Multi-Advance · Step-by-Step Deductions
             </span>
@@ -1447,11 +1468,19 @@ const LorryHirePodModuleInner: React.FC<LorryHirePodModuleProps> = ({
                 />
                 <button
                   type="button"
-                  onClick={() => podCamRef.current?.click()}
+                  onClick={() => setCamScannerOpen(true)}
                   className="inline-flex items-center gap-1.5 px-3 py-2 rounded-lg bg-emerald-600 hover:bg-emerald-700 text-white font-bold cursor-pointer"
                 >
                   <Camera className="w-4 h-4" />
-                  Camera Scan Signed POD
+                  Live Camera POD &amp; QR
+                </button>
+                <button
+                  type="button"
+                  onClick={() => podCamRef.current?.click()}
+                  className="inline-flex items-center gap-1.5 px-3 py-2 rounded-lg bg-teal-600 hover:bg-teal-700 text-white font-bold cursor-pointer"
+                >
+                  <Camera className="w-4 h-4" />
+                  Quick Photo POD
                 </button>
                 <button
                   type="button"
@@ -1656,6 +1685,24 @@ const LorryHirePodModuleInner: React.FC<LorryHirePodModuleProps> = ({
           </form>
         </div>
       )}
+      <CameraPodQrScannerModal
+        open={camScannerOpen}
+        mode="both"
+        title={
+          activePodTarget
+            ? `POD & QR Camera Scanner — ${activePodTarget.cnNo} (${activePodTarget.truckNo})`
+            : 'In-App Camera POD & QR Scanner'
+        }
+        onClose={() => setCamScannerOpen(false)}
+        onCapturePodImage={(dataUrl, fileName) => {
+          setPodImageUrl(dataUrl);
+          setPodFileName(fileName);
+          setPodScanStatus('Live camera POD captured & compressed (<440KB). Confirm POD Receive Date & Delivered Pkgs.');
+        }}
+        onQrDecoded={(parsed) => {
+          setPodScanStatus(`QR Verified: ${parsed.summary}`);
+        }}
+      />
     </div>
   );
 };
