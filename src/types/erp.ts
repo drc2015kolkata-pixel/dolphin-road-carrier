@@ -587,6 +587,18 @@ export type SheetTabId =
   | 'guide'
   | 'about';
 
+export type BusinessMode = 'FTL' | 'LOGISTICS';
+
+export type LogisticsWorkspaceTabId =
+  | 'overview'
+  | 'docket'
+  | 'manifest'
+  | 'godown'
+  | 'masters'
+  | 'billing'
+  | 'ledgers'
+  | 'backup';
+
 export type DriveFolderName =
   | 'LR Copy'
   | 'Bills_Invoices'
@@ -595,6 +607,218 @@ export type DriveFolderName =
   | 'Declarations'
   | 'Reports_Ledgers'
   | 'Bank_Statements';
+
+export type LogisticsDriveFolderName =
+  | 'Docket_LR'
+  | 'LineHaul_Manifests'
+  | 'Logistics_Invoices_CN_DN'
+  | 'Godown_POD_Scans'
+  | 'Logistics_Ledgers';
+
+export type AnyDriveFolderName = DriveFolderName | LogisticsDriveFolderName;
+
+export interface LogisticsParty {
+  id: string;
+  name: string;
+  partyType: 'Customer' | 'Consignor' | 'Consignee' | 'Broker' | 'DeliveryAgent' | 'Vendor';
+  address?: string;
+  gstin?: string;
+  pan?: string;
+  phone?: string;
+  email?: string;
+  branchCode?: string;
+  openingBalance: number;
+  currentBalance: number;
+  balanceType: 'Dr' | 'Cr';
+  ownerUid: string;
+  createdAt?: unknown;
+  updatedAt?: unknown;
+}
+
+export interface LogisticsVehicle {
+  id: string;
+  truckNo: string;
+  vehicleType?: string;
+  ownerName: string;
+  ownerPhone?: string;
+  fitnessExpiry?: string;
+  insuranceExpiry?: string;
+  permitExpiry?: string;
+  roadTaxExpiry?: string;
+  pucExpiry?: string;
+  branchCode?: string;
+  ownerUid: string;
+  createdAt?: unknown;
+  updatedAt?: unknown;
+}
+
+export interface LogisticsDriver {
+  id: string;
+  name: string;
+  dlNo: string;
+  dlExpiry: string;
+  phone?: string;
+  address?: string;
+  branchCode?: string;
+  ownerUid: string;
+  createdAt?: unknown;
+  updatedAt?: unknown;
+}
+
+export type LogisticsStockStage =
+  | 'Origin Godown'
+  | 'Manifested / In Transit'
+  | 'Destination Godown'
+  | 'Out for Delivery'
+  | 'Delivered';
+
+export interface LogisticsDocket {
+  id: string;
+  docketNo: string;
+  docketDate: string;
+  financialYear?: string;
+  originBranch: string;
+  destBranch: string;
+  deliveryMode: 'Door Delivery' | 'Godown Delivery';
+  payMode: 'Paid' | 'To-Pay' | 'TBB';
+  consignorName: string;
+  consignorAddress?: string;
+  consignorGstin?: string;
+  consigneeName: string;
+  consigneeAddress?: string;
+  consigneeGstin?: string;
+  billingPartyName?: string;
+  packages: number;
+  packingType?: string;
+  goodsDesc: string;
+  actualWeightKg: number;
+  chargedWeightKg: number;
+  rateBasis: 'Per Kg' | 'Per Package' | 'Fixed';
+  ratePerUnit: number;
+  baseFreight: number;
+  fovCharge?: number;
+  docketCharge?: number;
+  hamaliCharge?: number;
+  doorCharge?: number;
+  gstRate: number;
+  cgstAmt: number;
+  sgstAmt: number;
+  igstAmt: number;
+  reverseCharge?: boolean;
+  totalAmount: number;
+  ewayBillNo?: string;
+  ewayBillValidUpto?: string;
+  valueOfGoods?: number;
+  stockStage: LogisticsStockStage;
+  godownRack?: string;
+  godownBranch?: string;
+  manifestId?: string;
+  manifestNo?: string;
+  invoiceId?: string;
+  billed: boolean;
+  podImageDataUrl?: string;
+  podDate?: string;
+  remarks?: string;
+  branchCode?: string;
+  createdByStaff?: string;
+  ownerUid: string;
+  createdAt?: unknown;
+  updatedAt?: unknown;
+}
+
+export interface LogisticsManifest {
+  id: string;
+  manifestNo: string;
+  manifestDate: string;
+  financialYear?: string;
+  fromBranch: string;
+  toBranch: string;
+  truckNo: string;
+  driverName: string;
+  driverPhone?: string;
+  brokerName?: string;
+  docketIds: string[];
+  docketNos: string[];
+  totalPkgs: number;
+  totalWeightKg: number;
+  totalTopayAmount: number;
+  hireAmount: number;
+  advancePaid: number;
+  balancePayable: number;
+  status: 'Dispatched' | 'In Transit' | 'Arrived' | 'Unloaded';
+  arrivalDate?: string;
+  remarks?: string;
+  branchCode?: string;
+  createdByStaff?: string;
+  ownerUid: string;
+  createdAt?: unknown;
+  updatedAt?: unknown;
+}
+
+export interface LogisticsInvoiceDocketRow {
+  docketNo: string;
+  docketDate: string;
+  originBranch: string;
+  destBranch: string;
+  packages: number;
+  weightKg: number;
+  goodsDesc: string;
+  freightAmt: number;
+}
+
+export interface LogisticsInvoice {
+  id: string;
+  docType: 'Tax Invoice' | 'Credit Note' | 'Debit Note';
+  docNo: string;
+  docDate: string;
+  financialYear?: string;
+  linkedDocNo?: string;
+  partyName: string;
+  partyAddress?: string;
+  partyGstin?: string;
+  partyPan?: string;
+  sac?: string;
+  reverseCharge?: boolean;
+  interstate?: boolean;
+  gstRate: number;
+  taxableAmount: number;
+  cgstAmt: number;
+  sgstAmt: number;
+  igstAmt: number;
+  grandTotal: number;
+  paidAmount: number;
+  status: 'Unpaid' | 'Partial' | 'Paid';
+  docketRows: LogisticsInvoiceDocketRow[];
+  selectedBankId?: string;
+  remarks?: string;
+  branchCode?: string;
+  createdByStaff?: string;
+  ownerUid: string;
+  createdAt?: unknown;
+  updatedAt?: unknown;
+}
+
+export interface LogisticsLedgerEntry {
+  id: string;
+  voucherNo: string;
+  voucherDate: string;
+  financialYear?: string;
+  voucherType: 'Receipt' | 'Payment' | 'COD Cash' | 'Adjustment';
+  partyName: string;
+  amount: number;
+  tdsAmount?: number;
+  paymentMode: string;
+  upiRefId?: string;
+  utrNo?: string;
+  chequeNo?: string;
+  linkedDocNo?: string;
+  narration: string;
+  branchCode?: string;
+  createdByStaff?: string;
+  ownerUid: string;
+  createdAt?: unknown;
+  updatedAt?: unknown;
+}
 
 export const DEFAULT_COMPANY_SETTINGS: Omit<CompanySettings, 'ownerUid' | 'updatedAt'> = {
   companyName: 'DOLPHIN ROAD CARRIER',

@@ -18,16 +18,17 @@ import {
   sendViaWhatsAppCloudApi,
   triggerExternalShareLink,
 } from '../lib/shareUtils';
-import { BillCopyCount, CompanySettings, DriveFolderName, Party } from '../types/erp';
+import { isLogisticsDriveFolder } from '../lib/driveBackup';
+import { AnyDriveFolderName, BillCopyCount, CompanySettings, Party } from '../types/erp';
 
 interface A4PreviewModalProps {
   pdf: GeneratedPdfResult | null;
-  driveFolder: DriveFolderName;
+  driveFolder: AnyDriveFolderName;
   hasDriveToken: boolean;
   parties?: Party[];
   company?: CompanySettings;
   onClose: () => void;
-  onSaveToDrive: (pdf: GeneratedPdfResult, folder: DriveFolderName) => Promise<void>;
+  onSaveToDrive: (pdf: GeneratedPdfResult, folder: AnyDriveFolderName) => Promise<void>;
   onConnectDrive: () => Promise<void>;
   onReplacePdf?: (nextPdf: GeneratedPdfResult) => void;
 }
@@ -108,7 +109,10 @@ export const A4PreviewModal: React.FC<A4PreviewModalProps> = ({
     setUploadMsg(null);
     try {
       await onSaveToDrive(pdf, driveFolder);
-      setUploadMsg(`Saved to Google Drive / DOLPHIN_ROAD_CARRIERS_MASTER / ${driveFolder} (${pdf.sizeKB} KB)`);
+      const rootLabel = isLogisticsDriveFolder(driveFolder)
+        ? 'DOLPHIN_LOGISTICS_DIVISION_BACKUP'
+        : 'DOLPHIN_ROAD_CARRIERS_MASTER';
+      setUploadMsg(`Saved to Google Drive / ${rootLabel} / ${driveFolder} (${pdf.sizeKB} KB)`);
     } catch (err) {
       setUploadMsg(err instanceof Error ? err.message : 'Drive upload failed');
     } finally {

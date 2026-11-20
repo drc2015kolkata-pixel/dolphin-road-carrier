@@ -1,6 +1,8 @@
-import { DriveFolderName } from '../types/erp';
+import { AnyDriveFolderName, DriveFolderName, LogisticsDriveFolderName } from '../types/erp';
 
 const ROOT_FOLDER_NAME = 'DOLPHIN_ROAD_CARRIERS_MASTER';
+const LOGISTICS_ROOT_FOLDER_NAME = 'DOLPHIN_LOGISTICS_DIVISION_BACKUP';
+
 const FOLDER_LIST: DriveFolderName[] = [
   'LR Copy',
   'Bills_Invoices',
@@ -10,6 +12,20 @@ const FOLDER_LIST: DriveFolderName[] = [
   'Reports_Ledgers',
   'Bank_Statements',
 ];
+
+export const LOGISTICS_DRIVE_FOLDERS: LogisticsDriveFolderName[] = [
+  'Docket_LR',
+  'LineHaul_Manifests',
+  'Logistics_Invoices_CN_DN',
+  'Godown_POD_Scans',
+  'Logistics_Ledgers',
+];
+
+const LOGISTICS_FOLDER_SET = new Set<string>(LOGISTICS_DRIVE_FOLDERS);
+
+export function isLogisticsDriveFolder(folder: AnyDriveFolderName): folder is LogisticsDriveFolderName {
+  return LOGISTICS_FOLDER_SET.has(folder);
+}
 
 export const ESSENTIAL_DRIVE_MASTER_FILES = [
   'Master_Backup_DRC.json.gz',
@@ -427,3 +443,160 @@ export async function runDailyDrive8FileCleanup(accessToken: string): Promise<{
 
   return { keptCount: toKeep.length, trashedCount: toTrash.length };
 }
+
+// ============================================================================
+// ISOLATED LOGISTICS DIVISION GOOGLE DRIVE BACKUP (DOLPHIN_LOGISTICS_DIVISION_BACKUP)
+// ============================================================================
+
+export async function ensureLogisticsDriveHierarchy(
+  accessToken: string
+): Promise<{ rootId: string; folders: Record<LogisticsDriveFolderName, string> }> {
+  const rootId = await findOrCreateFolder(LOGISTICS_ROOT_FOLDER_NAME, accessToken);
+  const folders = {} as Record<LogisticsDriveFolderName, string>;
+  for (const folderName of LOGISTICS_DRIVE_FOLDERS) {
+    folders[folderName] = await findOrCreateFolder(folderName, accessToken, rootId);
+  }
+  return { rootId, folders };
+}
+
+export async function uploadLogisticsBlobToDriveFolder(params: {
+  accessToken: string;
+  folderName: LogisticsDriveFolderName;
+  fileName: string;
+  blob: Blob;
+  mimeType: string;
+  overwriteIfExists?: boolean;
+}): Promise<{ id: string; name: string; webViewLink?: string }> {
+  const { accessToken, folderName, fileName, blob, mimeType, overwriteIfExists = true } = params;
+  const { folders } = await ensureLogisticsDriveHierarchy(accessToken);
+  const folderId = folders[folderName];
+
+  const existingId = overwriteIfExists
+    ? await findFileInFolder(fileName, folderId, accessToken)
+    : null;
+
+  const boundary = 'drc_logi_multipart_' + Date.now();
+  const metadata = existingId
+    ? { name: fileName, mimeType }
+    : { name: fileName, mimeType, parents: [folderId] };
+
+  const arrayBuffer = await blob.arrayBuffer();
+  const base64Body = uint8ArrayToBase64(new Uint8Array(arrayBuffer));
+
+  const multipartBody =
+    `--${boundary}\r\n` +
+    `Content-Type: application/json; charset=UTF-8\r\n\r\n` +
+    `${JSON.stringify(metadata)}\r\n` +
+    `--${boundary}\r\n` +
+    `Content-Type: ${mimeType}\r\n` +
+    `Content-Transfer-Encoding: base64\r\n\r\n` +
+    `${base64Body}\r\n` +
+    `--${boundary}--`;
+
+  const url = existingId
+    ? `https://www.googleapis.com/upload/drive/v3/files/${existingId}?uploadType=multipart&fields=id,name,webViewLink`
+    : `https://www.googleapis.com/upload/drive/v3/files?uploadType=multipart&fields=id,name,webViewLink`;
+
+  const res = await driveFetch(url, accessToken, {
+    method: existingId ? 'PATCH' : 'POST',
+    headers: { 'Content-Type': `multipart/related; boundary=${boundary}` },
+    body: multipartBody,
+  });
+
+  return (await res.json()) as { id: string; name: string; webViewLink?: string };
+}
+
+export async function uploadLogisticsMasterBackupToDrive(
+  accessToken: string,
+  backupPayload: unknown
+): Promise<{
+  id: string;
+  name: string;
+  webViewLink?: string;
+  rawBytes: number;
+  compressedBytes: number;
+  compressed: boolean;
+}> {
+  const { rootId } = await ensureLogisticsDriveHierarchy(accessToken);
+  const pack = await compressCompactJsonGzip(backupPayload);
+  const fileName = pack.compressed ? 'Master_Backup_Logistics.json.gz' : 'Master_Backup_Logistics.json';
+  const mimeType = pack.compressed ? 'application/gzip' : 'application/json';
+  const existingId = await findFileInFolder(fileName, rootId, accessToken);
+
+  const boundary = 'drc_logi_backup_' + Date.now();
+  const metadata = existingId
+    ? { name: fileName, mimeType }
+    : { name: fileName, mimeType, parents: [rootId] };
+
+  const base64Body = uint8ArrayToBase64(pack.bytes);
+  const multipartBody =
+    `--${boundary}\r\n` +
+    `Content-Type: application/json; charset=UTF-8\r\n\r\n` +
+    `${JSON.stringify(metadata)}\r\n` +
+    `--${boundary}\r\n` +
+    `Content-Type: ${mimeType}\r\n` +
+    `Content-Transfer-Encoding: base64\r\n\r\n` +
+    `${base64Body}\r\n` +
+    `--${boundary}--`;
+
+  const url = existingId
+    ? `https://www.googleapis.com/upload/drive/v3/files/${existingId}?uploadType=multipart&fields=id,name,webViewLink`
+    : `https://www.googleapis.com/upload/drive/v3/files?uploadType=multipart&fields=id,name,webViewLink`;
+
+  const res = await driveFetch(url, accessToken, {
+    method: existingId ? 'PATCH' : 'POST',
+    headers: { 'Content-Type': `multipart/related; boundary=${boundary}` },
+    body: multipartBody,
+  });
+
+  const uploaded = (await res.json()) as { id: string; name: string; webViewLink?: string };
+  return {
+    ...uploaded,
+    rawBytes: pack.rawBytes,
+    compressedBytes: pack.compressedBytes,
+    compressed: pack.compressed,
+  };
+}
+
+export async function downloadLogisticsMasterBackupFromDrive(
+  accessToken: string
+): Promise<Record<string, unknown> | null> {
+  const { rootId } = await ensureLogisticsDriveHierarchy(accessToken);
+  const gzId = await findFileInFolder('Master_Backup_Logistics.json.gz', rootId, accessToken);
+  const legacyId = gzId || (await findFileInFolder('Master_Backup_Logistics.json', rootId, accessToken));
+  if (!legacyId) return null;
+
+  const res = await driveFetch(
+    `https://www.googleapis.com/drive/v3/files/${legacyId}?alt=media`,
+    accessToken
+  );
+  const buf = await res.arrayBuffer();
+  return decompressGzipOrJsonBuffer(buf);
+}
+
+export async function listLogisticsDriveBackupFiles(accessToken: string): Promise<DriveFileSummary[]> {
+  const { rootId, folders } = await ensureLogisticsDriveHierarchy(accessToken);
+  const allFiles: DriveFileSummary[] = [];
+
+  const folderEntries: Array<[string, string]> = [
+    ['Logistics Backup Root', rootId],
+    ...Object.entries(folders),
+  ];
+
+  for (const [label, folderId] of folderEntries) {
+    const q = encodeURIComponent(
+      `'${folderId}' in parents and trashed = false and mimeType != 'application/vnd.google-apps.folder'`
+    );
+    const res = await driveFetch(
+      `https://www.googleapis.com/drive/v3/files?q=${q}&fields=files(id,name,mimeType,size,modifiedTime,webViewLink)&orderBy=modifiedTime desc&pageSize=25`,
+      accessToken
+    );
+    const json = (await res.json()) as { files?: DriveFileSummary[] };
+    for (const f of json.files || []) {
+      allFiles.push({ ...f, folderName: label });
+    }
+  }
+
+  return allFiles;
+}
+

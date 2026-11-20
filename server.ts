@@ -38,7 +38,14 @@ type CollectionKey =
   | 'presence'
   | 'activity_logs'
   | 'settings'
-  | 'counters';
+  | 'counters'
+  | 'logistics_parties'
+  | 'logistics_vehicles'
+  | 'logistics_drivers'
+  | 'logistics_dockets'
+  | 'logistics_manifests'
+  | 'logistics_invoices'
+  | 'logistics_ledgers';
 
 const VALID_COLLECTIONS = new Set<CollectionKey>([
   'parties',
@@ -57,6 +64,13 @@ const VALID_COLLECTIONS = new Set<CollectionKey>([
   'activity_logs',
   'settings',
   'counters',
+  'logistics_parties',
+  'logistics_vehicles',
+  'logistics_drivers',
+  'logistics_dockets',
+  'logistics_manifests',
+  'logistics_invoices',
+  'logistics_ledgers',
 ]);
 
 interface ErpDoc {
@@ -88,6 +102,13 @@ interface ErpDbSchema {
   activity_logs: ErpDoc[];
   settings: ErpDoc[];
   counters: ErpDoc[];
+  logistics_parties: ErpDoc[];
+  logistics_vehicles: ErpDoc[];
+  logistics_drivers: ErpDoc[];
+  logistics_dockets: ErpDoc[];
+  logistics_manifests: ErpDoc[];
+  logistics_invoices: ErpDoc[];
+  logistics_ledgers: ErpDoc[];
 }
 
 const APP_VERSION = '2.0.0';
@@ -170,6 +191,13 @@ function createEmptyDb(): ErpDbSchema {
     activity_logs: [],
     settings: [{ ...DEFAULT_COMPANY_SETTINGS_SERVER, updatedAt: now }],
     counters: [],
+    logistics_parties: [],
+    logistics_vehicles: [],
+    logistics_drivers: [],
+    logistics_dockets: [],
+    logistics_manifests: [],
+    logistics_invoices: [],
+    logistics_ledgers: [],
   };
 }
 
@@ -1319,6 +1347,13 @@ app.post('/api/erp/restore', async (req, res) => {
       'transactions',
       'declarations',
       'staff_accounts',
+      'logistics_parties',
+      'logistics_vehicles',
+      'logistics_drivers',
+      'logistics_dockets',
+      'logistics_manifests',
+      'logistics_invoices',
+      'logistics_ledgers',
     ];
     for (const col of restorableCols) {
       const incoming = payload[col];

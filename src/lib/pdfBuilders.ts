@@ -7,6 +7,9 @@ import {
   ConsignmentNote,
   Declaration194C,
   Invoice,
+  LogisticsDocket,
+  LogisticsInvoice,
+  LogisticsManifest,
   Quotation,
 } from '../types/erp';
 import {
@@ -106,6 +109,28 @@ export type PdfTaskPayload =
       rows: string[][];
       company: CompanySettings;
       fileName: string;
+      orientation?: PdfOrientation;
+      assets: PdfAssets;
+    }
+  | {
+      kind: 'logisticsDocket';
+      docket: LogisticsDocket;
+      company: CompanySettings;
+      orientation?: PdfOrientation;
+      assets: PdfAssets;
+    }
+  | {
+      kind: 'logisticsManifest';
+      manifest: LogisticsManifest;
+      dockets: LogisticsDocket[];
+      company: CompanySettings;
+      orientation?: PdfOrientation;
+      assets: PdfAssets;
+    }
+  | {
+      kind: 'logisticsInvoice';
+      invoice: LogisticsInvoice;
+      company: CompanySettings;
       orientation?: PdfOrientation;
       assets: PdfAssets;
     };
@@ -401,6 +426,21 @@ export function buildPdfArrayBuffer(task: PdfTaskPayload): {
       task.assets,
       task.orientation || task.spec.orientation || 'l'
     );
+  }
+  if (task.kind === 'logisticsDocket') {
+    return buildLogisticsDocketDoc(task.docket, task.company, task.assets, task.orientation || 'l');
+  }
+  if (task.kind === 'logisticsManifest') {
+    return buildLogisticsManifestDoc(
+      task.manifest,
+      task.dockets,
+      task.company,
+      task.assets,
+      task.orientation || 'l'
+    );
+  }
+  if (task.kind === 'logisticsInvoice') {
+    return buildLogisticsInvoiceDoc(task.invoice, task.company, task.assets, task.orientation || 'p');
   }
   return buildTableReportDoc(task);
 }
@@ -2232,3 +2272,532 @@ function buildFoxproStatementDoc(
     orientation,
   };
 }
+
+// ============================================================================
+// 8. LOGISTICS DIVISION PDF GENERATORS (PARCEL DOCKET, LINE-HAUL MANIFEST, INVOICE/CN/DN)
+// ============================================================================
+
+function buildLogisticsDocketDoc(
+  docket: LogisticsDocket,
+  company: CompanySettings,
+  assets: PdfAssets,
+  orientation: PdfOrientation = 'l'
+) {
+  const doc = new jsPDF({
+    orientation: orientation === 'l' ? 'landscape' : 'portrait',
+    unit: 'mm',
+    format: 'a4',
+    compress: true,
+  });
+
+  const M = BILL_MARGIN;
+  const pw = doc.internal.pageSize.getWidth();
+  const ph = doc.internal.pageSize.getHeight();
+  const cw = pw - M * 2;
+  const ch = ph - M * 2;
+
+  drawCenteredWatermark(doc, assets, `${company.companyName || 'DOLPHIN ROAD CARRIER'} - LOGISTICS`);
+  doc.setDrawColor(15, 23, 42);
+  doc.setLineWidth(0.5);
+  doc.rect(M, M, cw, ch);
+
+  drawTopLeftLogo(doc, assets, M + 3, M + 3, 19, 19);
+
+  doc.setFont('helvetica', 'bold');
+  doc.setFontSize(14);
+  doc.setTextColor(13, 71, 161);
+  doc.text(`${company.companyName || 'DOLPHIN ROAD CARRIER'} (EXPRESS LOGISTICS)`, M + 25, M + 8.5);
+  doc.setFont('helvetica', 'normal');
+  doc.setFontSize(7.6);
+  doc.setTextColor(30, 41, 59);
+  doc.text(company.address || '', M + 25, M + 13.2);
+  doc.text(
+    `GSTIN: ${company.gstin}   |   PAN: ${company.pan}   |   Ph: ${company.phones}`,
+    M + 25,
+    M + 17.5
+  );
+
+  // Top-right badge & Verification QR
+  const qrPayload = `DRC|DOCKET|${docket.docketNo}|${docket.docketDate}|${docket.originBranch}->${docket.destBranch}|PKGS:${docket.packages}|WT:${docket.chargedWeightKg}|TOT:${Number(docket.totalAmount || 0).toFixed(2)}|${docket.payMode}`;
+  drawVectorVerificationQr(doc, qrPayload, pw - M - 20, M + 3, 17, 'VERIFY QR');
+
+  doc.setFillColor(13, 71, 161);
+  doc.rect(M, M + 24, cw, 7.5, 'F');
+  doc.setFont('helvetica', 'bold');
+  doc.setFontSize(10);
+  doc.setTextColor(255, 255, 255);
+  doc.text(
+    `PARCEL DOCKET / CONSIGNMENT NOTE : ${docket.docketNo}   [${docket.payMode.toUpperCase()} · ${docket.deliveryMode.toUpperCase()}]`,
+    pw / 2,
+    M + 29,
+    { align: 'center' }
+  );
+
+  let y = M + 34;
+  doc.setTextColor(15, 23, 42);
+  const halfW = cw / 2;
+
+  // Meta Strip
+  doc.setLineWidth(0.3);
+  doc.rect(M, y, cw, 11);
+  doc.line(M + cw * 0.25, y, M + cw * 0.25, y + 11);
+  doc.line(M + cw * 0.5, y, M + cw * 0.5, y + 11);
+  doc.line(M + cw * 0.75, y, M + cw * 0.75, y + 11);
+
+  doc.setFont('helvetica', 'bold');
+  doc.setFontSize(7.4);
+  doc.text('Docket Date & FY', M + 2, y + 4);
+  doc.text('Origin -> Destination Hub', M + cw * 0.25 + 2, y + 4);
+  doc.text('E-Way Bill / Goods Value', M + cw * 0.5 + 2, y + 4);
+  doc.text('Godown Stage / Rack', M + cw * 0.75 + 2, y + 4);
+
+  doc.setFont('helvetica', 'normal');
+  doc.setFontSize(8);
+  doc.text(`${formatDateDDMMYYYY(docket.docketDate)} (${docket.financialYear || '-'})`, M + 2, y + 8.8);
+  doc.text(`${docket.originBranch} -> ${docket.destBranch}`, M + cw * 0.25 + 2, y + 8.8);
+  doc.text(
+    `${docket.ewayBillNo || 'N/A'} (Rs. ${formatINR(docket.valueOfGoods || 0)})`,
+    M + cw * 0.5 + 2,
+    y + 8.8
+  );
+  doc.text(`${docket.stockStage} ${docket.godownRack ? `[${docket.godownRack}]` : ''}`, M + cw * 0.75 + 2, y + 8.8);
+
+  y += 13;
+
+  // Consignor / Consignee Box
+  const partyH = 25;
+  doc.rect(M, y, halfW, partyH);
+  doc.rect(M + halfW, y, halfW, partyH);
+  doc.setFont('helvetica', 'bold');
+  doc.setFontSize(7.6);
+  doc.text('CONSIGNOR (SENDER)', M + 2.5, y + 4.5);
+  doc.text('CONSIGNEE (RECEIVER)', M + halfW + 2.5, y + 4.5);
+
+  doc.setFontSize(8.8);
+  doc.text(String(docket.consignorName || '-').slice(0, 48), M + 2.5, y + 10);
+  doc.text(String(docket.consigneeName || '-').slice(0, 48), M + halfW + 2.5, y + 10);
+
+  doc.setFont('helvetica', 'normal');
+  doc.setFontSize(7.3);
+  doc.text(doc.splitTextToSize(docket.consignorAddress || '-', halfW - 5).slice(0, 2), M + 2.5, y + 14.5);
+  doc.text(doc.splitTextToSize(docket.consigneeAddress || '-', halfW - 5).slice(0, 2), M + halfW + 2.5, y + 14.5);
+  doc.text(`GSTIN: ${docket.consignorGstin || 'URD'}`, M + 2.5, y + 22.8);
+  doc.text(`GSTIN: ${docket.consigneeGstin || 'URD'}`, M + halfW + 2.5, y + 22.8);
+
+  y += partyH + 3;
+
+  // Parcel Details + Freight Breakup
+  const leftW = cw * 0.62;
+  const rightW = cw - leftW;
+  const detailH = 44;
+  doc.rect(M, y, leftW, detailH);
+  doc.rect(M + leftW, y, rightW, detailH);
+
+  doc.setFillColor(241, 245, 249);
+  doc.rect(M, y, leftW, 6.5, 'FD');
+  doc.rect(M + leftW, y, rightW, 6.5, 'FD');
+  doc.setFont('helvetica', 'bold');
+  doc.setFontSize(7.6);
+  doc.text('PARCEL & WEIGHT PARTICULARS', M + 2.5, y + 4.5);
+  doc.text('FREIGHT & CHARGES BREAKUP (INR)', M + leftW + 2.5, y + 4.5);
+
+  doc.setFont('helvetica', 'normal');
+  doc.setFontSize(8);
+  doc.text(`Packages      : ${docket.packages} (${docket.packingType || 'Cartons/Pkg'})`, M + 3, y + 12.5);
+  doc.text(`Description   : ${String(docket.goodsDesc || '-').slice(0, 52)}`, M + 3, y + 18.5);
+  doc.text(`Actual Weight : ${Number(docket.actualWeightKg || 0).toFixed(2)} Kg`, M + 3, y + 24.5);
+  doc.text(`Charged Wt.   : ${Number(docket.chargedWeightKg || 0).toFixed(2)} Kg`, M + 3, y + 30.5);
+  doc.text(`Rate Basis    : ${docket.rateBasis} @ Rs. ${formatINR(docket.ratePerUnit || 0)}`, M + 3, y + 36.5);
+  if (docket.manifestNo) {
+    doc.text(`Line-Haul Manifest: ${docket.manifestNo}`, M + 3, y + 41.5);
+  }
+
+  const rxLabel = M + leftW + 3;
+  const rxVal = M + cw - 3;
+  const chargeLines: Array<[string, string, boolean?]> = [
+    ['Base Freight', formatINR(docket.baseFreight)],
+    ['Docket + Hamali + FOV', formatINR(Number(docket.docketCharge || 0) + Number(docket.hamaliCharge || 0) + Number(docket.fovCharge || 0))],
+    ['Door Delivery Charge', formatINR(docket.doorCharge || 0)],
+    [`GST (${Number(docket.gstRate || 0)}%)${docket.reverseCharge ? ' [RCM]' : ''}`, formatINR(Number(docket.cgstAmt || 0) + Number(docket.sgstAmt || 0) + Number(docket.igstAmt || 0))],
+    ['TOTAL DOCKET AMOUNT', `Rs. ${formatINR(docket.totalAmount)}`, true],
+  ];
+  chargeLines.forEach(([lbl, val, isBold], idx) => {
+    const cyLine = y + 12.5 + idx * 6.8;
+    doc.setFont('helvetica', isBold ? 'bold' : 'normal');
+    doc.setFontSize(isBold ? 8.8 : 7.8);
+    doc.text(lbl, rxLabel, cyLine);
+    doc.text(val, rxVal, cyLine, { align: 'right' });
+  });
+
+  y += detailH + 3.5;
+
+  doc.setFont('helvetica', 'bold');
+  doc.setFontSize(7.8);
+  doc.text(`Amount in Words: ${amountToIndianWords(docket.totalAmount)}`, M + 2, y + 3);
+  if (docket.remarks) {
+    doc.setFont('helvetica', 'normal');
+    doc.setFontSize(7.2);
+    doc.text(`Remarks: ${docket.remarks}`, M + 2, y + 8.5);
+  }
+  doc.setFont('helvetica', 'normal');
+  doc.setFontSize(7);
+  doc.text(
+    'Receiver Signature & Stamp (Goods received in sound condition)',
+    M + 2,
+    ph - M - 8
+  );
+
+  drawBottomRightStampAndSign(doc, assets, pw - M - 2, ph - M - 24, 27, 15);
+  stampAllPageNumbers(doc, `EXPRESS PARCEL DOCKET — ${docket.docketNo}`, M, 3.8);
+
+  return {
+    buffer: doc.output('arraybuffer'),
+    fileName: `Logistics_Docket_${sanitizeFileName(docket.docketNo)}.pdf`,
+    title: `Parcel Docket - ${docket.docketNo}`,
+    orientation,
+  };
+}
+
+function buildLogisticsManifestDoc(
+  manifest: LogisticsManifest,
+  dockets: LogisticsDocket[],
+  company: CompanySettings,
+  assets: PdfAssets,
+  orientation: PdfOrientation = 'l'
+) {
+  const doc = new jsPDF({
+    orientation: orientation === 'l' ? 'landscape' : 'portrait',
+    unit: 'mm',
+    format: 'a4',
+    compress: true,
+  });
+
+  const M = BILL_MARGIN;
+  const pw = doc.internal.pageSize.getWidth();
+  const ph = doc.internal.pageSize.getHeight();
+  const cw = pw - M * 2;
+  const ch = ph - M * 2;
+
+  const drawManifestHeader = () => {
+    drawCenteredWatermark(doc, assets, company.companyName || 'DOLPHIN ROAD CARRIER');
+    doc.setDrawColor(15, 23, 42);
+    doc.setLineWidth(0.5);
+    doc.rect(M, M, cw, ch);
+    drawTopLeftLogo(doc, assets, M + 2.5, M + 2, 16, 16);
+
+    doc.setFont('helvetica', 'bold');
+    doc.setFontSize(13);
+    doc.setTextColor(13, 71, 161);
+    doc.text(`${company.companyName} — LINE-HAUL DISPATCH MANIFEST`, pw / 2, M + 7.5, { align: 'center' });
+    doc.setFont('helvetica', 'normal');
+    doc.setFontSize(7.4);
+    doc.setTextColor(30, 41, 59);
+    doc.text(
+      `Manifest No: ${manifest.manifestNo}   |   Date: ${formatDateDDMMYYYY(manifest.manifestDate)}   |   Route: ${manifest.fromBranch} -> ${manifest.toBranch}`,
+      pw / 2,
+      M + 12.5,
+      { align: 'center' }
+    );
+    doc.text(
+      `Truck: ${manifest.truckNo}   |   Driver: ${manifest.driverName || '-'} (${manifest.driverPhone || '-'})   |   Broker: ${manifest.brokerName || 'Direct'}   |   Status: ${manifest.status}`,
+      pw / 2,
+      M + 17,
+      { align: 'center' }
+    );
+
+    const qrData = `DRC|MANIFEST|${manifest.manifestNo}|${manifest.manifestDate}|${manifest.fromBranch}->${manifest.toBranch}|TRUCK:${manifest.truckNo}|DOCKETS:${manifest.docketIds.length}`;
+    drawVectorVerificationQr(doc, qrData, pw - M - 18, M + 2, 15, 'VERIFY QR');
+
+    const hdrY = M + 23;
+    const hdrH = 7.5;
+    const colEdges = [0, 0.06, 0.21, 0.44, 0.67, 0.76, 0.85, 0.93, 1.0];
+    const colX = (i: number) => M + cw * colEdges[i];
+
+    doc.setFillColor(226, 232, 240);
+    doc.setDrawColor(15, 23, 42);
+    doc.setLineWidth(0.35);
+    doc.rect(M, hdrY, cw, hdrH, 'FD');
+    for (let i = 1; i < colEdges.length - 1; i++) {
+      doc.line(colX(i), hdrY, colX(i), hdrY + hdrH);
+    }
+
+    const hdrs = ['S.NO', 'DOCKET / DATE', 'CONSIGNOR', 'CONSIGNEE / DEST', 'PKGS', 'WT (KG)', 'MODE', 'TO-PAY / AMT'];
+    doc.setFont('helvetica', 'bold');
+    doc.setFontSize(7);
+    doc.setTextColor(15, 23, 42);
+    hdrs.forEach((h, i) => {
+      doc.text(h, colX(i) + 1.5, hdrY + 5);
+    });
+
+    return { curY: hdrY + hdrH, colEdges, colX };
+  };
+
+  const linkedSet = new Set(manifest.docketIds);
+  const manifestDockets = dockets.filter((d) => linkedSet.has(d.id) || manifest.docketNos.includes(d.docketNo));
+  let { curY, colEdges, colX } = drawManifestHeader();
+  const maxY = ph - M - 30;
+  const rowH = 7.8;
+
+  manifestDockets.forEach((d, idx) => {
+    if (curY + rowH > maxY) {
+      doc.addPage();
+      ({ curY, colEdges, colX } = drawManifestHeader());
+    }
+    if (idx % 2 === 1) {
+      doc.setFillColor(248, 250, 252);
+      doc.rect(M, curY, cw, rowH, 'F');
+    }
+    doc.setDrawColor(203, 213, 225);
+    doc.setLineWidth(0.2);
+    doc.line(M, curY + rowH, M + cw, curY + rowH);
+    for (let i = 1; i < colEdges.length - 1; i++) {
+      doc.line(colX(i), curY, colX(i), curY + rowH);
+    }
+    doc.setFont('helvetica', 'normal');
+    doc.setFontSize(7.1);
+    doc.setTextColor(15, 23, 42);
+    doc.text(`${idx + 1}`, colX(0) + 2, curY + 5.1);
+    doc.setFont('helvetica', 'bold');
+    doc.text(`${d.docketNo}`, colX(1) + 1.5, curY + 3.8);
+    doc.setFont('helvetica', 'normal');
+    doc.setFontSize(6.4);
+    doc.text(formatDateDDMMYYYY(d.docketDate), colX(1) + 1.5, curY + 6.9);
+    doc.setFontSize(7.0);
+    doc.text(String(d.consignorName || '-').slice(0, 30), colX(2) + 1.5, curY + 5.1);
+    doc.text(`${String(d.consigneeName || '-').slice(0, 22)} (${d.destBranch})`, colX(3) + 1.5, curY + 5.1);
+    doc.text(`${d.packages}`, colX(5) - 2, curY + 5.1, { align: 'right' });
+    doc.text(`${Number(d.chargedWeightKg || 0).toFixed(1)}`, colX(6) - 2, curY + 5.1, { align: 'right' });
+    doc.text(d.payMode, colX(6) + 1.5, curY + 5.1);
+    doc.text(
+      d.payMode === 'To-Pay' ? formatINR(d.totalAmount) : formatINR(d.totalAmount),
+      colX(8) - 1.5,
+      curY + 5.1,
+      { align: 'right' }
+    );
+    curY += rowH;
+  });
+
+  if (curY + 28 > ph - M) {
+    doc.addPage();
+    ({ curY, colEdges, colX } = drawManifestHeader());
+  }
+
+  curY += 3;
+  doc.setFillColor(241, 245, 249);
+  doc.setDrawColor(15, 23, 42);
+  doc.rect(M, curY, cw * 0.65, 20, 'FD');
+  doc.setFont('helvetica', 'bold');
+  doc.setFontSize(7.8);
+  doc.text(
+    `Totals: ${manifestDockets.length} Dockets  |  ${manifest.totalPkgs} Packages  |  ${Number(manifest.totalWeightKg || 0).toFixed(1)} Kg  |  To-Pay Collection: Rs. ${formatINR(manifest.totalTopayAmount)}`,
+    M + 3,
+    curY + 7
+  );
+  doc.setFont('helvetica', 'normal');
+  doc.text(
+    `Lorry Hire: Rs. ${formatINR(manifest.hireAmount)}   |   Advance Paid: Rs. ${formatINR(manifest.advancePaid)}   |   Balance Payable: Rs. ${formatINR(manifest.balancePayable)}`,
+    M + 3,
+    curY + 14.5
+  );
+
+  drawBottomRightStampAndSign(doc, assets, pw - M - 2, curY + 1, 25, 14);
+  stampAllPageNumbers(doc, `LINE-HAUL MANIFEST — ${manifest.manifestNo}`, M, 3.8);
+
+  return {
+    buffer: doc.output('arraybuffer'),
+    fileName: `Logistics_Manifest_${sanitizeFileName(manifest.manifestNo)}.pdf`,
+    title: `Line-Haul Manifest - ${manifest.manifestNo}`,
+    orientation,
+  };
+}
+
+function buildLogisticsInvoiceDoc(
+  invoice: LogisticsInvoice,
+  company: CompanySettings,
+  assets: PdfAssets,
+  orientation: PdfOrientation = 'p'
+) {
+  const doc = new jsPDF({
+    orientation: orientation === 'l' ? 'landscape' : 'portrait',
+    unit: 'mm',
+    format: 'a4',
+    compress: true,
+  });
+
+  const M = BILL_MARGIN;
+  const pw = doc.internal.pageSize.getWidth();
+  const ph = doc.internal.pageSize.getHeight();
+  const cw = pw - M * 2;
+  const ch = ph - M * 2;
+
+  const docHeading = invoice.docType.toUpperCase();
+  const bank = resolveInvoiceBankAccount(company, invoice.selectedBankId);
+  const upiHandle = bank.upiId || company.upiId || 'dolphinroadcarrier@pnb';
+  const upiUri = `upi://pay?pa=${encodeURIComponent(upiHandle)}&pn=${encodeURIComponent(company.companyName)}&am=${Number(invoice.grandTotal || 0).toFixed(2)}&cu=INR&tn=${encodeURIComponent(invoice.docNo)}`;
+
+  const drawHeader = () => {
+    drawCenteredWatermark(doc, assets, `${company.companyName} - LOGISTICS`);
+    doc.setDrawColor(15, 23, 42);
+    doc.setLineWidth(0.5);
+    doc.rect(M, M, cw, ch);
+    drawTopLeftLogo(doc, assets, M + 2.5, M + 2, 18, 18);
+
+    doc.setFont('helvetica', 'bold');
+    doc.setFontSize(13.5);
+    doc.setTextColor(13, 71, 161);
+    doc.text(company.companyName || 'DOLPHIN ROAD CARRIER', M + 23, M + 7.5);
+    doc.setFont('helvetica', 'normal');
+    doc.setFontSize(7.4);
+    doc.setTextColor(30, 41, 59);
+    doc.text(company.address || '', M + 23, M + 12);
+    doc.text(
+      `GSTIN: ${company.gstin}   |   PAN: ${company.pan}   |   SAC: ${invoice.sac || company.hsn || '996791'}`,
+      M + 23,
+      M + 16.5
+    );
+
+    const qrVerify = `DRC|LOGI-${docHeading}|${invoice.docNo}|${invoice.docDate}|${invoice.partyName}|TOT:${Number(invoice.grandTotal || 0).toFixed(2)}`;
+    drawVectorVerificationQr(doc, qrVerify, pw - M - 18.5, M + 2, 15.5, 'VERIFY QR');
+
+    doc.setFillColor(
+      invoice.docType === 'Credit Note' ? 180 : invoice.docType === 'Debit Note' ? 124 : 13,
+      invoice.docType === 'Credit Note' ? 83 : invoice.docType === 'Debit Note' ? 58 : 71,
+      invoice.docType === 'Credit Note' ? 9 : invoice.docType === 'Debit Note' ? 237 : 161
+    );
+    doc.rect(M, M + 22, cw, 7.2, 'F');
+    doc.setFont('helvetica', 'bold');
+    doc.setFontSize(10);
+    doc.setTextColor(255, 255, 255);
+    doc.text(
+      `${docHeading} — ${invoice.docNo}   |   DATE: ${formatDateDDMMYYYY(invoice.docDate)}`,
+      pw / 2,
+      M + 27,
+      { align: 'center' }
+    );
+
+    const pY = M + 30.5;
+    doc.setTextColor(15, 23, 42);
+    doc.setLineWidth(0.3);
+    doc.rect(M, pY, cw, 20);
+    doc.setFont('helvetica', 'bold');
+    doc.setFontSize(8.2);
+    doc.text(`Billed To: ${invoice.partyName}`, M + 2.5, pY + 5);
+    doc.setFont('helvetica', 'normal');
+    doc.setFontSize(7.4);
+    doc.text(`Address : ${invoice.partyAddress || '-'}`, M + 2.5, pY + 10);
+    doc.text(
+      `GSTIN : ${invoice.partyGstin || 'UNREGISTERED'}   |   PAN : ${invoice.partyPan || '-'}${invoice.linkedDocNo ? `   |   Ref Inv: ${invoice.linkedDocNo}` : ''}`,
+      M + 2.5,
+      pY + 15
+    );
+
+    const hdrY = pY + 21.5;
+    const hdrH = 7;
+    const colEdges = [0, 0.06, 0.24, 0.44, 0.68, 0.77, 0.86, 1.0];
+    const colX = (i: number) => M + cw * colEdges[i];
+    doc.setFillColor(226, 232, 240);
+    doc.rect(M, hdrY, cw, hdrH, 'FD');
+    for (let i = 1; i < colEdges.length - 1; i++) {
+      doc.line(colX(i), hdrY, colX(i), hdrY + hdrH);
+    }
+    doc.setFont('helvetica', 'bold');
+    doc.setFontSize(6.9);
+    const hdrLabels = ['S.NO', 'DOCKET NO / DATE', 'ROUTE', 'GOODS DESCRIPTION', 'PKGS', 'WT (KG)', 'AMOUNT (INR)'];
+    hdrLabels.forEach((lbl, i) => {
+      doc.text(lbl, colX(i) + 1.5, hdrY + 4.7);
+    });
+
+    return { curY: hdrY + hdrH, colEdges, colX };
+  };
+
+  let { curY, colEdges, colX } = drawHeader();
+  const maxY = ph - M - 48;
+  const rowH = 7.2;
+
+  (invoice.docketRows || []).forEach((row, idx) => {
+    if (curY + rowH > maxY) {
+      doc.addPage();
+      ({ curY, colEdges, colX } = drawHeader());
+    }
+    if (idx % 2 === 1) {
+      doc.setFillColor(248, 250, 252);
+      doc.rect(M, curY, cw, rowH, 'F');
+    }
+    doc.setDrawColor(203, 213, 225);
+    doc.setLineWidth(0.2);
+    doc.line(M, curY + rowH, M + cw, curY + rowH);
+    for (let i = 1; i < colEdges.length - 1; i++) {
+      doc.line(colX(i), curY, colX(i), curY + rowH);
+    }
+    doc.setFont('helvetica', 'normal');
+    doc.setFontSize(7.1);
+    doc.setTextColor(15, 23, 42);
+    doc.text(`${idx + 1}`, colX(0) + 2, curY + 4.8);
+    doc.text(`${row.docketNo} (${formatDateDDMMYYYY(row.docketDate)})`, colX(1) + 1.5, curY + 4.8);
+    doc.text(`${row.originBranch} -> ${row.destBranch}`, colX(2) + 1.5, curY + 4.8);
+    doc.text(String(row.goodsDesc || '-').slice(0, 28), colX(3) + 1.5, curY + 4.8);
+    doc.text(`${row.packages}`, colX(5) - 1.5, curY + 4.8, { align: 'right' });
+    doc.text(`${Number(row.weightKg || 0).toFixed(1)}`, colX(6) - 1.5, curY + 4.8, { align: 'right' });
+    doc.setFont('helvetica', 'bold');
+    doc.text(formatINR(row.freightAmt), colX(7) - 1.5, curY + 4.8, { align: 'right' });
+    curY += rowH;
+  });
+
+  if (curY + 45 > ph - M) {
+    doc.addPage();
+    ({ curY, colEdges, colX } = drawHeader());
+  }
+
+  curY += 3;
+  // GST & Totals + Bank QR + Stamp
+  const leftBoxW = cw * 0.56;
+  const rightBoxW = cw - leftBoxW;
+  const footH = 38;
+  doc.setDrawColor(15, 23, 42);
+  doc.setLineWidth(0.35);
+  doc.rect(M, curY, leftBoxW, footH);
+  doc.rect(M + leftBoxW, curY, rightBoxW, footH);
+
+  drawVectorUpiQr(doc, upiUri, M + 2.5, curY + 2.5, 17);
+  doc.setFont('helvetica', 'bold');
+  doc.setFontSize(7.5);
+  doc.text(`Bank: ${bank.bankName}`, M + 23, curY + 6);
+  doc.setFont('helvetica', 'normal');
+  doc.setFontSize(7.1);
+  doc.text(`A/C: ${bank.accountNo} | IFSC: ${bank.ifsc}`, M + 23, curY + 11);
+  doc.text(`Words: ${amountToIndianWords(invoice.grandTotal).slice(0, 56)}`, M + 23, curY + 16.5);
+  doc.text(
+    invoice.reverseCharge ? 'GST RCM: Tax payable by recipient under RCM.' : `GST Rate: ${invoice.gstRate}% (Forward Charge)`,
+    M + 2.5,
+    curY + 33
+  );
+
+  const rxL = M + leftBoxW + 3;
+  const rxR = M + cw - 3;
+  doc.setFontSize(7.8);
+  doc.text('Taxable Freight Amount', rxL, curY + 6.5);
+  doc.text(formatINR(invoice.taxableAmount), rxR, curY + 6.5, { align: 'right' });
+  doc.text(`CGST`, rxL, curY + 11.5);
+  doc.text(formatINR(invoice.cgstAmt), rxR, curY + 11.5, { align: 'right' });
+  doc.text(`SGST`, rxL, curY + 16.5);
+  doc.text(formatINR(invoice.sgstAmt), rxR, curY + 16.5, { align: 'right' });
+  doc.text(`IGST`, rxL, curY + 21.5);
+  doc.text(formatINR(invoice.igstAmt), rxR, curY + 21.5, { align: 'right' });
+  doc.setFont('helvetica', 'bold');
+  doc.setFontSize(9.2);
+  doc.text(`GRAND TOTAL (${docHeading})`, rxL, curY + 29);
+  doc.text(`Rs. ${formatINR(invoice.grandTotal)}`, rxR, curY + 29, { align: 'right' });
+
+  if (curY + footH + 22 <= ph - M) {
+    drawBottomRightStampAndSign(doc, assets, pw - M - 2, curY + footH + 3, 25, 14);
+  }
+  stampAllPageNumbers(doc, `LOGISTICS ${docHeading} — ${invoice.docNo}`, M, 3.8);
+
+  return {
+    buffer: doc.output('arraybuffer'),
+    fileName: `Logistics_${sanitizeFileName(invoice.docType)}_${sanitizeFileName(invoice.docNo)}.pdf`,
+    title: `${invoice.docType} - ${invoice.docNo}`,
+    orientation,
+  };
+}
+

@@ -505,6 +505,226 @@
         "createdAt": { "type": "string", "format": "date-time" }
       },
       "required": ["action", "module", "summary", "staffCode", "branchCode", "ownerUid", "createdAt"]
+    },
+    "LogisticsParty": {
+      "title": "LogisticsParty",
+      "description": "Isolated Express Parcel & Part-Load Party / Broker / Agent master",
+      "type": "object",
+      "properties": {
+        "id": { "type": "string", "maxLength": 128 },
+        "name": { "type": "string", "minLength": 1, "maxLength": 180 },
+        "partyType": { "type": "string", "enum": ["Customer", "Consignor", "Consignee", "Broker", "DeliveryAgent", "Vendor"] },
+        "address": { "type": "string", "maxLength": 400 },
+        "gstin": { "type": "string", "maxLength": 20 },
+        "pan": { "type": "string", "maxLength": 15 },
+        "phone": { "type": "string", "maxLength": 30 },
+        "email": { "type": "string", "maxLength": 160 },
+        "branchCode": { "type": "string", "maxLength": 32 },
+        "openingBalance": { "type": "number" },
+        "currentBalance": { "type": "number" },
+        "balanceType": { "type": "string", "enum": ["Dr", "Cr"] },
+        "ownerUid": { "type": "string", "minLength": 6, "maxLength": 128 },
+        "createdAt": { "type": "string", "format": "date-time" },
+        "updatedAt": { "type": "string", "format": "date-time" }
+      },
+      "required": ["name", "partyType", "openingBalance", "currentBalance", "balanceType", "ownerUid", "createdAt", "updatedAt"]
+    },
+    "LogisticsVehicle": {
+      "title": "LogisticsVehicle",
+      "description": "Isolated Express Line-Haul & Pickup Vehicle master with expiry alerts",
+      "type": "object",
+      "properties": {
+        "id": { "type": "string", "maxLength": 128 },
+        "truckNo": { "type": "string", "minLength": 4, "maxLength": 24 },
+        "vehicleType": { "type": "string", "maxLength": 80 },
+        "ownerName": { "type": "string", "maxLength": 140 },
+        "ownerPhone": { "type": "string", "maxLength": 30 },
+        "fitnessExpiry": { "type": "string", "maxLength": 20 },
+        "insuranceExpiry": { "type": "string", "maxLength": 20 },
+        "permitExpiry": { "type": "string", "maxLength": 20 },
+        "roadTaxExpiry": { "type": "string", "maxLength": 20 },
+        "pucExpiry": { "type": "string", "maxLength": 20 },
+        "branchCode": { "type": "string", "maxLength": 32 },
+        "ownerUid": { "type": "string", "minLength": 6, "maxLength": 128 },
+        "createdAt": { "type": "string", "format": "date-time" },
+        "updatedAt": { "type": "string", "format": "date-time" }
+      },
+      "required": ["truckNo", "ownerName", "ownerUid", "createdAt", "updatedAt"]
+    },
+    "LogisticsDriver": {
+      "title": "LogisticsDriver",
+      "description": "Isolated Express Line-Haul Driver master with D/L expiry tracking",
+      "type": "object",
+      "properties": {
+        "id": { "type": "string", "maxLength": 128 },
+        "name": { "type": "string", "minLength": 1, "maxLength": 140 },
+        "dlNo": { "type": "string", "minLength": 4, "maxLength": 40 },
+        "dlExpiry": { "type": "string", "maxLength": 20 },
+        "phone": { "type": "string", "maxLength": 30 },
+        "address": { "type": "string", "maxLength": 300 },
+        "branchCode": { "type": "string", "maxLength": 32 },
+        "ownerUid": { "type": "string", "minLength": 6, "maxLength": 128 },
+        "createdAt": { "type": "string", "format": "date-time" },
+        "updatedAt": { "type": "string", "format": "date-time" }
+      },
+      "required": ["name", "dlNo", "dlExpiry", "ownerUid", "createdAt", "updatedAt"]
+    },
+    "LogisticsDocket": {
+      "title": "LogisticsDocket",
+      "description": "Express Parcel & Part-Load Docket / LR with Godown Stage and POD tracking",
+      "type": "object",
+      "properties": {
+        "id": { "type": "string", "maxLength": 128 },
+        "docketNo": { "type": "string", "minLength": 2, "maxLength": 40 },
+        "docketDate": { "type": "string", "minLength": 8, "maxLength": 20 },
+        "financialYear": { "type": "string", "maxLength": 16 },
+        "originBranch": { "type": "string", "maxLength": 32 },
+        "destBranch": { "type": "string", "maxLength": 32 },
+        "deliveryMode": { "type": "string", "enum": ["Door Delivery", "Godown Delivery"] },
+        "payMode": { "type": "string", "enum": ["Paid", "To-Pay", "TBB"] },
+        "consignorName": { "type": "string", "maxLength": 180 },
+        "consignorAddress": { "type": "string", "maxLength": 350 },
+        "consignorGstin": { "type": "string", "maxLength": 24 },
+        "consigneeName": { "type": "string", "maxLength": 180 },
+        "consigneeAddress": { "type": "string", "maxLength": 350 },
+        "consigneeGstin": { "type": "string", "maxLength": 24 },
+        "billingPartyName": { "type": "string", "maxLength": 180 },
+        "packages": { "type": "number" },
+        "packingType": { "type": "string", "maxLength": 60 },
+        "goodsDesc": { "type": "string", "maxLength": 300 },
+        "actualWeightKg": { "type": "number" },
+        "chargedWeightKg": { "type": "number" },
+        "rateBasis": { "type": "string", "enum": ["Per Kg", "Per Package", "Fixed"] },
+        "ratePerUnit": { "type": "number" },
+        "baseFreight": { "type": "number" },
+        "fovCharge": { "type": "number" },
+        "docketCharge": { "type": "number" },
+        "hamaliCharge": { "type": "number" },
+        "doorCharge": { "type": "number" },
+        "gstRate": { "type": "number" },
+        "cgstAmt": { "type": "number" },
+        "sgstAmt": { "type": "number" },
+        "igstAmt": { "type": "number" },
+        "reverseCharge": { "type": "boolean" },
+        "totalAmount": { "type": "number" },
+        "ewayBillNo": { "type": "string", "maxLength": 60 },
+        "ewayBillValidUpto": { "type": "string", "maxLength": 30 },
+        "valueOfGoods": { "type": "number" },
+        "stockStage": { "type": "string", "enum": ["Origin Godown", "Manifested / In Transit", "Destination Godown", "Out for Delivery", "Delivered"] },
+        "godownRack": { "type": "string", "maxLength": 40 },
+        "godownBranch": { "type": "string", "maxLength": 32 },
+        "manifestId": { "type": "string", "maxLength": 128 },
+        "manifestNo": { "type": "string", "maxLength": 40 },
+        "invoiceId": { "type": "string", "maxLength": 128 },
+        "billed": { "type": "boolean" },
+        "podImageDataUrl": { "type": "string", "maxLength": 450000 },
+        "podDate": { "type": "string", "maxLength": 20 },
+        "remarks": { "type": "string", "maxLength": 500 },
+        "branchCode": { "type": "string", "maxLength": 32 },
+        "createdByStaff": { "type": "string", "maxLength": 64 },
+        "ownerUid": { "type": "string", "minLength": 6, "maxLength": 128 },
+        "createdAt": { "type": "string", "format": "date-time" },
+        "updatedAt": { "type": "string", "format": "date-time" }
+      },
+      "required": ["docketNo", "docketDate", "originBranch", "destBranch", "payMode", "consignorName", "consigneeName", "totalAmount", "stockStage", "billed", "ownerUid", "createdAt", "updatedAt"]
+    },
+    "LogisticsManifest": {
+      "title": "LogisticsManifest",
+      "description": "Line-Haul Dispatch Manifest bundling Express Dockets between branches",
+      "type": "object",
+      "properties": {
+        "id": { "type": "string", "maxLength": 128 },
+        "manifestNo": { "type": "string", "minLength": 2, "maxLength": 40 },
+        "manifestDate": { "type": "string", "minLength": 8, "maxLength": 20 },
+        "financialYear": { "type": "string", "maxLength": 16 },
+        "fromBranch": { "type": "string", "maxLength": 32 },
+        "toBranch": { "type": "string", "maxLength": 32 },
+        "truckNo": { "type": "string", "maxLength": 30 },
+        "driverName": { "type": "string", "maxLength": 140 },
+        "driverPhone": { "type": "string", "maxLength": 30 },
+        "brokerName": { "type": "string", "maxLength": 140 },
+        "docketIds": { "type": "array", "maxLength": 200 },
+        "docketNos": { "type": "array", "maxLength": 200 },
+        "totalPkgs": { "type": "number" },
+        "totalWeightKg": { "type": "number" },
+        "totalTopayAmount": { "type": "number" },
+        "hireAmount": { "type": "number" },
+        "advancePaid": { "type": "number" },
+        "balancePayable": { "type": "number" },
+        "status": { "type": "string", "enum": ["Dispatched", "In Transit", "Arrived", "Unloaded"] },
+        "arrivalDate": { "type": "string", "maxLength": 20 },
+        "remarks": { "type": "string", "maxLength": 500 },
+        "branchCode": { "type": "string", "maxLength": 32 },
+        "createdByStaff": { "type": "string", "maxLength": 64 },
+        "ownerUid": { "type": "string", "minLength": 6, "maxLength": 128 },
+        "createdAt": { "type": "string", "format": "date-time" },
+        "updatedAt": { "type": "string", "format": "date-time" }
+      },
+      "required": ["manifestNo", "manifestDate", "fromBranch", "toBranch", "truckNo", "docketIds", "status", "ownerUid", "createdAt", "updatedAt"]
+    },
+    "LogisticsInvoice": {
+      "title": "LogisticsInvoice",
+      "description": "Isolated Express Logistics Tax Invoice, Credit Note, or Debit Note",
+      "type": "object",
+      "properties": {
+        "id": { "type": "string", "maxLength": 128 },
+        "docType": { "type": "string", "enum": ["Tax Invoice", "Credit Note", "Debit Note"] },
+        "docNo": { "type": "string", "minLength": 2, "maxLength": 40 },
+        "docDate": { "type": "string", "minLength": 8, "maxLength": 20 },
+        "financialYear": { "type": "string", "maxLength": 16 },
+        "linkedDocNo": { "type": "string", "maxLength": 40 },
+        "partyName": { "type": "string", "minLength": 1, "maxLength": 180 },
+        "partyAddress": { "type": "string", "maxLength": 350 },
+        "partyGstin": { "type": "string", "maxLength": 24 },
+        "partyPan": { "type": "string", "maxLength": 15 },
+        "sac": { "type": "string", "maxLength": 20 },
+        "reverseCharge": { "type": "boolean" },
+        "interstate": { "type": "boolean" },
+        "gstRate": { "type": "number" },
+        "taxableAmount": { "type": "number" },
+        "cgstAmt": { "type": "number" },
+        "sgstAmt": { "type": "number" },
+        "igstAmt": { "type": "number" },
+        "grandTotal": { "type": "number" },
+        "paidAmount": { "type": "number" },
+        "status": { "type": "string", "enum": ["Unpaid", "Partial", "Paid"] },
+        "docketRows": { "type": "array", "maxLength": 200 },
+        "selectedBankId": { "type": "string", "maxLength": 80 },
+        "remarks": { "type": "string", "maxLength": 500 },
+        "branchCode": { "type": "string", "maxLength": 32 },
+        "createdByStaff": { "type": "string", "maxLength": 64 },
+        "ownerUid": { "type": "string", "minLength": 6, "maxLength": 128 },
+        "createdAt": { "type": "string", "format": "date-time" },
+        "updatedAt": { "type": "string", "format": "date-time" }
+      },
+      "required": ["docType", "docNo", "docDate", "partyName", "grandTotal", "paidAmount", "status", "docketRows", "ownerUid", "createdAt", "updatedAt"]
+    },
+    "LogisticsLedgerEntry": {
+      "title": "LogisticsLedgerEntry",
+      "description": "Isolated Express Logistics Receipt, Payment, COD Cash & Adjustment Voucher",
+      "type": "object",
+      "properties": {
+        "id": { "type": "string", "maxLength": 128 },
+        "voucherNo": { "type": "string", "minLength": 2, "maxLength": 40 },
+        "voucherDate": { "type": "string", "minLength": 8, "maxLength": 20 },
+        "financialYear": { "type": "string", "maxLength": 16 },
+        "voucherType": { "type": "string", "enum": ["Receipt", "Payment", "COD Cash", "Adjustment"] },
+        "partyName": { "type": "string", "minLength": 1, "maxLength": 180 },
+        "amount": { "type": "number" },
+        "tdsAmount": { "type": "number" },
+        "paymentMode": { "type": "string", "maxLength": 60 },
+        "upiRefId": { "type": "string", "maxLength": 80 },
+        "utrNo": { "type": "string", "maxLength": 80 },
+        "chequeNo": { "type": "string", "maxLength": 40 },
+        "linkedDocNo": { "type": "string", "maxLength": 60 },
+        "narration": { "type": "string", "maxLength": 300 },
+        "branchCode": { "type": "string", "maxLength": 32 },
+        "createdByStaff": { "type": "string", "maxLength": 64 },
+        "ownerUid": { "type": "string", "minLength": 6, "maxLength": 128 },
+        "createdAt": { "type": "string", "format": "date-time" },
+        "updatedAt": { "type": "string", "format": "date-time" }
+      },
+      "required": ["voucherNo", "voucherDate", "voucherType", "partyName", "amount", "paymentMode", "narration", "ownerUid", "createdAt", "updatedAt"]
     }
   },
   "firestore": {
@@ -575,6 +795,34 @@
     "/activity_logs/{logId}": {
       "schema": { "$ref": "#/entities/ActivityLog" },
       "description": "Real-time branch-wise activity feed"
+    },
+    "/logistics_parties/{partyId}": {
+      "schema": { "$ref": "#/entities/LogisticsParty" },
+      "description": "Isolated Express Logistics parties and brokers"
+    },
+    "/logistics_vehicles/{vehicleId}": {
+      "schema": { "$ref": "#/entities/LogisticsVehicle" },
+      "description": "Isolated Express Logistics fleet and line-haul vehicles"
+    },
+    "/logistics_drivers/{driverId}": {
+      "schema": { "$ref": "#/entities/LogisticsDriver" },
+      "description": "Isolated Express Logistics drivers"
+    },
+    "/logistics_dockets/{docketId}": {
+      "schema": { "$ref": "#/entities/LogisticsDocket" },
+      "description": "Express Parcel & Part-Load Dockets / LRs"
+    },
+    "/logistics_manifests/{manifestId}": {
+      "schema": { "$ref": "#/entities/LogisticsManifest" },
+      "description": "Line-Haul Dispatch Manifests"
+    },
+    "/logistics_invoices/{invoiceId}": {
+      "schema": { "$ref": "#/entities/LogisticsInvoice" },
+      "description": "Logistics Tax Invoices, Credit Notes, and Debit Notes"
+    },
+    "/logistics_ledgers/{entryId}": {
+      "schema": { "$ref": "#/entities/LogisticsLedgerEntry" },
+      "description": "Logistics Receipts, Payments, and COD Cash Ledgers"
     }
   }
 }

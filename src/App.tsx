@@ -7,6 +7,7 @@ import {
   ArrowLeftRight,
   Bell,
   BookOpen,
+  Boxes,
   Building2,
   Calendar,
   CalendarClock,
@@ -44,15 +45,23 @@ import {
 } from 'lucide-react';
 import {
   ActivityLog,
+  AnyDriveFolderName,
   BankReceiptRecord,
   BRANCH_OPTIONS,
+  BusinessMode,
   CompanySettings,
   ConsignmentNote,
   Declaration194C,
   DEFAULT_COMPANY_SETTINGS,
   Driver,
-  DriveFolderName,
   Invoice,
+  LogisticsDocket,
+  LogisticsDriver,
+  LogisticsInvoice,
+  LogisticsLedgerEntry,
+  LogisticsManifest,
+  LogisticsParty,
+  LogisticsVehicle,
   LorryHire,
   Party,
   PermissionKey,
@@ -91,7 +100,12 @@ import {
   normalizeFyLabel,
   PRECREATED_FYS,
 } from './lib/formatters';
-import { runDailyDrive8FileCleanup, uploadBlobToDriveFolder } from './lib/driveBackup';
+import {
+  isLogisticsDriveFolder,
+  runDailyDrive8FileCleanup,
+  uploadBlobToDriveFolder,
+  uploadLogisticsBlobToDriveFolder,
+} from './lib/driveBackup';
 import {
   GeneratedPdfResult,
   generateInvoicePDF,
@@ -130,6 +144,7 @@ import { StaffAccessMatrixModule } from './components/StaffAccessMatrixModule';
 import { StaffCommissionModule } from './components/StaffCommissionModule';
 import { BankReceiptImportModule } from './components/BankReceiptImportModule';
 import { UserGuideModule } from './components/UserGuideModule';
+import { LogisticsWorkspace } from './components/LogisticsWorkspace';
 import { getEwayBillExpiryState } from './lib/ewayBillUtils';
 
 type SidebarNavId = SheetTabId | 'transactions';
@@ -206,6 +221,18 @@ export default function App() {
   const [activityLogs, setActivityLogs] = useState<ActivityLog[]>([]);
   const [settingsDocs, setSettingsDocs] = useState<Array<CompanySettings & { id?: string }>>([]);
 
+  // Isolated Express Parcel & Part-Load Logistics collections
+  const [logisticsParties, setLogisticsParties] = useState<LogisticsParty[]>([]);
+  const [logisticsVehicles, setLogisticsVehicles] = useState<LogisticsVehicle[]>([]);
+  const [logisticsDrivers, setLogisticsDrivers] = useState<LogisticsDriver[]>([]);
+  const [logisticsDockets, setLogisticsDockets] = useState<LogisticsDocket[]>([]);
+  const [logisticsManifests, setLogisticsManifests] = useState<LogisticsManifest[]>([]);
+  const [logisticsInvoices, setLogisticsInvoices] = useState<LogisticsInvoice[]>([]);
+  const [logisticsLedgers, setLogisticsLedgers] = useState<LogisticsLedgerEntry[]>([]);
+
+  // Active Business Division Switcher (FTL BUSINESS vs LOGISTICS BUSINESS)
+  const [businessMode, setBusinessMode] = useState<BusinessMode>('FTL');
+
   // Active operator session (Master Admin by default, or logged-in / switched Staff ID)
   const [activeStaffSession, setActiveStaffSession] = useState<StaffAccount | null>(
     () => loadSavedErpSession()?.staffAccount ?? null
@@ -266,7 +293,7 @@ export default function App() {
   // Live A4 Preview Modal
   const [previewPdf, setPreviewPdf] = useState<{
     pdf: GeneratedPdfResult;
-    folder: DriveFolderName;
+    folder: AnyDriveFolderName;
   } | null>(null);
 
   // Global Confirm Modal
@@ -387,6 +414,13 @@ export default function App() {
         email,
         setSettingsDocs
       ),
+      subscribeCollection<LogisticsParty>('logistics_parties', ownerUid, email, setLogisticsParties),
+      subscribeCollection<LogisticsVehicle>('logistics_vehicles', ownerUid, email, setLogisticsVehicles),
+      subscribeCollection<LogisticsDriver>('logistics_drivers', ownerUid, email, setLogisticsDrivers),
+      subscribeCollection<LogisticsDocket>('logistics_dockets', ownerUid, email, setLogisticsDockets),
+      subscribeCollection<LogisticsManifest>('logistics_manifests', ownerUid, email, setLogisticsManifests),
+      subscribeCollection<LogisticsInvoice>('logistics_invoices', ownerUid, email, setLogisticsInvoices),
+      subscribeCollection<LogisticsLedgerEntry>('logistics_ledgers', ownerUid, email, setLogisticsLedgers),
     ];
 
     return () => {
@@ -572,6 +606,36 @@ export default function App() {
         matchesSelectedFinancialYear(d.financialYear, d.declarationDate, activeFy)
       ),
     [declarations, filterByBranch, activeFy]
+  );
+
+  // Scoped Express Parcel & Part-Load Logistics datasets (Branch + Active FY)
+  const visibleLogisticsDockets = useMemo(
+    () =>
+      filterByBranch(logisticsDockets).filter((d) =>
+        matchesSelectedFinancialYear(d.financialYear, d.docketDate, activeFy)
+      ),
+    [logisticsDockets, filterByBranch, activeFy]
+  );
+  const visibleLogisticsManifests = useMemo(
+    () =>
+      filterByBranch(logisticsManifests).filter((m) =>
+        matchesSelectedFinancialYear(m.financialYear, m.manifestDate, activeFy)
+      ),
+    [logisticsManifests, filterByBranch, activeFy]
+  );
+  const visibleLogisticsInvoices = useMemo(
+    () =>
+      filterByBranch(logisticsInvoices).filter((inv) =>
+        matchesSelectedFinancialYear(inv.financialYear, inv.docDate, activeFy)
+      ),
+    [logisticsInvoices, filterByBranch, activeFy]
+  );
+  const visibleLogisticsLedgers = useMemo(
+    () =>
+      filterByBranch(logisticsLedgers).filter((entry) =>
+        matchesSelectedFinancialYear(entry.financialYear, entry.voucherDate, activeFy)
+      ),
+    [logisticsLedgers, filterByBranch, activeFy]
   );
 
   // Active Staff Presence & Sorted Activity Log
@@ -945,6 +1009,7 @@ export default function App() {
     setLiveMonitorOpen(false);
     setActiveStaffSession(null);
     setErpSession(null);
+    setBusinessMode('FTL');
     setOpenTabs([{ id: 'dashboard', label: 'Dashboard' }]);
     setActiveTab('dashboard');
     setAppClosedOverlay(true);
@@ -965,7 +1030,7 @@ export default function App() {
     activeTab,
   ]);
 
-  const handlePreviewPdf = useCallback((pdf: GeneratedPdfResult, folder: DriveFolderName) => {
+  const handlePreviewPdf = useCallback((pdf: GeneratedPdfResult, folder: AnyDriveFolderName) => {
     if (pdf.blobUrl) registerManagedBlobUrl(pdf.blobUrl);
     setPreviewPdf((prev) => {
       if (prev?.pdf.blobUrl) URL.revokeObjectURL(prev.pdf.blobUrl);
@@ -981,18 +1046,28 @@ export default function App() {
     revokeThermalMemoryCooledUrls();
   }, []);
 
-  const handleSavePdfToDrive = async (pdf: GeneratedPdfResult, folder: DriveFolderName) => {
+  const handleSavePdfToDrive = async (pdf: GeneratedPdfResult, folder: AnyDriveFolderName) => {
     if (!driveAccessToken) {
       await handleGoogleDriveConnect(true);
       return;
     }
-    await uploadBlobToDriveFolder({
-      accessToken: driveAccessToken,
-      folderName: folder,
-      fileName: pdf.fileName,
-      blob: pdf.blob,
-      mimeType: 'application/pdf',
-    });
+    if (isLogisticsDriveFolder(folder)) {
+      await uploadLogisticsBlobToDriveFolder({
+        accessToken: driveAccessToken,
+        folderName: folder,
+        fileName: pdf.fileName,
+        blob: pdf.blob,
+        mimeType: 'application/pdf',
+      });
+    } else {
+      await uploadBlobToDriveFolder({
+        accessToken: driveAccessToken,
+        folderName: folder,
+        fileName: pdf.fileName,
+        blob: pdf.blob,
+        mimeType: 'application/pdf',
+      });
+    }
   };
 
   const handleShowConfirm = useCallback(
@@ -1361,34 +1436,40 @@ export default function App() {
         <div className="flex flex-wrap items-center justify-between gap-2 md:gap-3">
           {/* Left: Top-Left Collapsible Sidebar Toggle, Back Button & 24K Gold Triangular DRC Brand */}
           <div className="flex items-center gap-2 shrink-0">
-            <button
-              type="button"
-              onClick={() => setSidebarOpen((v) => !v)}
-              className="inline-flex items-center gap-1.5 px-2.5 py-1.5 rounded-lg bg-[#0D47A1] hover:bg-[#0A3882] text-white text-xs font-extrabold shadow-sm cursor-pointer shrink-0"
-              aria-expanded={sidebarOpen}
-              aria-label="Toggle Menu Sidebar"
-              title={sidebarOpen ? 'Hide Navigation Sidebar' : 'Open Navigation Sidebar'}
-            >
-              {sidebarOpen ? <X className="w-4 h-4" /> : <Menu className="w-4 h-4" />}
-              <span className="hidden sm:inline whitespace-nowrap">Menu</span>
-            </button>
-            <button
-              type="button"
-              onClick={handleGoBack}
-              disabled={tabHistory.length === 0 && activeTab === 'dashboard'}
-              className="inline-flex items-center gap-1 px-2.5 py-1.5 rounded-lg border border-slate-300 bg-slate-50 hover:bg-slate-200 text-slate-800 text-xs font-extrabold cursor-pointer disabled:opacity-40 whitespace-nowrap shrink-0"
-              title="Go Back to Previous Screen"
-            >
-              <ArrowLeft className="w-3.5 h-3.5" />
-              <span>Back</span>
-            </button>
+            {businessMode === 'FTL' && (
+              <>
+                <button
+                  type="button"
+                  onClick={() => setSidebarOpen((v) => !v)}
+                  className="inline-flex items-center gap-1.5 px-2.5 py-1.5 rounded-lg bg-[#0D47A1] hover:bg-[#0A3882] text-white text-xs font-extrabold shadow-sm cursor-pointer shrink-0"
+                  aria-expanded={sidebarOpen}
+                  aria-label="Toggle Menu Sidebar"
+                  title={sidebarOpen ? 'Hide Navigation Sidebar' : 'Open Navigation Sidebar'}
+                >
+                  {sidebarOpen ? <X className="w-4 h-4" /> : <Menu className="w-4 h-4" />}
+                  <span className="hidden sm:inline whitespace-nowrap">Menu</span>
+                </button>
+                <button
+                  type="button"
+                  onClick={handleGoBack}
+                  disabled={tabHistory.length === 0 && activeTab === 'dashboard'}
+                  className="inline-flex items-center gap-1 px-2.5 py-1.5 rounded-lg border border-slate-300 bg-slate-50 hover:bg-slate-200 text-slate-800 text-xs font-extrabold cursor-pointer disabled:opacity-40 whitespace-nowrap shrink-0"
+                  title="Go Back to Previous Screen"
+                >
+                  <ArrowLeft className="w-3.5 h-3.5" />
+                  <span>Back</span>
+                </button>
+              </>
+            )}
             <DrcTriangleLogo className="w-9 h-9 md:w-10 md:h-10 shrink-0" />
             <div className="min-w-0">
               <h1 className="text-sm sm:text-base md:text-lg font-extrabold tracking-tight text-[#0B3B8C] leading-none whitespace-nowrap">
                 DOLPHIN ROAD CARRIERS
               </h1>
               <p className="text-[10px] md:text-[11px] font-bold italic text-[#1565C0] mt-0.5 truncate">
-                {companySettings.tagline || 'Fast · Safe · Reliable'}
+                {businessMode === 'LOGISTICS'
+                  ? 'Express Parcel & Part-Load Logistics Division'
+                  : companySettings.tagline || 'Fast · Safe · Reliable'}
               </p>
             </div>
           </div>
@@ -1441,8 +1522,52 @@ export default function App() {
             </div>
           </div>
 
-          {/* Right Utility Strip: High-Contrast Active FY Badge + Padlock, Branch, Sync & Quick Controls */}
+          {/* Right Utility Strip: Business Mode Switcher, Active FY Badge + Padlock, Branch & Controls */}
           <div className="flex flex-wrap items-center justify-end gap-1.5 md:gap-2 shrink-0">
+            {/* Prominent Business Division Switcher (FTL BUSINESS vs LOGISTICS BUSINESS) */}
+            <div
+              className="inline-flex items-center rounded-lg bg-slate-900 border-2 border-[#0D47A1] p-0.5 shadow-sm shrink-0"
+              role="group"
+              aria-label="Business Division Switcher"
+            >
+              <button
+                type="button"
+                onClick={() => {
+                  setBusinessMode('FTL');
+                  setSidebarOpen(false);
+                  setSearchDropdownOpen(false);
+                  setNotifOpen(false);
+                }}
+                aria-pressed={businessMode === 'FTL'}
+                className={`inline-flex items-center gap-1 px-2.5 py-1 rounded-md text-[11px] font-extrabold tracking-wide transition-all cursor-pointer whitespace-nowrap ${
+                  businessMode === 'FTL'
+                    ? 'bg-[#1565C0] text-white shadow-sm ring-1 ring-amber-300'
+                    : 'text-slate-300 hover:text-white hover:bg-slate-800'
+                }`}
+              >
+                <Truck className="w-3.5 h-3.5 shrink-0" />
+                <span>FTL BUSINESS</span>
+              </button>
+              <button
+                type="button"
+                onClick={() => {
+                  setBusinessMode('LOGISTICS');
+                  setSidebarOpen(false);
+                  setSearchDropdownOpen(false);
+                  setNotifOpen(false);
+                }}
+                aria-pressed={businessMode === 'LOGISTICS'}
+                className={`inline-flex items-center gap-1 px-2.5 py-1 rounded-md text-[11px] font-extrabold tracking-wide transition-all cursor-pointer whitespace-nowrap ${
+                  businessMode === 'LOGISTICS'
+                    ? 'bg-gradient-to-r from-[#0F766E] to-[#0D9488] text-amber-200 shadow-sm ring-1 ring-amber-300'
+                    : 'text-teal-200 hover:text-white hover:bg-slate-800'
+                }`}
+              >
+                <Boxes className="w-3.5 h-3.5 shrink-0" />
+                <span>LOGISTICS BUSINESS</span>
+              </button>
+            </div>
+
             {/* High-Contrast Active Financial Year Badge (Locked by Default with Padlock Toggle) */}
             <div
               className="inline-flex items-center gap-1.5 rounded-lg bg-[#0B3B8C] border-2 border-amber-400 px-2.5 py-1 text-white shadow-sm shrink-0"
@@ -1732,7 +1857,8 @@ export default function App() {
           </div>
         </div>
 
-        {/* Row 2: Universal Search (Ctrl+K), Quick Jump Navigation, Live Alerts & Cloud Sync */}
+        {/* Row 2: FTL Universal Search (Ctrl+K), Quick Jump Navigation, Live Alerts & Cloud Sync */}
+        {businessMode === 'FTL' && (
         <div className="flex flex-wrap items-center justify-between gap-2 pt-1.5 border-t border-slate-100 text-[11px] font-bold">
           <div className="flex flex-wrap items-center gap-1.5">
             {/* Compact Universal Search (Ctrl+K) */}
@@ -1993,10 +2119,48 @@ export default function App() {
             )}
           </div>
         </div>
+        )}
       </header>
 
-      {/* Main Body: Collapsible Left Royal Blue Sidebar (Hidden by Default) + Full-Width Multi-Tab Workspace */}
+      {/* Main Body: Isolated Express Logistics Workspace OR FTL Collapsible Sidebar + Multi-Tab Workspace */}
       <div className="flex-1 flex min-h-0 relative">
+        {businessMode === 'LOGISTICS' ? (
+          <div className="flex-1 flex flex-col min-h-0">
+            {driveBannerError && (
+              <div className="m-3 mb-0 px-4 py-2.5 rounded-lg bg-amber-50 border border-amber-300 text-amber-900 text-xs font-medium flex items-center justify-between gap-2">
+                <span>{driveBannerError}</span>
+                <button
+                  type="button"
+                  onClick={() => setDriveBannerError(null)}
+                  className="p-0.5 text-amber-700 hover:text-amber-950 cursor-pointer"
+                  aria-label="Dismiss alert"
+                >
+                  <X className="w-4 h-4" />
+                </button>
+              </div>
+            )}
+            <LogisticsWorkspace
+              ownerUid={workspaceUid}
+              activeStaffCode={activeStaffCode}
+              activeBranchCode={activeOperationalBranch}
+              activeFy={activeFy}
+              dockets={visibleLogisticsDockets}
+              manifests={visibleLogisticsManifests}
+              parties={logisticsParties}
+              vehicles={logisticsVehicles}
+              drivers={logisticsDrivers}
+              invoices={visibleLogisticsInvoices}
+              ledgers={visibleLogisticsLedgers}
+              company={companySettings}
+              connectedEmail={connectedEmail}
+              driveAccessToken={driveAccessToken}
+              onConnectDrive={() => handleGoogleDriveConnect(true)}
+              onPreviewPdf={handlePreviewPdf}
+              onShowConfirm={handleShowConfirm}
+            />
+          </div>
+        ) : (
+        <>
         {sidebarOpen && (
           <div
             className="fixed inset-0 bg-slate-900/45 z-40 no-print"
@@ -2432,6 +2596,8 @@ export default function App() {
             )}
           </div>
         </main>
+        </>
+        )}
       </div>
 
       {/* Bottom ERP Status Bar */}
@@ -2458,7 +2624,9 @@ export default function App() {
           </span>
         </div>
         <div className="font-bold italic text-[#0D47A1]">
-          Dolphin Road Carriers — Logistics Solution Partner
+          {businessMode === 'LOGISTICS'
+            ? 'Dolphin Road Carriers — Express Parcel & Part-Load Logistics Division'
+            : 'Dolphin Road Carriers — Logistics Solution Partner'}
         </div>
       </footer>
 

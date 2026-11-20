@@ -1115,3 +1115,41 @@ export async function restoreErpBackupBundle(payload: Record<string, unknown>): 
     // Static deployment (e.g. Vercel) relies on bulkUpsertDocuments + IndexedDB + Firestore above
   }
 }
+
+export async function restoreLogisticsBackupBundle(payload: Record<string, unknown>): Promise<void> {
+  const mapping: Array<[string, string[]]> = [
+    ['logistics_parties', ['logistics_parties', 'logisticsParties']],
+    ['logistics_vehicles', ['logistics_vehicles', 'logisticsVehicles']],
+    ['logistics_drivers', ['logistics_drivers', 'logisticsDrivers']],
+    ['logistics_dockets', ['logistics_dockets', 'logisticsDockets']],
+    ['logistics_manifests', ['logistics_manifests', 'logisticsManifests']],
+    ['logistics_invoices', ['logistics_invoices', 'logisticsInvoices']],
+    ['logistics_ledgers', ['logistics_ledgers', 'logisticsLedgers']],
+  ];
+
+  const normalizedPayload: Record<string, unknown[]> = {};
+  for (const [targetCol, candidateKeys] of mapping) {
+    for (const key of candidateKeys) {
+      const arr = payload[key];
+      if (Array.isArray(arr) && arr.length > 0) {
+        normalizedPayload[targetCol] = arr;
+        await bulkUpsertDocuments(targetCol, arr as Array<Record<string, unknown>>);
+        break;
+      }
+    }
+  }
+
+  try {
+    const res = await fetch('/api/erp/restore', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify(normalizedPayload),
+    });
+    if (res.ok) {
+      markCloudSyncedNow();
+    }
+  } catch {
+    // Static deployment relies on IndexedDB + Firestore above
+  }
+}
+

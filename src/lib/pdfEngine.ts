@@ -4,6 +4,9 @@ import {
   ConsignmentNote,
   Declaration194C,
   Invoice,
+  LogisticsDocket,
+  LogisticsInvoice,
+  LogisticsManifest,
   Quotation,
 } from '../types/erp';
 import {
@@ -207,7 +210,9 @@ async function runPdfTask(task: PdfTaskPayload): Promise<GeneratedPdfResult> {
     (task.kind === 'lr3copy' ||
     task.kind === 'tableReport' ||
     task.kind === 'gstRegister' ||
-    task.kind === 'foxproStatement'
+    task.kind === 'foxproStatement' ||
+    task.kind === 'logisticsDocket' ||
+    task.kind === 'logisticsManifest'
       ? 'l'
       : 'p');
   const chosenCopyCount: BillCopyCount | undefined =
@@ -461,6 +466,78 @@ export async function generateFoxproStatementPDF(
     orientation: orientation || spec.orientation || 'l',
     assets: { ...assets },
   });
+}
+
+export async function generateLogisticsDocketPDF(
+  docket: LogisticsDocket,
+  company: CompanySettings,
+  orientation: PdfOrientation = 'l',
+  shareMeta?: PdfShareMeta
+): Promise<GeneratedPdfResult> {
+  const assets = await getAssets(company);
+  const res = await runPdfTask({
+    kind: 'logisticsDocket',
+    docket,
+    company,
+    orientation,
+    assets: { ...assets },
+  });
+  return {
+    ...res,
+    shareMeta: shareMeta || {
+      partyName: docket.billingPartyName || docket.consignorName,
+      docNo: docket.docketNo,
+      summaryText: `Logistics Parcel Docket ${docket.docketNo} | ${docket.originBranch} -> ${docket.destBranch} | ${docket.packages} Pkgs (${docket.chargedWeightKg} Kg) | ${docket.payMode}: Rs. ${Number(docket.totalAmount || 0).toLocaleString('en-IN')}`,
+    },
+  };
+}
+
+export async function generateLogisticsManifestPDF(
+  manifest: LogisticsManifest,
+  dockets: LogisticsDocket[],
+  company: CompanySettings,
+  orientation: PdfOrientation = 'l'
+): Promise<GeneratedPdfResult> {
+  const assets = await getAssets(company);
+  const res = await runPdfTask({
+    kind: 'logisticsManifest',
+    manifest,
+    dockets,
+    company,
+    orientation,
+    assets: { ...assets },
+  });
+  return {
+    ...res,
+    shareMeta: {
+      docNo: manifest.manifestNo,
+      summaryText: `Line-Haul Manifest ${manifest.manifestNo} | ${manifest.fromBranch} -> ${manifest.toBranch} | Truck: ${manifest.truckNo} | Dockets: ${manifest.docketIds.length}`,
+    },
+  };
+}
+
+export async function generateLogisticsInvoicePDF(
+  invoice: LogisticsInvoice,
+  company: CompanySettings,
+  orientation: PdfOrientation = 'p',
+  shareMeta?: PdfShareMeta
+): Promise<GeneratedPdfResult> {
+  const assets = await getAssets(company);
+  const res = await runPdfTask({
+    kind: 'logisticsInvoice',
+    invoice,
+    company,
+    orientation,
+    assets: { ...assets },
+  });
+  return {
+    ...res,
+    shareMeta: shareMeta || {
+      partyName: invoice.partyName,
+      docNo: invoice.docNo,
+      summaryText: `Logistics ${invoice.docType} ${invoice.docNo} | Party: ${invoice.partyName} | Total: Rs. ${Number(invoice.grandTotal || 0).toLocaleString('en-IN')}`,
+    },
+  };
 }
 
 export function downloadPdfDirect(pdf: GeneratedPdfResult): void {

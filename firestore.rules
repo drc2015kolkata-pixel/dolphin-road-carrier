@@ -583,6 +583,241 @@ service cloud.firestore {
         data.createdAt is timestamp;
     }
 
+    function isValidLogisticsParty(data) {
+      return data.keys().hasAll(['name', 'partyType', 'openingBalance', 'currentBalance', 'balanceType', 'ownerUid', 'createdAt', 'updatedAt']) &&
+        data.keys().hasOnly([
+          'id', 'name', 'partyType', 'address', 'gstin', 'pan', 'phone', 'email', 'branchCode',
+          'openingBalance', 'currentBalance', 'balanceType', 'ownerUid', 'createdAt', 'updatedAt'
+        ]) &&
+        isValidOptStr(data, 'id', 128) &&
+        data.name is string && data.name.size() >= 1 && data.name.size() <= 180 &&
+        data.partyType in ['Customer', 'Consignor', 'Consignee', 'Broker', 'DeliveryAgent', 'Vendor'] &&
+        isValidOptStr(data, 'address', 400) &&
+        isValidOptStr(data, 'gstin', 20) &&
+        isValidOptStr(data, 'pan', 15) &&
+        isValidOptStr(data, 'phone', 30) &&
+        isValidOptStr(data, 'email', 160) &&
+        isValidOptStr(data, 'branchCode', 32) &&
+        (data.openingBalance is int || data.openingBalance is float) &&
+        (data.currentBalance is int || data.currentBalance is float) &&
+        data.balanceType in ['Dr', 'Cr'] &&
+        data.ownerUid is string && data.ownerUid.size() >= 6 && data.ownerUid.size() <= 128 &&
+        data.createdAt is timestamp &&
+        data.updatedAt is timestamp;
+    }
+
+    function isValidLogisticsVehicle(data) {
+      return data.keys().hasAll(['truckNo', 'ownerName', 'ownerUid', 'createdAt', 'updatedAt']) &&
+        data.keys().hasOnly([
+          'id', 'truckNo', 'vehicleType', 'ownerName', 'ownerPhone', 'fitnessExpiry',
+          'insuranceExpiry', 'permitExpiry', 'roadTaxExpiry', 'pucExpiry', 'branchCode',
+          'ownerUid', 'createdAt', 'updatedAt'
+        ]) &&
+        isValidOptStr(data, 'id', 128) &&
+        data.truckNo is string && data.truckNo.size() >= 4 && data.truckNo.size() <= 24 &&
+        isValidOptStr(data, 'vehicleType', 80) &&
+        data.ownerName is string && data.ownerName.size() <= 140 &&
+        isValidOptStr(data, 'ownerPhone', 30) &&
+        isValidOptStr(data, 'fitnessExpiry', 20) &&
+        isValidOptStr(data, 'insuranceExpiry', 20) &&
+        isValidOptStr(data, 'permitExpiry', 20) &&
+        isValidOptStr(data, 'roadTaxExpiry', 20) &&
+        isValidOptStr(data, 'pucExpiry', 20) &&
+        isValidOptStr(data, 'branchCode', 32) &&
+        data.ownerUid is string && data.ownerUid.size() >= 6 && data.ownerUid.size() <= 128 &&
+        data.createdAt is timestamp &&
+        data.updatedAt is timestamp;
+    }
+
+    function isValidLogisticsDriver(data) {
+      return data.keys().hasAll(['name', 'dlNo', 'dlExpiry', 'ownerUid', 'createdAt', 'updatedAt']) &&
+        data.keys().hasOnly([
+          'id', 'name', 'dlNo', 'dlExpiry', 'phone', 'address', 'branchCode',
+          'ownerUid', 'createdAt', 'updatedAt'
+        ]) &&
+        isValidOptStr(data, 'id', 128) &&
+        data.name is string && data.name.size() >= 1 && data.name.size() <= 140 &&
+        data.dlNo is string && data.dlNo.size() >= 4 && data.dlNo.size() <= 40 &&
+        data.dlExpiry is string && data.dlExpiry.size() <= 20 &&
+        isValidOptStr(data, 'phone', 30) &&
+        isValidOptStr(data, 'address', 300) &&
+        isValidOptStr(data, 'branchCode', 32) &&
+        data.ownerUid is string && data.ownerUid.size() >= 6 && data.ownerUid.size() <= 128 &&
+        data.createdAt is timestamp &&
+        data.updatedAt is timestamp;
+    }
+
+    function isValidLogisticsDocket(data) {
+      return data.keys().hasAll(['docketNo', 'docketDate', 'originBranch', 'destBranch', 'payMode', 'consignorName', 'consigneeName', 'totalAmount', 'stockStage', 'billed', 'ownerUid', 'createdAt', 'updatedAt']) &&
+        data.keys().hasOnly([
+          'id', 'docketNo', 'docketDate', 'financialYear', 'originBranch', 'destBranch',
+          'deliveryMode', 'payMode', 'consignorName', 'consignorAddress', 'consignorGstin',
+          'consigneeName', 'consigneeAddress', 'consigneeGstin', 'billingPartyName',
+          'packages', 'packingType', 'goodsDesc', 'actualWeightKg', 'chargedWeightKg',
+          'rateBasis', 'ratePerUnit', 'baseFreight', 'fovCharge', 'docketCharge', 'hamaliCharge', 'doorCharge',
+          'gstRate', 'cgstAmt', 'sgstAmt', 'igstAmt', 'reverseCharge', 'totalAmount',
+          'ewayBillNo', 'ewayBillValidUpto', 'valueOfGoods', 'stockStage', 'godownRack', 'godownBranch',
+          'manifestId', 'manifestNo', 'invoiceId', 'billed', 'podImageDataUrl', 'podDate', 'remarks',
+          'branchCode', 'createdByStaff', 'ownerUid', 'createdAt', 'updatedAt'
+        ]) &&
+        isValidOptStr(data, 'id', 128) &&
+        data.docketNo is string && data.docketNo.size() >= 2 && data.docketNo.size() <= 40 &&
+        data.docketDate is string && data.docketDate.size() >= 8 && data.docketDate.size() <= 20 &&
+        isValidOptStr(data, 'financialYear', 16) &&
+        data.originBranch is string && data.originBranch.size() <= 32 &&
+        data.destBranch is string && data.destBranch.size() <= 32 &&
+        isValidOptStr(data, 'deliveryMode', 30) &&
+        data.payMode in ['Paid', 'To-Pay', 'TBB'] &&
+        data.consignorName is string && data.consignorName.size() <= 180 &&
+        isValidOptStr(data, 'consignorAddress', 350) &&
+        isValidOptStr(data, 'consignorGstin', 24) &&
+        data.consigneeName is string && data.consigneeName.size() <= 180 &&
+        isValidOptStr(data, 'consigneeAddress', 350) &&
+        isValidOptStr(data, 'consigneeGstin', 24) &&
+        isValidOptStr(data, 'billingPartyName', 180) &&
+        isValidOptNum(data, 'packages') &&
+        isValidOptStr(data, 'packingType', 60) &&
+        isValidOptStr(data, 'goodsDesc', 300) &&
+        isValidOptNum(data, 'actualWeightKg') &&
+        isValidOptNum(data, 'chargedWeightKg') &&
+        isValidOptStr(data, 'rateBasis', 30) &&
+        isValidOptNum(data, 'ratePerUnit') &&
+        isValidOptNum(data, 'baseFreight') &&
+        isValidOptNum(data, 'fovCharge') &&
+        isValidOptNum(data, 'docketCharge') &&
+        isValidOptNum(data, 'hamaliCharge') &&
+        isValidOptNum(data, 'doorCharge') &&
+        isValidOptNum(data, 'gstRate') &&
+        isValidOptNum(data, 'cgstAmt') &&
+        isValidOptNum(data, 'sgstAmt') &&
+        isValidOptNum(data, 'igstAmt') &&
+        isValidOptBool(data, 'reverseCharge') &&
+        (data.totalAmount is int || data.totalAmount is float) &&
+        isValidOptStr(data, 'ewayBillNo', 60) &&
+        isValidOptStr(data, 'ewayBillValidUpto', 30) &&
+        isValidOptNum(data, 'valueOfGoods') &&
+        data.stockStage in ['Origin Godown', 'Manifested / In Transit', 'Destination Godown', 'Out for Delivery', 'Delivered'] &&
+        isValidOptStr(data, 'godownRack', 40) &&
+        isValidOptStr(data, 'godownBranch', 32) &&
+        isValidOptStr(data, 'manifestId', 128) &&
+        isValidOptStr(data, 'manifestNo', 40) &&
+        isValidOptStr(data, 'invoiceId', 128) &&
+        data.billed is bool &&
+        isValidOptStr(data, 'podImageDataUrl', 450000) &&
+        isValidOptStr(data, 'podDate', 20) &&
+        isValidOptStr(data, 'remarks', 500) &&
+        isValidOptStr(data, 'branchCode', 32) &&
+        isValidOptStr(data, 'createdByStaff', 64) &&
+        data.ownerUid is string && data.ownerUid.size() >= 6 && data.ownerUid.size() <= 128 &&
+        data.createdAt is timestamp &&
+        data.updatedAt is timestamp;
+    }
+
+    function isValidLogisticsManifest(data) {
+      return data.keys().hasAll(['manifestNo', 'manifestDate', 'fromBranch', 'toBranch', 'truckNo', 'docketIds', 'status', 'ownerUid', 'createdAt', 'updatedAt']) &&
+        data.keys().hasOnly([
+          'id', 'manifestNo', 'manifestDate', 'financialYear', 'fromBranch', 'toBranch',
+          'truckNo', 'driverName', 'driverPhone', 'brokerName', 'docketIds', 'docketNos',
+          'totalPkgs', 'totalWeightKg', 'totalTopayAmount', 'hireAmount', 'advancePaid',
+          'balancePayable', 'status', 'arrivalDate', 'remarks', 'branchCode', 'createdByStaff',
+          'ownerUid', 'createdAt', 'updatedAt'
+        ]) &&
+        isValidOptStr(data, 'id', 128) &&
+        data.manifestNo is string && data.manifestNo.size() >= 2 && data.manifestNo.size() <= 40 &&
+        data.manifestDate is string && data.manifestDate.size() >= 8 && data.manifestDate.size() <= 20 &&
+        isValidOptStr(data, 'financialYear', 16) &&
+        data.fromBranch is string && data.fromBranch.size() <= 32 &&
+        data.toBranch is string && data.toBranch.size() <= 32 &&
+        data.truckNo is string && data.truckNo.size() <= 30 &&
+        isValidOptStr(data, 'driverName', 140) &&
+        isValidOptStr(data, 'driverPhone', 30) &&
+        isValidOptStr(data, 'brokerName', 140) &&
+        data.docketIds is list && data.docketIds.size() <= 200 &&
+        isValidOptList(data, 'docketNos', 200) &&
+        isValidOptNum(data, 'totalPkgs') &&
+        isValidOptNum(data, 'totalWeightKg') &&
+        isValidOptNum(data, 'totalTopayAmount') &&
+        isValidOptNum(data, 'hireAmount') &&
+        isValidOptNum(data, 'advancePaid') &&
+        isValidOptNum(data, 'balancePayable') &&
+        data.status in ['Dispatched', 'In Transit', 'Arrived', 'Unloaded'] &&
+        isValidOptStr(data, 'arrivalDate', 20) &&
+        isValidOptStr(data, 'remarks', 500) &&
+        isValidOptStr(data, 'branchCode', 32) &&
+        isValidOptStr(data, 'createdByStaff', 64) &&
+        data.ownerUid is string && data.ownerUid.size() >= 6 && data.ownerUid.size() <= 128 &&
+        data.createdAt is timestamp &&
+        data.updatedAt is timestamp;
+    }
+
+    function isValidLogisticsInvoice(data) {
+      return data.keys().hasAll(['docType', 'docNo', 'docDate', 'partyName', 'grandTotal', 'paidAmount', 'status', 'docketRows', 'ownerUid', 'createdAt', 'updatedAt']) &&
+        data.keys().hasOnly([
+          'id', 'docType', 'docNo', 'docDate', 'financialYear', 'linkedDocNo', 'partyName',
+          'partyAddress', 'partyGstin', 'partyPan', 'sac', 'reverseCharge', 'interstate',
+          'gstRate', 'taxableAmount', 'cgstAmt', 'sgstAmt', 'igstAmt', 'grandTotal',
+          'paidAmount', 'status', 'docketRows', 'selectedBankId', 'remarks', 'branchCode',
+          'createdByStaff', 'ownerUid', 'createdAt', 'updatedAt'
+        ]) &&
+        isValidOptStr(data, 'id', 128) &&
+        data.docType in ['Tax Invoice', 'Credit Note', 'Debit Note'] &&
+        data.docNo is string && data.docNo.size() >= 2 && data.docNo.size() <= 40 &&
+        data.docDate is string && data.docDate.size() >= 8 && data.docDate.size() <= 20 &&
+        isValidOptStr(data, 'financialYear', 16) &&
+        isValidOptStr(data, 'linkedDocNo', 40) &&
+        data.partyName is string && data.partyName.size() >= 1 && data.partyName.size() <= 180 &&
+        isValidOptStr(data, 'partyAddress', 350) &&
+        isValidOptStr(data, 'partyGstin', 24) &&
+        isValidOptStr(data, 'partyPan', 15) &&
+        isValidOptStr(data, 'sac', 20) &&
+        isValidOptBool(data, 'reverseCharge') &&
+        isValidOptBool(data, 'interstate') &&
+        isValidOptNum(data, 'gstRate') &&
+        isValidOptNum(data, 'taxableAmount') &&
+        isValidOptNum(data, 'cgstAmt') &&
+        isValidOptNum(data, 'sgstAmt') &&
+        isValidOptNum(data, 'igstAmt') &&
+        (data.grandTotal is int || data.grandTotal is float) &&
+        (data.paidAmount is int || data.paidAmount is float) &&
+        data.status in ['Unpaid', 'Partial', 'Paid'] &&
+        data.docketRows is list && data.docketRows.size() <= 200 &&
+        isValidOptStr(data, 'selectedBankId', 80) &&
+        isValidOptStr(data, 'remarks', 500) &&
+        isValidOptStr(data, 'branchCode', 32) &&
+        isValidOptStr(data, 'createdByStaff', 64) &&
+        data.ownerUid is string && data.ownerUid.size() >= 6 && data.ownerUid.size() <= 128 &&
+        data.createdAt is timestamp &&
+        data.updatedAt is timestamp;
+    }
+
+    function isValidLogisticsLedger(data) {
+      return data.keys().hasAll(['voucherNo', 'voucherDate', 'voucherType', 'partyName', 'amount', 'paymentMode', 'narration', 'ownerUid', 'createdAt', 'updatedAt']) &&
+        data.keys().hasOnly([
+          'id', 'voucherNo', 'voucherDate', 'financialYear', 'voucherType', 'partyName',
+          'amount', 'tdsAmount', 'paymentMode', 'upiRefId', 'utrNo', 'chequeNo', 'linkedDocNo',
+          'narration', 'branchCode', 'createdByStaff', 'ownerUid', 'createdAt', 'updatedAt'
+        ]) &&
+        isValidOptStr(data, 'id', 128) &&
+        data.voucherNo is string && data.voucherNo.size() >= 2 && data.voucherNo.size() <= 40 &&
+        data.voucherDate is string && data.voucherDate.size() >= 8 && data.voucherDate.size() <= 20 &&
+        isValidOptStr(data, 'financialYear', 16) &&
+        data.voucherType in ['Receipt', 'Payment', 'COD Cash', 'Adjustment'] &&
+        data.partyName is string && data.partyName.size() >= 1 && data.partyName.size() <= 180 &&
+        (data.amount is int || data.amount is float) &&
+        isValidOptNum(data, 'tdsAmount') &&
+        data.paymentMode is string && data.paymentMode.size() <= 60 &&
+        isValidOptStr(data, 'upiRefId', 80) &&
+        isValidOptStr(data, 'utrNo', 80) &&
+        isValidOptStr(data, 'chequeNo', 40) &&
+        isValidOptStr(data, 'linkedDocNo', 60) &&
+        data.narration is string && data.narration.size() <= 300 &&
+        isValidOptStr(data, 'branchCode', 32) &&
+        isValidOptStr(data, 'createdByStaff', 64) &&
+        data.ownerUid is string && data.ownerUid.size() >= 6 && data.ownerUid.size() <= 128 &&
+        data.createdAt is timestamp &&
+        data.updatedAt is timestamp;
+    }
+
     // 4. Collection Match Blocks
     match /test/connection {
       allow get: if request.auth != null;
@@ -895,6 +1130,154 @@ service cloud.firestore {
         incoming().createdAt == request.time;
       allow update: if false;
       allow delete: if isAdmin() && isValidId(logId);
+    }
+
+    match /logistics_parties/{partyId} {
+      allow get: if isValidId(partyId) && isOwnerOrAdmin();
+      allow list: if isListOwnerOrMaster();
+      allow create: if isSignedIn() && isValidId(partyId) && isValidLogisticsParty(incoming()) &&
+        incoming().ownerUid == request.auth.uid &&
+        incoming().createdAt == request.time &&
+        incoming().updatedAt == request.time;
+      allow update: if isValidId(partyId) && isValidLogisticsParty(incoming()) && isOwnerOrAdmin() &&
+        incoming().ownerUid == existing().ownerUid &&
+        incoming().createdAt == existing().createdAt &&
+        incoming().updatedAt == request.time && (
+          isAdmin() ||
+          incoming().diff(existing()).affectedKeys().hasOnly([
+            'name', 'partyType', 'address', 'gstin', 'pan', 'phone', 'email', 'branchCode',
+            'openingBalance', 'currentBalance', 'balanceType', 'updatedAt'
+          ])
+        );
+      allow delete: if isValidId(partyId) && isOwnerOrAdmin();
+    }
+
+    match /logistics_vehicles/{vehicleId} {
+      allow get: if isValidId(vehicleId) && isOwnerOrAdmin();
+      allow list: if isListOwnerOrMaster();
+      allow create: if isSignedIn() && isValidId(vehicleId) && isValidLogisticsVehicle(incoming()) &&
+        incoming().ownerUid == request.auth.uid &&
+        incoming().createdAt == request.time &&
+        incoming().updatedAt == request.time;
+      allow update: if isValidId(vehicleId) && isValidLogisticsVehicle(incoming()) && isOwnerOrAdmin() &&
+        incoming().ownerUid == existing().ownerUid &&
+        incoming().createdAt == existing().createdAt &&
+        incoming().updatedAt == request.time && (
+          isAdmin() ||
+          incoming().diff(existing()).affectedKeys().hasOnly([
+            'truckNo', 'vehicleType', 'ownerName', 'ownerPhone', 'fitnessExpiry',
+            'insuranceExpiry', 'permitExpiry', 'roadTaxExpiry', 'pucExpiry', 'branchCode', 'updatedAt'
+          ])
+        );
+      allow delete: if isValidId(vehicleId) && isOwnerOrAdmin();
+    }
+
+    match /logistics_drivers/{driverId} {
+      allow get: if isValidId(driverId) && isOwnerOrAdmin();
+      allow list: if isListOwnerOrMaster();
+      allow create: if isSignedIn() && isValidId(driverId) && isValidLogisticsDriver(incoming()) &&
+        incoming().ownerUid == request.auth.uid &&
+        incoming().createdAt == request.time &&
+        incoming().updatedAt == request.time;
+      allow update: if isValidId(driverId) && isValidLogisticsDriver(incoming()) && isOwnerOrAdmin() &&
+        incoming().ownerUid == existing().ownerUid &&
+        incoming().createdAt == existing().createdAt &&
+        incoming().updatedAt == request.time && (
+          isAdmin() ||
+          incoming().diff(existing()).affectedKeys().hasOnly([
+            'name', 'dlNo', 'dlExpiry', 'phone', 'address', 'branchCode', 'updatedAt'
+          ])
+        );
+      allow delete: if isValidId(driverId) && isOwnerOrAdmin();
+    }
+
+    match /logistics_dockets/{docketId} {
+      allow get: if isValidId(docketId) && isOwnerOrAdmin();
+      allow list: if isListOwnerOrMaster();
+      allow create: if isSignedIn() && isValidId(docketId) && isValidLogisticsDocket(incoming()) &&
+        incoming().ownerUid == request.auth.uid &&
+        incoming().createdAt == request.time &&
+        incoming().updatedAt == request.time;
+      allow update: if isValidId(docketId) && isValidLogisticsDocket(incoming()) && isOwnerOrAdmin() &&
+        incoming().ownerUid == existing().ownerUid &&
+        incoming().createdAt == existing().createdAt &&
+        incoming().updatedAt == request.time && (
+          isAdmin() ||
+          incoming().diff(existing()).affectedKeys().hasOnly([
+            'docketDate', 'financialYear', 'originBranch', 'destBranch', 'deliveryMode', 'payMode',
+            'consignorName', 'consignorAddress', 'consignorGstin', 'consigneeName', 'consigneeAddress',
+            'consigneeGstin', 'billingPartyName', 'packages', 'packingType', 'goodsDesc',
+            'actualWeightKg', 'chargedWeightKg', 'rateBasis', 'ratePerUnit', 'baseFreight',
+            'fovCharge', 'docketCharge', 'hamaliCharge', 'doorCharge', 'gstRate', 'cgstAmt', 'sgstAmt', 'igstAmt',
+            'reverseCharge', 'totalAmount', 'ewayBillNo', 'ewayBillValidUpto', 'valueOfGoods',
+            'stockStage', 'godownRack', 'godownBranch', 'manifestId', 'manifestNo', 'invoiceId',
+            'billed', 'podImageDataUrl', 'podDate', 'remarks', 'branchCode', 'updatedAt'
+          ])
+        );
+      allow delete: if isValidId(docketId) && isOwnerOrAdmin();
+    }
+
+    match /logistics_manifests/{manifestId} {
+      allow get: if isValidId(manifestId) && isOwnerOrAdmin();
+      allow list: if isListOwnerOrMaster();
+      allow create: if isSignedIn() && isValidId(manifestId) && isValidLogisticsManifest(incoming()) &&
+        incoming().ownerUid == request.auth.uid &&
+        incoming().createdAt == request.time &&
+        incoming().updatedAt == request.time;
+      allow update: if isValidId(manifestId) && isValidLogisticsManifest(incoming()) && isOwnerOrAdmin() &&
+        incoming().ownerUid == existing().ownerUid &&
+        incoming().createdAt == existing().createdAt &&
+        incoming().updatedAt == request.time && (
+          isAdmin() ||
+          incoming().diff(existing()).affectedKeys().hasOnly([
+            'manifestDate', 'financialYear', 'fromBranch', 'toBranch', 'truckNo', 'driverName',
+            'driverPhone', 'brokerName', 'docketIds', 'docketNos', 'totalPkgs', 'totalWeightKg',
+            'totalTopayAmount', 'hireAmount', 'advancePaid', 'balancePayable', 'status',
+            'arrivalDate', 'remarks', 'branchCode', 'updatedAt'
+          ])
+        );
+      allow delete: if isValidId(manifestId) && isOwnerOrAdmin();
+    }
+
+    match /logistics_invoices/{invoiceId} {
+      allow get: if isValidId(invoiceId) && isOwnerOrAdmin();
+      allow list: if isListOwnerOrMaster();
+      allow create: if isSignedIn() && isValidId(invoiceId) && isValidLogisticsInvoice(incoming()) &&
+        incoming().ownerUid == request.auth.uid &&
+        incoming().createdAt == request.time &&
+        incoming().updatedAt == request.time;
+      allow update: if isValidId(invoiceId) && isValidLogisticsInvoice(incoming()) && isOwnerOrAdmin() &&
+        incoming().ownerUid == existing().ownerUid &&
+        incoming().createdAt == existing().createdAt &&
+        incoming().updatedAt == request.time && (
+          isAdmin() ||
+          incoming().diff(existing()).affectedKeys().hasOnly([
+            'docDate', 'financialYear', 'linkedDocNo', 'partyName', 'partyAddress', 'partyGstin', 'partyPan',
+            'sac', 'reverseCharge', 'interstate', 'gstRate', 'taxableAmount', 'cgstAmt', 'sgstAmt', 'igstAmt',
+            'grandTotal', 'paidAmount', 'status', 'docketRows', 'selectedBankId', 'remarks', 'branchCode', 'updatedAt'
+          ])
+        );
+      allow delete: if isValidId(invoiceId) && isOwnerOrAdmin();
+    }
+
+    match /logistics_ledgers/{entryId} {
+      allow get: if isValidId(entryId) && isOwnerOrAdmin();
+      allow list: if isListOwnerOrMaster();
+      allow create: if isSignedIn() && isValidId(entryId) && isValidLogisticsLedger(incoming()) &&
+        incoming().ownerUid == request.auth.uid &&
+        incoming().createdAt == request.time &&
+        incoming().updatedAt == request.time;
+      allow update: if isValidId(entryId) && isValidLogisticsLedger(incoming()) && isOwnerOrAdmin() &&
+        incoming().ownerUid == existing().ownerUid &&
+        incoming().createdAt == existing().createdAt &&
+        incoming().updatedAt == request.time && (
+          isAdmin() ||
+          incoming().diff(existing()).affectedKeys().hasOnly([
+            'voucherDate', 'financialYear', 'voucherType', 'partyName', 'amount', 'tdsAmount',
+            'paymentMode', 'upiRefId', 'utrNo', 'chequeNo', 'linkedDocNo', 'narration', 'branchCode', 'updatedAt'
+          ])
+        );
+      allow delete: if isValidId(entryId) && isOwnerOrAdmin();
     }
   }
 }
