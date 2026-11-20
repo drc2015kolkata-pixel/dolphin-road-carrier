@@ -55,6 +55,7 @@ import {
 import { useDebouncedValue } from '../hooks/useDebounce';
 import { PaginatedDataTable, TableColumn } from './PaginatedDataTable';
 import { GstFilingHubModule } from './GstFilingHubModule';
+import { EntityQuickPreviewCard, formatPartyDetailsLine } from './RichEntityPicker';
 
 interface ReportsMisModuleProps {
   ownerUid: string;
@@ -2360,14 +2361,28 @@ const ReportsMisModuleInner: React.FC<ReportsMisModuleProps> = ({
                 aria-label="Select Party Ledger"
                 value={selectedPartyLedger}
                 onChange={(e) => setSelectedPartyLedger(e.target.value)}
-                className="px-3 py-1.5 rounded-lg border border-slate-300 bg-white font-bold text-slate-900 min-w-[240px]"
+                className="px-3 py-1.5 rounded-lg border border-slate-300 bg-white font-bold text-slate-900 min-w-[260px] max-w-md"
               >
                 <option value="ALL">All Parties Account Summary ({filteredAccountBook.length})</option>
-                {partyLedgerOptions.map((pName) => (
-                  <option key={pName} value={pName}>
-                    {pName}
-                  </option>
-                ))}
+                {partyLedgerOptions.map((pName) => {
+                  const matches = parties.filter(
+                    (p) => p.name.trim().toLowerCase() === pName.trim().toLowerCase()
+                  );
+                  let optionLabel = pName;
+                  if (matches.length === 1) {
+                    optionLabel = `${pName} [${matches[0].partyType}] | ${formatPartyDetailsLine(matches[0])}`;
+                  } else if (matches.length > 1) {
+                    optionLabel = `${pName} (${matches.length} records: ${matches
+                      .map((m) => m.gstin || m.pan || m.phone || m.address || m.partyType)
+                      .filter(Boolean)
+                      .join(' / ')})`;
+                  }
+                  return (
+                    <option key={pName} value={pName}>
+                      {optionLabel}
+                    </option>
+                  );
+                })}
               </select>
               {selectedPartyLedger !== 'ALL' && (
                 <button
@@ -2401,6 +2416,26 @@ const ReportsMisModuleInner: React.FC<ReportsMisModuleProps> = ({
               </button>
             </div>
           </div>
+
+          {selectedPartyLedger !== 'ALL' && (() => {
+            const matchedParties = parties.filter(
+              (p) => p.name.trim().toLowerCase() === selectedPartyLedger.trim().toLowerCase()
+            );
+            if (matchedParties.length === 0) return null;
+            return (
+              <div className="grid grid-cols-1 md:grid-cols-2 gap-2">
+                {matchedParties.map((mp) => (
+                  <EntityQuickPreviewCard
+                    key={mp.id}
+                    kind="party"
+                    party={mp}
+                    duplicateCount={matchedParties.length}
+                    compact
+                  />
+                ))}
+              </div>
+            );
+          })()}
 
           {selectedPartyLedger === 'ALL' ? (
             <div className="bg-white rounded-xl border border-slate-200 shadow-sm overflow-hidden">

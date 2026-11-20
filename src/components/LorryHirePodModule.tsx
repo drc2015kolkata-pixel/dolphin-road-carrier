@@ -28,6 +28,7 @@ import {
   Party,
   StaffAccount,
   StaffCommissionEntry,
+  Vehicle,
 } from '../types/erp';
 import { formatDateDDMMYYYY, formatINR, makeSafeDocId, normalizeFyLabel, todayISO } from '../lib/formatters';
 import { scanPODDocument } from '../lib/ocrEngine';
@@ -38,6 +39,12 @@ import { useDebouncedValue } from '../hooks/useDebounce';
 import { PaginatedDataTable, TableColumn } from './PaginatedDataTable';
 import { StaffCommissionModule } from './StaffCommissionModule';
 import { CameraPodQrScannerModal } from './CameraPodQrScannerModal';
+import {
+  EntityQuickPreviewCard,
+  formatPartyDetailsLine,
+  formatVehicleDetailsLine,
+  RichEntityPicker,
+} from './RichEntityPicker';
 
 interface LorryHirePodModuleProps {
   ownerUid: string;
@@ -50,6 +57,7 @@ interface LorryHirePodModuleProps {
   lorryHires: LorryHire[];
   consignments: ConsignmentNote[];
   parties?: Party[];
+  vehicles?: Vehicle[];
   staffAccounts?: StaffAccount[];
   staffCommissions?: StaffCommissionEntry[];
   company?: CompanySettings;
@@ -118,6 +126,7 @@ const LorryHirePodModuleInner: React.FC<LorryHirePodModuleProps> = ({
   lorryHires,
   consignments,
   parties = [],
+  vehicles = [],
   staffAccounts = [],
   staffCommissions = [],
   company,
@@ -158,13 +167,13 @@ const LorryHirePodModuleInner: React.FC<LorryHirePodModuleProps> = ({
     return Array.from(new Set([...base, ...partyBanks]));
   }, [effectiveCompany.bankName, effectiveCompany.bankBranch, parties]);
 
-  const brokerOptions = useMemo(
-    () => parties.filter((p) => p.partyType === 'Broker').map((p) => p.name),
+  const brokerParties = useMemo(
+    () => parties.filter((p) => p.partyType === 'Broker'),
     [parties]
   );
 
-  const ownerOptions = useMemo(
-    () => parties.filter((p) => p.partyType === 'TruckOwner').map((p) => p.name),
+  const ownerParties = useMemo(
+    () => parties.filter((p) => p.partyType === 'TruckOwner'),
     [parties]
   );
 
@@ -174,8 +183,11 @@ const LorryHirePodModuleInner: React.FC<LorryHirePodModuleProps> = ({
   const [cnNo, setCnNo] = useState('');
   const [cnDate, setCnDate] = useState(todayISO());
   const [truckNo, setTruckNo] = useState('');
+  const [selectedVehicleId, setSelectedVehicleId] = useState('');
   const [ownerName, setOwnerName] = useState('');
+  const [selectedOwnerId, setSelectedOwnerId] = useState('');
   const [brokerName, setBrokerName] = useState('');
+  const [selectedBrokerId, setSelectedBrokerId] = useState('');
   const [fromCity, setFromCity] = useState('KOLKATA');
   const [toCity, setToCity] = useState('');
   const [bookedPkgs, setBookedPkgs] = useState('');
@@ -312,8 +324,11 @@ const LorryHirePodModuleInner: React.FC<LorryHirePodModuleProps> = ({
     setCnNo('');
     setCnDate(todayISO());
     setTruckNo('');
+    setSelectedVehicleId('');
     setOwnerName('');
+    setSelectedOwnerId('');
     setBrokerName('');
+    setSelectedBrokerId('');
     setFromCity('KOLKATA');
     setToCity('');
     setBookedPkgs('');
@@ -951,54 +966,168 @@ const LorryHirePodModuleInner: React.FC<LorryHirePodModuleProps> = ({
             </div>
             <div>
               <label className="block font-semibold text-slate-700 mb-1">Truck No *</label>
-              <input
-                type="text"
-                required
+              <RichEntityPicker<Vehicle>
+                ariaLabel="Lorry Hire Truck No"
                 value={truckNo}
-                onChange={(e) => {
-                  const val = e.target.value.toUpperCase();
+                selectedId={selectedVehicleId}
+                onChangeText={(nextText) => {
+                  const val = nextText.toUpperCase();
                   setTruckNo(val);
-                  applyHireSmartAutoFill(val, ownerName, toCity);
+                  const matches = vehicles.filter(
+                    (v) => v.truckNo.trim().toUpperCase() === val.trim()
+                  );
+                  if (matches.length === 1) {
+                    const v = matches[0];
+                    setSelectedVehicleId(v.id);
+                    if (v.ownerName && !ownerName.trim()) {
+                      setOwnerName(v.ownerName);
+                    }
+                    applyHireSmartAutoFill(val, v.ownerName || ownerName, toCity);
+                  } else {
+                    setSelectedVehicleId('');
+                    applyHireSmartAutoFill(val, ownerName, toCity);
+                  }
                 }}
-                placeholder="WB51B0800"
-                className="w-full px-2.5 py-1.5 rounded border border-slate-300 font-mono-num uppercase"
+                onSelectEntity={(v) => {
+                  const upper = v.truckNo.toUpperCase();
+                  setTruckNo(upper);
+                  setSelectedVehicleId(v.id);
+                  const nextOwner = v.ownerName || ownerName;
+                  if (v.ownerName) {
+                    setOwnerName(v.ownerName);
+                    const om = ownerParties.filter(
+                      (p) => p.name.trim().toLowerCase() === v.ownerName.trim().toLowerCase()
+                    );
+                    setSelectedOwnerId(om.length === 1 ? om[0].id : '');
+                  }
+                  applyHireSmartAutoFill(upper, nextOwner, toCity);
+                }}
+                items={vehicles}
+                getId={(v) => v.id}
+                getValue={(v) => v.truckNo}
+                getSearchText={(v) =>
+                  `${v.truckNo} ${v.ownerName || ''} ${v.vehicleType || ''} ${v.ownerPhone || ''}`
+                }
+                renderTitle={(v) => v.truckNo}
+                renderBadge={(v) => v.vehicleType || 'Truck'}
+                renderDetails={(v) => formatVehicleDetailsLine(v)}
+                placeholder="WB51B0800 — Search Truck, Owner or Type..."
+                required
+                uppercase
+                inputClassName="font-mono-num"
+                quickPreview={(() => {
+                  const clean = truckNo.trim().toUpperCase();
+                  if (!clean) return null;
+                  const resolved =
+                    (selectedVehicleId
+                      ? vehicles.find((v) => v.id === selectedVehicleId)
+                      : undefined) ||
+                    vehicles.find((v) => v.truckNo.trim().toUpperCase() === clean);
+                  return <EntityQuickPreviewCard kind="vehicle" vehicle={resolved} />;
+                })()}
               />
             </div>
             <div>
               <label className="block font-semibold text-slate-700 mb-1">Lorry Owner</label>
-              <input
-                type="text"
-                list="hire-owner-list"
+              <RichEntityPicker<Party>
+                ariaLabel="Lorry Owner"
                 value={ownerName}
-                onChange={(e) => {
-                  const val = e.target.value;
+                selectedId={selectedOwnerId}
+                onChangeText={(val) => {
                   setOwnerName(val);
+                  const matches = ownerParties.filter(
+                    (o) => o.name.trim().toLowerCase() === val.trim().toLowerCase()
+                  );
+                  setSelectedOwnerId(matches.length === 1 ? matches[0].id : '');
                   applyHireSmartAutoFill(truckNo, val, toCity);
                 }}
-                placeholder="Owner Name"
-                className="w-full px-2.5 py-1.5 rounded border border-slate-300"
+                onSelectEntity={(o) => {
+                  setOwnerName(o.name);
+                  setSelectedOwnerId(o.id);
+                  applyHireSmartAutoFill(truckNo, o.name, toCity);
+                }}
+                items={ownerParties}
+                getId={(o) => o.id}
+                getValue={(o) => o.name}
+                getSearchText={(o) =>
+                  `${o.name} ${o.pan || ''} ${o.phone || ''} ${o.address || ''}`
+                }
+                renderTitle={(o) => o.name}
+                renderBadge={(o) => o.partyType}
+                renderDetails={(o) => formatPartyDetailsLine(o)}
+                placeholder="Search Owner by Name, PAN, Mobile or City..."
+                quickPreview={(() => {
+                  const clean = ownerName.trim().toLowerCase();
+                  if (!clean) return null;
+                  const matches = ownerParties.filter(
+                    (o) => o.name.trim().toLowerCase() === clean
+                  );
+                  const resolved =
+                    (selectedOwnerId
+                      ? ownerParties.find((o) => o.id === selectedOwnerId)
+                      : undefined) ||
+                    (matches.length === 1 ? matches[0] : matches[0]);
+                  return (
+                    <EntityQuickPreviewCard
+                      kind="owner"
+                      party={resolved}
+                      duplicateCount={matches.length}
+                      ambiguousSelected={matches.length > 1 && !selectedOwnerId}
+                      compact
+                    />
+                  );
+                })()}
               />
-              <datalist id="hire-owner-list">
-                {ownerOptions.map((o) => (
-                  <option key={o} value={o} />
-                ))}
-              </datalist>
             </div>
             <div>
               <label className="block font-semibold text-slate-700 mb-1">Broker (Optional)</label>
-              <input
-                type="text"
-                list="hire-broker-list"
+              <RichEntityPicker<Party>
+                ariaLabel="Broker (Optional)"
                 value={brokerName}
-                onChange={(e) => setBrokerName(e.target.value)}
-                placeholder="Broker / Transport Agent"
-                className="w-full px-2.5 py-1.5 rounded border border-slate-300"
+                selectedId={selectedBrokerId}
+                onChangeText={(val) => {
+                  setBrokerName(val);
+                  const matches = brokerParties.filter(
+                    (b) => b.name.trim().toLowerCase() === val.trim().toLowerCase()
+                  );
+                  setSelectedBrokerId(matches.length === 1 ? matches[0].id : '');
+                }}
+                onSelectEntity={(b) => {
+                  setBrokerName(b.name);
+                  setSelectedBrokerId(b.id);
+                }}
+                items={brokerParties}
+                getId={(b) => b.id}
+                getValue={(b) => b.name}
+                getSearchText={(b) =>
+                  `${b.name} ${b.pan || ''} ${b.phone || ''} ${b.address || ''}`
+                }
+                renderTitle={(b) => b.name}
+                renderBadge={(b) => b.partyType}
+                renderDetails={(b) => formatPartyDetailsLine(b)}
+                placeholder="Search Broker by Name, PAN, Mobile or City..."
+                quickPreview={(() => {
+                  const clean = brokerName.trim().toLowerCase();
+                  if (!clean) return null;
+                  const matches = brokerParties.filter(
+                    (b) => b.name.trim().toLowerCase() === clean
+                  );
+                  const resolved =
+                    (selectedBrokerId
+                      ? brokerParties.find((b) => b.id === selectedBrokerId)
+                      : undefined) ||
+                    (matches.length === 1 ? matches[0] : matches[0]);
+                  return (
+                    <EntityQuickPreviewCard
+                      kind="broker"
+                      party={resolved}
+                      duplicateCount={matches.length}
+                      ambiguousSelected={matches.length > 1 && !selectedBrokerId}
+                      compact
+                    />
+                  );
+                })()}
               />
-              <datalist id="hire-broker-list">
-                {brokerOptions.map((b) => (
-                  <option key={b} value={b} />
-                ))}
-              </datalist>
             </div>
 
             <div>

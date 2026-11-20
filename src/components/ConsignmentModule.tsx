@@ -60,7 +60,15 @@ import { useDebouncedValue } from '../hooks/useDebounce';
 import { PaginatedDataTable, TableColumn } from './PaginatedDataTable';
 import { EditableSearchSelect, YesNoSelect } from './EditableSearchSelect';
 import { downloadNicPartBJson, getEwayBillExpiryState, ParsedQrPayload } from '../lib/ewayBillUtils';
+import { filterBillingCustomerParties } from '../lib/partySeparation';
 import { CameraPodQrScannerModal } from './CameraPodQrScannerModal';
+import {
+  EntityQuickPreviewCard,
+  formatDriverDetailsLine,
+  formatPartyDetailsLine,
+  formatVehicleDetailsLine,
+  RichEntityPicker,
+} from './RichEntityPicker';
 
 interface ConsignmentModuleProps {
   ownerUid: string;
@@ -133,14 +141,17 @@ const ConsignmentModuleInner: React.FC<ConsignmentModuleProps> = ({
 
   // Mandatory Billing Party & Credit Days Lock
   const [billingPartyName, setBillingPartyName] = useState('');
+  const [selectedBillingPartyId, setSelectedBillingPartyId] = useState('');
   const [creditDaysOption, setCreditDaysOption] = useState<string>('');
   const [customCreditDays, setCustomCreditDays] = useState<string>('');
   const [validationError, setValidationError] = useState<string | null>(null);
 
   const [consignorName, setConsignorName] = useState('');
+  const [selectedConsignorId, setSelectedConsignorId] = useState('');
   const [consignorAddress, setConsignorAddress] = useState('');
   const [consignorGstin, setConsignorGstin] = useState('');
   const [consigneeName, setConsigneeName] = useState('');
+  const [selectedConsigneeId, setSelectedConsigneeId] = useState('');
   const [consigneeAddress, setConsigneeAddress] = useState('');
   const [consigneeGstin, setConsigneeGstin] = useState('');
   const [packages, setPackages] = useState('');
@@ -175,6 +186,7 @@ const ConsignmentModuleInner: React.FC<ConsignmentModuleProps> = ({
   const [extraVehicles, setExtraVehicles] = useState<string[]>([]);
   const [valueOfGoods, setValueOfGoods] = useState('0');
   const [truckNo, setTruckNo] = useState('');
+  const [selectedVehicleId, setSelectedVehicleId] = useState('');
 
   // All-India Geo Cascade (State with GST code -> District -> Place/City)
   const [fromState, setFromState] = useState('19 - West Bengal');
@@ -187,7 +199,9 @@ const ConsignmentModuleInner: React.FC<ConsignmentModuleProps> = ({
   const [engineNo, setEngineNo] = useState('');
   const [chassisNo, setChassisNo] = useState('');
   const [ownerName, setOwnerName] = useState('');
+  const [selectedOwnerId, setSelectedOwnerId] = useState('');
   const [driverName, setDriverName] = useState('');
+  const [selectedDriverId, setSelectedDriverId] = useState('');
   const [driverDlNo, setDriverDlNo] = useState('');
   const [gstPaidBy, setGstPaidBy] = useState('Consignee');
   const [insuranceStatus] = useState('The Customer has not insured the consignment');
@@ -219,12 +233,23 @@ const ConsignmentModuleInner: React.FC<ConsignmentModuleProps> = ({
     [company, toState]
   );
   const creditDayPresets = useMemo(() => getEffectiveCreditDayPresets(company), [company]);
-  const partyNameOptions = useMemo(() => {
-    const set = new Set<string>(parties.map((p) => p.name).filter(Boolean));
-    if (consignorName.trim()) set.add(consignorName.trim());
-    if (consigneeName.trim()) set.add(consigneeName.trim());
-    return Array.from(set);
-  }, [parties, consignorName, consigneeName]);
+  const billingCustomerParties = useMemo(
+    () => filterBillingCustomerParties({ parties, drivers, consignments }),
+    [parties, drivers, consignments]
+  );
+  const ownerAndBrokerParties = useMemo(
+    () =>
+      [...parties]
+        .filter((p) => p.partyType === 'TruckOwner' || p.partyType === 'Broker')
+        .sort((a, b) =>
+          a.partyType === b.partyType
+            ? a.name.localeCompare(b.name)
+            : a.partyType === 'TruckOwner'
+              ? -1
+              : 1
+        ),
+    [parties]
+  );
 
   const resolvedCreditDays = useMemo(() => {
     if (!creditDaysOption) return 0;
@@ -517,34 +542,55 @@ const ConsignmentModuleInner: React.FC<ConsignmentModuleProps> = ({
     [consignments, creditDaysOption, creditDayPresets, deliveryOffice, particulars, totalFreight]
   );
 
+  const handleSelectConsignorEntity = (found: Party) => {
+    setConsignorName(found.name);
+    setSelectedConsignorId(found.id);
+    setConsignorAddress(found.address || '');
+    setConsignorGstin(found.gstin || '');
+    applyRouteSmartAutoFill(billingPartyName || found.name, toCity);
+  };
+
   const handleSelectConsignor = (name: string) => {
     setConsignorName(name);
-    const found = parties.find((p) => p.name.toLowerCase() === name.toLowerCase());
-    if (found) {
-      setConsignorAddress(found.address || '');
-      setConsignorGstin(found.gstin || '');
+    const clean = name.trim().toLowerCase();
+    const matches = billingCustomerParties.filter((p) => p.name.trim().toLowerCase() === clean);
+    if (matches.length === 1) {
+      handleSelectConsignorEntity(matches[0]);
+      return;
     }
+    setSelectedConsignorId('');
     applyRouteSmartAutoFill(billingPartyName || name, toCity);
+  };
+
+  const handleSelectConsigneeEntity = (found: Party) => {
+    setConsigneeName(found.name);
+    setSelectedConsigneeId(found.id);
+    setConsigneeAddress(found.address || '');
+    setConsigneeGstin(found.gstin || '');
   };
 
   const handleSelectConsignee = (name: string) => {
     setConsigneeName(name);
-    const found = parties.find((p) => p.name.toLowerCase() === name.toLowerCase());
-    if (found) {
-      setConsigneeAddress(found.address || '');
-      setConsigneeGstin(found.gstin || '');
+    const clean = name.trim().toLowerCase();
+    const matches = billingCustomerParties.filter((p) => p.name.trim().toLowerCase() === clean);
+    if (matches.length === 1) {
+      handleSelectConsigneeEntity(matches[0]);
+      return;
     }
+    setSelectedConsigneeId('');
   };
 
-  const handleSelectVehicle = (tNo: string) => {
-    const upper = tNo.toUpperCase();
+  const handleSelectVehicleEntity = (found: Vehicle) => {
+    const upper = found.truckNo.toUpperCase();
     setTruckNo(upper);
-    const found = vehicles.find((v) => v.truckNo.toUpperCase() === upper);
-    if (found) {
-      setEngineNo(found.engineNo || '');
-      setChassisNo(found.chassisNo || '');
-      setOwnerName(found.ownerName || '');
-    }
+    setSelectedVehicleId(found.id);
+    setEngineNo(found.engineNo || '');
+    setChassisNo(found.chassisNo || '');
+    setOwnerName(found.ownerName || '');
+    const ownerMatches = ownerAndBrokerParties.filter(
+      (p) => p.name.trim().toLowerCase() === (found.ownerName || '').trim().toLowerCase()
+    );
+    setSelectedOwnerId(ownerMatches.length === 1 ? ownerMatches[0].id : '');
     const lastTrip = [...consignments]
       .filter((c) => c.truckNo?.toUpperCase() === upper)
       .sort((a, b) => (b.cnDate || '').localeCompare(a.cnDate || ''))[0];
@@ -554,12 +600,39 @@ const ConsignmentModuleInner: React.FC<ConsignmentModuleProps> = ({
     }
   };
 
+  const handleSelectVehicle = (tNo: string) => {
+    const upper = tNo.toUpperCase();
+    setTruckNo(upper);
+    const matches = vehicles.filter((v) => v.truckNo.trim().toUpperCase() === upper.trim());
+    if (matches.length === 1) {
+      handleSelectVehicleEntity(matches[0]);
+      return;
+    }
+    setSelectedVehicleId('');
+    const lastTrip = [...consignments]
+      .filter((c) => c.truckNo?.toUpperCase() === upper.trim())
+      .sort((a, b) => (b.cnDate || '').localeCompare(a.cnDate || ''))[0];
+    if (lastTrip) {
+      if (!driverName.trim() && lastTrip.driverName) setDriverName(lastTrip.driverName);
+      if (!driverDlNo.trim() && lastTrip.driverDlNo) setDriverDlNo(lastTrip.driverDlNo);
+    }
+  };
+
+  const handleSelectDriverEntity = (found: Driver) => {
+    setDriverName(found.name);
+    setSelectedDriverId(found.id);
+    setDriverDlNo(found.dlNo || '');
+  };
+
   const handleSelectDriver = (name: string) => {
     setDriverName(name);
-    const found = drivers.find((d) => d.name.toLowerCase() === name.toLowerCase());
-    if (found) {
-      setDriverDlNo(found.dlNo || '');
+    const clean = name.trim().toLowerCase();
+    const matches = drivers.filter((d) => d.name.trim().toLowerCase() === clean);
+    if (matches.length === 1) {
+      handleSelectDriverEntity(matches[0]);
+      return;
     }
+    setSelectedDriverId('');
   };
 
   const handleAddBillingPartyOption = async (partyName: string) => {
@@ -597,13 +670,16 @@ const ConsignmentModuleInner: React.FC<ConsignmentModuleProps> = ({
     setDeliveryOffice('');
     setStockTransfer(false);
     setBillingPartyName('');
+    setSelectedBillingPartyId('');
     setCreditDaysOption('');
     setCustomCreditDays('');
     setValidationError(null);
     setConsignorName('');
+    setSelectedConsignorId('');
     setConsignorAddress('');
     setConsignorGstin('');
     setConsigneeName('');
+    setSelectedConsigneeId('');
     setConsigneeAddress('');
     setConsigneeGstin('');
     setPackages('');
@@ -634,6 +710,7 @@ const ConsignmentModuleInner: React.FC<ConsignmentModuleProps> = ({
     setExtraVehicles([]);
     setValueOfGoods('0');
     setTruckNo('');
+    setSelectedVehicleId('');
     setFromState('19 - West Bengal');
     setFromDistrict('Kolkata');
     setFromCity('KOLKATA');
@@ -643,7 +720,9 @@ const ConsignmentModuleInner: React.FC<ConsignmentModuleProps> = ({
     setEngineNo('');
     setChassisNo('');
     setOwnerName('');
+    setSelectedOwnerId('');
     setDriverName('');
+    setSelectedDriverId('');
     setDriverDlNo('');
     setGstPaidBy('Consignee');
     setRemarks('');
@@ -1233,13 +1312,15 @@ const ConsignmentModuleInner: React.FC<ConsignmentModuleProps> = ({
               <label className="font-bold text-slate-900">
                 Mandatory Billing Party * <span className="text-[10px] text-amber-800">(Required before Save / Billing)</span>
               </label>
-              <div className="flex gap-1.5">
+              <div className="flex flex-wrap gap-1.5">
                 {consignorName.trim() && (
                   <button
                     type="button"
                     onClick={() => {
                       setBillingPartyName(consignorName.trim());
+                      setSelectedBillingPartyId(selectedConsignorId);
                       setValidationError(null);
+                      applyRouteSmartAutoFill(consignorName.trim(), toCity);
                     }}
                     className="px-2 py-0.5 rounded bg-white border border-amber-300 hover:bg-amber-100 text-[10px] font-bold text-amber-900 cursor-pointer"
                   >
@@ -1251,28 +1332,79 @@ const ConsignmentModuleInner: React.FC<ConsignmentModuleProps> = ({
                     type="button"
                     onClick={() => {
                       setBillingPartyName(consigneeName.trim());
+                      setSelectedBillingPartyId(selectedConsigneeId);
                       setValidationError(null);
+                      applyRouteSmartAutoFill(consigneeName.trim(), toCity);
                     }}
                     className="px-2 py-0.5 rounded bg-white border border-amber-300 hover:bg-amber-100 text-[10px] font-bold text-amber-900 cursor-pointer"
                   >
                     Use Consignee
                   </button>
                 )}
+                {billingPartyName.trim() &&
+                  !parties.some(
+                    (p) => p.name.trim().toLowerCase() === billingPartyName.trim().toLowerCase()
+                  ) && (
+                    <button
+                      type="button"
+                      onClick={() => handleAddBillingPartyOption(billingPartyName)}
+                      className="px-2 py-0.5 rounded bg-emerald-600 hover:bg-emerald-700 text-[10px] font-bold text-white cursor-pointer"
+                    >
+                      + Save to Customer Master
+                    </button>
+                  )}
               </div>
             </div>
-            <EditableSearchSelect
+            <RichEntityPicker<Party>
               ariaLabel="Mandatory Billing Party"
               value={billingPartyName}
-              onChange={(val) => {
+              selectedId={selectedBillingPartyId}
+              onChangeText={(val) => {
                 setBillingPartyName(val);
+                const matches = billingCustomerParties.filter(
+                  (p) => p.name.trim().toLowerCase() === val.trim().toLowerCase()
+                );
+                setSelectedBillingPartyId(matches.length === 1 ? matches[0].id : '');
                 if (val.trim()) setValidationError(null);
                 applyRouteSmartAutoFill(val, toCity);
               }}
-              options={partyNameOptions}
-              placeholder="Select or search Billing Party (or click + Edit to add new)..."
-              allowFreeInput
+              onSelectEntity={(p) => {
+                setBillingPartyName(p.name);
+                setSelectedBillingPartyId(p.id);
+                setValidationError(null);
+                applyRouteSmartAutoFill(p.name, toCity);
+              }}
+              items={billingCustomerParties}
+              getId={(p) => p.id}
+              getValue={(p) => p.name}
+              getSearchText={(p) =>
+                `${p.name} ${p.gstin || ''} ${p.pan || ''} ${p.address || ''} ${p.phone || ''}`
+              }
+              renderTitle={(p) => p.name}
+              renderBadge={(p) => p.partyType}
+              renderDetails={(p) => formatPartyDetailsLine(p)}
+              placeholder="Search Customer by Name, GSTIN, City, Address or Phone..."
               inputClassName={!billingPartyName.trim() ? 'border-amber-400' : 'border-emerald-400'}
-              onAddOption={handleAddBillingPartyOption}
+              quickPreview={(() => {
+                const clean = billingPartyName.trim().toLowerCase();
+                if (!clean) return null;
+                const matches = billingCustomerParties.filter(
+                  (p) => p.name.trim().toLowerCase() === clean
+                );
+                const resolved =
+                  (selectedBillingPartyId
+                    ? billingCustomerParties.find((p) => p.id === selectedBillingPartyId)
+                    : undefined) ||
+                  (matches.length === 1 ? matches[0] : matches[0]);
+                return (
+                  <EntityQuickPreviewCard
+                    kind="party"
+                    party={resolved}
+                    duplicateCount={matches.length}
+                    ambiguousSelected={matches.length > 1 && !selectedBillingPartyId}
+                  />
+                );
+              })()}
             />
           </div>
 
@@ -1368,13 +1500,44 @@ const ConsignmentModuleInner: React.FC<ConsignmentModuleProps> = ({
 
           <div>
             <label className="block font-semibold text-slate-700 mb-1">Consignor Name *</label>
-            <input
-              type="text"
-              required
-              list="cn-party-list"
+            <RichEntityPicker<Party>
+              ariaLabel="Consignor Name"
               value={consignorName}
-              onChange={(e) => handleSelectConsignor(e.target.value)}
-              className="w-full px-2.5 py-1.5 rounded border border-slate-300"
+              selectedId={selectedConsignorId}
+              onChangeText={(val) => handleSelectConsignor(val)}
+              onSelectEntity={(p) => handleSelectConsignorEntity(p)}
+              items={billingCustomerParties}
+              getId={(p) => p.id}
+              getValue={(p) => p.name}
+              getSearchText={(p) =>
+                `${p.name} ${p.gstin || ''} ${p.pan || ''} ${p.address || ''} ${p.phone || ''}`
+              }
+              renderTitle={(p) => p.name}
+              renderBadge={(p) => p.partyType}
+              renderDetails={(p) => formatPartyDetailsLine(p)}
+              placeholder="Search Consignor by Name, GSTIN, City or Phone..."
+              required
+              quickPreview={(() => {
+                const clean = consignorName.trim().toLowerCase();
+                if (!clean) return null;
+                const matches = billingCustomerParties.filter(
+                  (p) => p.name.trim().toLowerCase() === clean
+                );
+                const resolved =
+                  (selectedConsignorId
+                    ? billingCustomerParties.find((p) => p.id === selectedConsignorId)
+                    : undefined) ||
+                  (matches.length === 1 ? matches[0] : matches[0]);
+                return (
+                  <EntityQuickPreviewCard
+                    kind="party"
+                    party={resolved}
+                    duplicateCount={matches.length}
+                    ambiguousSelected={matches.length > 1 && !selectedConsignorId}
+                    compact
+                  />
+                );
+              })()}
             />
           </div>
           <div>
@@ -1398,13 +1561,44 @@ const ConsignmentModuleInner: React.FC<ConsignmentModuleProps> = ({
 
           <div>
             <label className="block font-semibold text-slate-700 mb-1">Consignee Name *</label>
-            <input
-              type="text"
-              required
-              list="cn-party-list"
+            <RichEntityPicker<Party>
+              ariaLabel="Consignee Name"
               value={consigneeName}
-              onChange={(e) => handleSelectConsignee(e.target.value)}
-              className="w-full px-2.5 py-1.5 rounded border border-slate-300"
+              selectedId={selectedConsigneeId}
+              onChangeText={(val) => handleSelectConsignee(val)}
+              onSelectEntity={(p) => handleSelectConsigneeEntity(p)}
+              items={billingCustomerParties}
+              getId={(p) => p.id}
+              getValue={(p) => p.name}
+              getSearchText={(p) =>
+                `${p.name} ${p.gstin || ''} ${p.pan || ''} ${p.address || ''} ${p.phone || ''}`
+              }
+              renderTitle={(p) => p.name}
+              renderBadge={(p) => p.partyType}
+              renderDetails={(p) => formatPartyDetailsLine(p)}
+              placeholder="Search Consignee by Name, GSTIN, City or Phone..."
+              required
+              quickPreview={(() => {
+                const clean = consigneeName.trim().toLowerCase();
+                if (!clean) return null;
+                const matches = billingCustomerParties.filter(
+                  (p) => p.name.trim().toLowerCase() === clean
+                );
+                const resolved =
+                  (selectedConsigneeId
+                    ? billingCustomerParties.find((p) => p.id === selectedConsigneeId)
+                    : undefined) ||
+                  (matches.length === 1 ? matches[0] : matches[0]);
+                return (
+                  <EntityQuickPreviewCard
+                    kind="party"
+                    party={resolved}
+                    duplicateCount={matches.length}
+                    ambiguousSelected={matches.length > 1 && !selectedConsigneeId}
+                    compact
+                  />
+                );
+              })()}
             />
           </div>
           <div>
@@ -1425,12 +1619,6 @@ const ConsignmentModuleInner: React.FC<ConsignmentModuleProps> = ({
               className="w-full px-2.5 py-1.5 rounded border border-slate-300 font-mono-num"
             />
           </div>
-
-          <datalist id="cn-party-list">
-            {parties.map((p) => (
-              <option key={p.id} value={p.name} />
-            ))}
-          </datalist>
 
           {/* All-India + Cross-Border Route Cascade (Origin & Destination States / Districts) */}
           <div className="md:col-span-3 p-3 rounded-lg bg-blue-50/50 border border-blue-200 grid grid-cols-1 md:grid-cols-6 gap-2.5">
@@ -1550,20 +1738,36 @@ const ConsignmentModuleInner: React.FC<ConsignmentModuleProps> = ({
                 />
               </div>
             </div>
-            <input
-              type="text"
-              required
-              list="cn-vehicle-list"
+            <RichEntityPicker<Vehicle>
+              ariaLabel="Primary Truck No"
               value={truckNo}
-              onChange={(e) => handleSelectVehicle(e.target.value)}
-              placeholder="WB51B0800"
-              className="w-full px-2.5 py-1.5 rounded border border-slate-300 font-mono-num uppercase"
+              selectedId={selectedVehicleId}
+              onChangeText={(val) => handleSelectVehicle(val)}
+              onSelectEntity={(v) => handleSelectVehicleEntity(v)}
+              items={vehicles}
+              getId={(v) => v.id}
+              getValue={(v) => v.truckNo}
+              getSearchText={(v) =>
+                `${v.truckNo} ${v.ownerName || ''} ${v.vehicleType || ''} ${v.ownerPhone || ''}`
+              }
+              renderTitle={(v) => v.truckNo}
+              renderBadge={(v) => v.vehicleType || 'Truck'}
+              renderDetails={(v) => formatVehicleDetailsLine(v)}
+              placeholder="WB51B0800 — Search Truck, Owner or Capacity..."
+              required
+              uppercase
+              inputClassName="font-mono-num"
+              quickPreview={(() => {
+                const clean = truckNo.trim().toUpperCase();
+                if (!clean) return null;
+                const resolved =
+                  (selectedVehicleId
+                    ? vehicles.find((v) => v.id === selectedVehicleId)
+                    : undefined) ||
+                  vehicles.find((v) => v.truckNo.trim().toUpperCase() === clean);
+                return <EntityQuickPreviewCard kind="vehicle" vehicle={resolved} />;
+              })()}
             />
-            <datalist id="cn-vehicle-list">
-              {vehicles.map((v) => (
-                <option key={v.id} value={v.truckNo} />
-              ))}
-            </datalist>
           </div>
 
           <div>
@@ -1829,27 +2033,89 @@ const ConsignmentModuleInner: React.FC<ConsignmentModuleProps> = ({
 
           <div>
             <label className="block font-semibold text-slate-700 mb-1">Owner Name</label>
-            <input
-              type="text"
+            <RichEntityPicker<Party>
+              ariaLabel="Owner Name"
               value={ownerName}
-              onChange={(e) => setOwnerName(e.target.value)}
-              className="w-full px-2.5 py-1.5 rounded border border-slate-300"
+              selectedId={selectedOwnerId}
+              onChangeText={(val) => {
+                setOwnerName(val);
+                const clean = val.trim().toLowerCase();
+                const matches = ownerAndBrokerParties.filter(
+                  (p) => p.name.trim().toLowerCase() === clean
+                );
+                setSelectedOwnerId(matches.length === 1 ? matches[0].id : '');
+              }}
+              onSelectEntity={(p) => {
+                setOwnerName(p.name);
+                setSelectedOwnerId(p.id);
+              }}
+              items={ownerAndBrokerParties}
+              getId={(p) => p.id}
+              getValue={(p) => p.name}
+              getSearchText={(p) =>
+                `${p.name} ${p.pan || ''} ${p.phone || ''} ${p.address || ''} ${p.partyType}`
+              }
+              renderTitle={(p) => p.name}
+              renderBadge={(p) => p.partyType}
+              renderDetails={(p) => formatPartyDetailsLine(p)}
+              placeholder="Search Lorry Owner / Broker by Name, PAN, Mobile or City..."
+              quickPreview={(() => {
+                const clean = ownerName.trim().toLowerCase();
+                if (!clean) return null;
+                const matches = ownerAndBrokerParties.filter(
+                  (p) => p.name.trim().toLowerCase() === clean
+                );
+                const resolved =
+                  (selectedOwnerId
+                    ? ownerAndBrokerParties.find((p) => p.id === selectedOwnerId)
+                    : undefined) ||
+                  (matches.length === 1 ? matches[0] : matches[0]);
+                return (
+                  <EntityQuickPreviewCard
+                    kind="owner"
+                    party={resolved}
+                    duplicateCount={matches.length}
+                    ambiguousSelected={matches.length > 1 && !selectedOwnerId}
+                    compact
+                  />
+                );
+              })()}
             />
           </div>
           <div>
             <label className="block font-semibold text-slate-700 mb-1">Driver Name</label>
-            <input
-              type="text"
-              list="cn-driver-list"
+            <RichEntityPicker<Driver>
+              ariaLabel="Driver Name"
               value={driverName}
-              onChange={(e) => handleSelectDriver(e.target.value)}
-              className="w-full px-2.5 py-1.5 rounded border border-slate-300"
+              selectedId={selectedDriverId}
+              onChangeText={(val) => handleSelectDriver(val)}
+              onSelectEntity={(d) => handleSelectDriverEntity(d)}
+              items={drivers}
+              getId={(d) => d.id}
+              getValue={(d) => d.name}
+              getSearchText={(d) => `${d.name} ${d.dlNo || ''} ${d.phone || ''}`}
+              renderTitle={(d) => d.name}
+              renderDetails={(d) => formatDriverDetailsLine(d)}
+              placeholder="Search Driver by Name, D/L No or Mobile..."
+              quickPreview={(() => {
+                const clean = driverName.trim().toLowerCase();
+                if (!clean) return null;
+                const matches = drivers.filter((d) => d.name.trim().toLowerCase() === clean);
+                const resolved =
+                  (selectedDriverId
+                    ? drivers.find((d) => d.id === selectedDriverId)
+                    : undefined) ||
+                  (matches.length === 1 ? matches[0] : matches[0]);
+                return (
+                  <EntityQuickPreviewCard
+                    kind="driver"
+                    driver={resolved}
+                    duplicateCount={matches.length}
+                    compact
+                  />
+                );
+              })()}
             />
-            <datalist id="cn-driver-list">
-              {drivers.map((d) => (
-                <option key={d.id} value={d.name} />
-              ))}
-            </datalist>
           </div>
           <div>
             <label className="block font-semibold text-slate-700 mb-1">Driver D/L No</label>

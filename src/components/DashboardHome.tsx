@@ -46,6 +46,11 @@ import { buildAutomaticNarration, formatReferenceChain } from '../lib/paymentNar
 import { generateTableReportPDF, GeneratedPdfResult } from '../lib/pdfEngine';
 import { useDebouncedValue } from '../hooks/useDebounce';
 import { PaginatedDataTable, TableColumn } from './PaginatedDataTable';
+import {
+  EntityQuickPreviewCard,
+  formatPartyDetailsLine,
+  RichEntityPicker,
+} from './RichEntityPicker';
 
 interface DashboardHomeProps {
   ownerUid: string;
@@ -89,6 +94,7 @@ const DashboardHomeInner: React.FC<DashboardHomeProps> = ({
   const [txType, setTxType] = useState<'Income' | 'Expense'>('Income');
   const [ledgerAccount, setLedgerAccount] = useState('Customer A/c');
   const [partyName, setPartyName] = useState('');
+  const [selectedPartyId, setSelectedPartyId] = useState('');
   const [amount, setAmount] = useState('');
   const [txDate, setTxDate] = useState(todayISO());
   const [narration, setNarration] = useState('');
@@ -223,6 +229,7 @@ const DashboardHomeInner: React.FC<DashboardHomeProps> = ({
       });
 
       setPartyName('');
+      setSelectedPartyId('');
       setAmount('');
       setNarration('');
       setNarrationManual(false);
@@ -239,6 +246,7 @@ const DashboardHomeInner: React.FC<DashboardHomeProps> = ({
     setTxType('Income');
     setLedgerAccount('Customer A/c');
     setPartyName('');
+    setSelectedPartyId('');
     setAmount('');
     setTxDate(todayISO());
     setNarration('');
@@ -557,22 +565,57 @@ const DashboardHomeInner: React.FC<DashboardHomeProps> = ({
               </select>
             </div>
 
-            <div className="flex items-center gap-2">
-              <label className="w-28 text-slate-700 font-medium shrink-0">Party Name :</label>
-              <input
-                type="text"
-                list="drc-party-suggestions"
-                value={partyName}
-                onChange={(e) => setPartyName(e.target.value)}
-                placeholder="ABC Transport Ltd."
-                required
-                className="flex-1 px-2.5 py-1.5 rounded border border-slate-300 bg-white text-slate-900 focus:outline-none focus:ring-2 focus:ring-blue-600"
-              />
-              <datalist id="drc-party-suggestions">
-                {parties.map((p) => (
-                  <option key={p.id} value={p.name} />
-                ))}
-              </datalist>
+            <div className="flex items-start gap-2">
+              <label className="w-28 text-slate-700 font-medium shrink-0 pt-1.5">Party Name :</label>
+              <div className="flex-1 min-w-0">
+                <RichEntityPicker<Party>
+                  ariaLabel="Voucher Party Name"
+                  value={partyName}
+                  selectedId={selectedPartyId}
+                  onChangeText={(nextText) => {
+                    setPartyName(nextText);
+                    const matches = parties.filter(
+                      (p) => p.name.trim().toLowerCase() === nextText.trim().toLowerCase()
+                    );
+                    setSelectedPartyId(matches.length === 1 ? matches[0].id : '');
+                  }}
+                  onSelectEntity={(p) => {
+                    setPartyName(p.name);
+                    setSelectedPartyId(p.id);
+                  }}
+                  items={parties}
+                  getId={(p) => p.id}
+                  getValue={(p) => p.name}
+                  getSearchText={(p) =>
+                    `${p.name} ${p.gstin || ''} ${p.pan || ''} ${p.address || ''} ${p.phone || ''} ${p.partyType}`
+                  }
+                  renderTitle={(p) => p.name}
+                  renderBadge={(p) => p.partyType}
+                  renderDetails={(p) => formatPartyDetailsLine(p)}
+                  placeholder="Search Party by Name, GSTIN, PAN, City or Mobile..."
+                  required
+                  quickPreview={(() => {
+                    const clean = partyName.trim().toLowerCase();
+                    if (!clean) return null;
+                    const nameMatches = parties.filter(
+                      (p) => p.name.trim().toLowerCase() === clean
+                    );
+                    const resolved =
+                      (selectedPartyId ? parties.find((p) => p.id === selectedPartyId) : undefined) ||
+                      (nameMatches.length === 1 ? nameMatches[0] : undefined) ||
+                      nameMatches[0];
+                    return (
+                      <EntityQuickPreviewCard
+                        kind="party"
+                        party={resolved}
+                        duplicateCount={nameMatches.length}
+                        ambiguousSelected={nameMatches.length > 1 && !selectedPartyId}
+                        compact
+                      />
+                    );
+                  })()}
+                />
+              </div>
             </div>
 
             <div className="flex items-center gap-2">

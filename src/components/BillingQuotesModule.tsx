@@ -20,9 +20,11 @@ import {
   CompanySettings,
   ConsignmentNote,
   Declaration194C,
+  Driver,
   DriveFolderName,
   Invoice,
   InvoiceConsignmentRow,
+  LorryHire,
   Party,
   Quotation,
 } from '../types/erp';
@@ -49,7 +51,14 @@ import {
   reserveNextSerialNumber,
   upsertDocument,
 } from '../lib/firestoreStore';
-import { getEffectiveDropdownList } from '../lib/dropdownMasterStore';
+import {
+  ALL_INDIA_STATES_DISTRICTS,
+  getEffectiveDropdownList,
+} from '../lib/dropdownMasterStore';
+import {
+  filterBillingCustomerParties,
+  resolveGstStateCode,
+} from '../lib/partySeparation';
 import {
   PRIORITY_CORRIDOR_REGIONS,
   buildEmailShareHref,
@@ -60,6 +69,11 @@ import {
 } from '../lib/shareUtils';
 import { useDebouncedValue } from '../hooks/useDebounce';
 import { PaginatedDataTable, TableColumn } from './PaginatedDataTable';
+import {
+  EntityQuickPreviewCard,
+  formatPartyDetailsLine,
+  RichEntityPicker,
+} from './RichEntityPicker';
 
 interface BillingQuotesModuleProps {
   ownerUid: string;
@@ -77,6 +91,8 @@ interface BillingQuotesModuleProps {
   declarations: Declaration194C[];
   consignments: ConsignmentNote[];
   parties: Party[];
+  drivers?: Driver[];
+  lorryHires?: LorryHire[];
   company: CompanySettings;
   pendingCnForInvoice: ConsignmentNote | null;
   onClearPendingCn: () => void;
@@ -122,6 +138,8 @@ const BillingQuotesModuleInner: React.FC<BillingQuotesModuleProps> = ({
   declarations,
   consignments,
   parties,
+  drivers = [],
+  lorryHires = [],
   company,
   pendingCnForInvoice,
   onClearPendingCn,
@@ -197,8 +215,10 @@ const BillingQuotesModuleInner: React.FC<BillingQuotesModuleProps> = ({
     return d.toISOString().slice(0, 10);
   });
   const [partyName, setPartyName] = useState('');
+  const [selectedInvPartyId, setSelectedInvPartyId] = useState('');
   const [partyAddress, setPartyAddress] = useState('');
   const [partyGstin, setPartyGstin] = useState('');
+  const [partyStateCode, setPartyStateCode] = useState('');
   const [partyPan, setPartyPan] = useState('');
   const [billingCountry, setBillingCountry] = useState<'India' | 'Nepal' | 'Bangladesh' | 'Bhutan'>('India');
   const [sac, setSac] = useState(company.hsn || '996791');
@@ -320,9 +340,12 @@ const BillingQuotesModuleInner: React.FC<BillingQuotesModuleProps> = ({
       resolvedCountry = detectedCountry;
       resolvedGstin = nextGstin;
 
+      const stInfo = resolveGstStateCode(nextGstin, nextAddr, detectedCountry);
       setPartyName(matched?.name || targetBillingName);
+      setSelectedInvPartyId(matched?.id || '');
       setPartyAddress(nextAddr);
       setPartyGstin(nextGstin);
+      setPartyStateCode(stInfo.code);
       setBillingCountry(detectedCountry);
       if (matched?.pan) setPartyPan(matched.pan);
     }
@@ -404,16 +427,54 @@ const BillingQuotesModuleInner: React.FC<BillingQuotesModuleProps> = ({
     return list.slice(0, 50);
   }, [consignments, debouncedCnPickerSearch]);
 
+  // Strictly Customer / Billing Parties ONLY (excludes Brokers, Vehicle Owners, Vendors & Drivers)
+  const billingCustomerParties = useMemo(
+    () =>
+      filterBillingCustomerParties({
+        parties,
+        drivers,
+        lorryHires,
+        invoices,
+        consignments,
+      }),
+    [parties, drivers, lorryHires, invoices, consignments]
+  );
+
+  const applyPartyEntityDetails = (p: Party) => {
+    setPartyName(p.name);
+    setSelectedInvPartyId(p.id);
+    const nextGstin = (p.gstin || '').trim().toUpperCase();
+    const nextAddr = p.address || '';
+    const detected = detectCountryFromText(nextAddr) || 'India';
+    const stInfo = resolveGstStateCode(nextGstin, nextAddr, detected);
+    setPartyAddress(nextAddr);
+    setPartyGstin(nextGstin);
+    setPartyStateCode(stInfo.code);
+    setPartyPan((p.pan || '').trim().toUpperCase());
+    setBillingCountry(detected);
+    applyAutoGstRules(detected, nextGstin, gstPaidBy);
+  };
+
   const handlePartySelect = (name: string) => {
     setPartyName(name);
-    const p = parties.find((x) => x.name.toLowerCase() === name.toLowerCase());
-    if (p) {
-      setPartyAddress(p.address || '');
-      setPartyGstin(p.gstin || '');
-      setPartyPan(p.pan || '');
-      const detected = detectCountryFromText(p.address || '') || 'India';
-      setBillingCountry(detected);
-      applyAutoGstRules(detected, p.gstin || '', gstPaidBy);
+    const clean = name.trim().toLowerCase();
+    if (!clean) {
+      setSelectedInvPartyId('');
+      return;
+    }
+    const custMatches = billingCustomerParties.filter(
+      (x) => x.name.trim().toLowerCase() === clean
+    );
+    if (custMatches.length === 1) {
+      applyPartyEntityDetails(custMatches[0]);
+      return;
+    }
+    setSelectedInvPartyId('');
+    if (custMatches.length === 0) {
+      const fallback = parties.filter((x) => x.name.trim().toLowerCase() === clean);
+      if (fallback.length === 1) {
+        applyPartyEntityDetails(fallback[0]);
+      }
     }
   };
 
@@ -677,6 +738,7 @@ const BillingQuotesModuleInner: React.FC<BillingQuotesModuleProps> = ({
   const [qNo, setQNo] = useState(`QTN/2026/${String(19 + quotations.length).padStart(3, '0')}`);
   const [qDate, setQDate] = useState(todayISO());
   const [qParty, setQParty] = useState('');
+  const [selectedQPartyId, setSelectedQPartyId] = useState('');
   const [qAddr, setQAddr] = useState('');
   const [qGstin, setQGstin] = useState('');
   const [qPhone, setQPhone] = useState('');
@@ -806,6 +868,7 @@ const BillingQuotesModuleInner: React.FC<BillingQuotesModuleProps> = ({
 
   // ---- SECTION 194C DECLARATION STATE ----
   const [dParty, setDParty] = useState('');
+  const [selectedDPartyId, setSelectedDPartyId] = useState('');
   const [dAddr, setDAddr] = useState('');
   const [dGstin, setDGstin] = useState('');
   const [dDate, setDDate] = useState(todayISO());
@@ -1359,24 +1422,80 @@ const BillingQuotesModuleInner: React.FC<BillingQuotesModuleProps> = ({
             <div className="p-4 space-y-4 text-xs">
               {/* Party, Country & Invoice Header Fields */}
               <div className="grid grid-cols-1 md:grid-cols-4 gap-3">
-                <div>
-                  <label className="block font-semibold text-slate-700 mb-1">Bill To Party *</label>
-                  <input
-                    type="text"
-                    required
-                    list="inv-party-list"
-                    value={partyName}
-                    onChange={(e) => handlePartySelect(e.target.value)}
-                    placeholder="PARUCCO FOUNDRY P LTD"
-                    className="w-full px-2.5 py-1.5 rounded border border-slate-300"
-                  />
-                  <datalist id="inv-party-list">
-                    {parties.map((p) => (
-                      <option key={p.id} value={p.name} />
-                    ))}
-                  </datalist>
-                </div>
                 <div className="md:col-span-2">
+                  <label className="block font-semibold text-slate-700 mb-1">
+                    Bill To Party *{' '}
+                    <span className="text-[10px] font-bold text-blue-700">
+                      (Customers Only: {billingCustomerParties.length})
+                    </span>
+                  </label>
+                  <select
+                    aria-label="Bill To Party Customer Dropdown"
+                    value={
+                      selectedInvPartyId ||
+                      (() => {
+                        const clean = partyName.trim().toLowerCase();
+                        const m = billingCustomerParties.filter(
+                          (p) => p.name.trim().toLowerCase() === clean
+                        );
+                        return m.length === 1 ? m[0].id : '';
+                      })()
+                    }
+                    onChange={(e) => {
+                      const chosen = billingCustomerParties.find((p) => p.id === e.target.value);
+                      if (chosen) applyPartyEntityDetails(chosen);
+                    }}
+                    className="w-full px-2.5 py-1.5 rounded border border-blue-300 bg-blue-50/40 font-semibold text-slate-900 mb-1.5 cursor-pointer"
+                  >
+                    <option value="">
+                      -- Select Customer / Billing Party ({billingCustomerParties.length}) --
+                    </option>
+                    {billingCustomerParties.map((p) => (
+                      <option key={p.id} value={p.id}>
+                        {p.name} | {formatPartyDetailsLine(p)}
+                      </option>
+                    ))}
+                  </select>
+                  <RichEntityPicker<Party>
+                    ariaLabel="Bill To Party Search"
+                    value={partyName}
+                    selectedId={selectedInvPartyId}
+                    onChangeText={(nextText) => handlePartySelect(nextText)}
+                    onSelectEntity={(p) => applyPartyEntityDetails(p)}
+                    items={billingCustomerParties}
+                    getId={(p) => p.id}
+                    getValue={(p) => p.name}
+                    getSearchText={(p) =>
+                      `${p.name} ${p.gstin || ''} ${p.pan || ''} ${p.address || ''} ${p.phone || ''}`
+                    }
+                    renderTitle={(p) => p.name}
+                    renderBadge={(p) => p.partyType}
+                    renderDetails={(p) => formatPartyDetailsLine(p)}
+                    placeholder="Or search Customer by Name, GSTIN, City, Address or Phone..."
+                    required
+                    quickPreview={(() => {
+                      const clean = partyName.trim().toLowerCase();
+                      if (!clean) return null;
+                      const matches = billingCustomerParties.filter(
+                        (p) => p.name.trim().toLowerCase() === clean
+                      );
+                      const resolved =
+                        (selectedInvPartyId
+                          ? billingCustomerParties.find((p) => p.id === selectedInvPartyId)
+                          : undefined) ||
+                        (matches.length === 1 ? matches[0] : matches[0]);
+                      return (
+                        <EntityQuickPreviewCard
+                          kind="party"
+                          party={resolved}
+                          duplicateCount={matches.length}
+                          ambiguousSelected={matches.length > 1 && !selectedInvPartyId}
+                        />
+                      );
+                    })()}
+                  />
+                </div>
+                <div>
                   <label className="block font-semibold text-slate-700 mb-1">Party Address</label>
                   <input
                     type="text"
@@ -1394,6 +1513,8 @@ const BillingQuotesModuleInner: React.FC<BillingQuotesModuleProps> = ({
                       const nextC = e.target.value as 'India' | 'Nepal' | 'Bangladesh' | 'Bhutan';
                       setBillingCountry(nextC);
                       setInvValidationError(null);
+                      const st = resolveGstStateCode(partyGstin, partyAddress, nextC);
+                      setPartyStateCode(st.code);
                       applyAutoGstRules(nextC, partyGstin, gstPaidBy);
                     }}
                     className="w-full px-2.5 py-1.5 rounded border border-slate-300 bg-white font-bold"
@@ -1405,21 +1526,47 @@ const BillingQuotesModuleInner: React.FC<BillingQuotesModuleProps> = ({
                   </select>
                 </div>
 
-                <div>
-                  <label className="block font-semibold text-slate-700 mb-1">
-                    Party GSTIN {isExportCountry ? <span className="text-slate-500">(Optional)</span> : ''}
-                  </label>
-                  <input
-                    type="text"
-                    value={partyGstin}
-                    onChange={(e) => {
-                      const val = e.target.value.toUpperCase();
-                      setPartyGstin(val);
-                      applyAutoGstRules(billingCountry, val, gstPaidBy);
-                    }}
-                    placeholder={isExportCountry ? 'Not required for Export' : '19XXXXX... (WB) or other'}
-                    className="w-full px-2.5 py-1.5 rounded border border-slate-300 font-mono-num"
-                  />
+                <div className="grid grid-cols-3 gap-1.5">
+                  <div className="col-span-2">
+                    <label className="block font-semibold text-slate-700 mb-1">
+                      Party GSTIN {isExportCountry ? <span className="text-slate-500">(Optional)</span> : ''}
+                    </label>
+                    <input
+                      type="text"
+                      value={partyGstin}
+                      onChange={(e) => {
+                        const val = e.target.value.toUpperCase();
+                        setPartyGstin(val);
+                        const st = resolveGstStateCode(val, partyAddress, billingCountry);
+                        if (st.code) setPartyStateCode(st.code);
+                        applyAutoGstRules(billingCountry, val, gstPaidBy);
+                      }}
+                      placeholder={isExportCountry ? 'Optional (Export)' : '19XXXXX... (WB) or other'}
+                      className="w-full px-2 py-1.5 rounded border border-slate-300 font-mono-num"
+                    />
+                  </div>
+                  <div>
+                    <label className="block font-semibold text-slate-700 mb-1">State Code</label>
+                    <select
+                      aria-label="Party State Code"
+                      value={partyStateCode}
+                      onChange={(e) => {
+                        const nextCode = e.target.value;
+                        setPartyStateCode(nextCode);
+                        if (billingCountry === 'India' && nextCode) {
+                          setInterstate(nextCode !== '19' && nextCode !== '99');
+                        }
+                      }}
+                      className="w-full px-1.5 py-1.5 rounded border border-slate-300 bg-white font-mono-num font-bold text-blue-900"
+                    >
+                      <option value="">--</option>
+                      {ALL_INDIA_STATES_DISTRICTS.map((st) => (
+                        <option key={st.code} value={st.code}>
+                          {st.code} - {st.name}
+                        </option>
+                      ))}
+                    </select>
+                  </div>
                 </div>
                 <div>
                   <label className="block font-semibold text-slate-700 mb-1">
@@ -2047,31 +2194,69 @@ const BillingQuotesModuleInner: React.FC<BillingQuotesModuleProps> = ({
               </div>
               <div>
                 <label className="block font-semibold text-slate-700 mb-1">Quotation For (M/S) *</label>
-                <input
-                  type="text"
-                  required
-                  list="q-party-list"
+                <RichEntityPicker<Party>
+                  ariaLabel="Quotation For (M/S)"
                   value={qParty}
-                  onChange={(e) => {
-                    const nextVal = e.target.value;
+                  selectedId={selectedQPartyId}
+                  onChangeText={(nextVal) => {
                     setQParty(nextVal);
-                    const p = parties.find((x) => x.name.toLowerCase() === nextVal.toLowerCase());
-                    if (p) {
+                    const matches = billingCustomerParties.filter(
+                      (x) => x.name.trim().toLowerCase() === nextVal.trim().toLowerCase()
+                    );
+                    if (matches.length === 1) {
+                      const p = matches[0];
+                      setSelectedQPartyId(p.id);
                       setQAddr(p.address || '');
                       setQGstin(p.gstin || '');
                       setQPhone(p.phone || '');
                       setQEmail(p.email || '');
+                    } else {
+                      setSelectedQPartyId('');
                     }
                     applyQuotationSmartAutoFill(nextVal, qDest);
                   }}
-                  placeholder="Auto-fills Address, GSTIN, Phone & Email"
-                  className="w-full px-2.5 py-1.5 rounded border border-slate-300"
+                  onSelectEntity={(p) => {
+                    setQParty(p.name);
+                    setSelectedQPartyId(p.id);
+                    setQAddr(p.address || '');
+                    setQGstin(p.gstin || '');
+                    setQPhone(p.phone || '');
+                    setQEmail(p.email || '');
+                    applyQuotationSmartAutoFill(p.name, qDest);
+                  }}
+                  items={billingCustomerParties}
+                  getId={(p) => p.id}
+                  getValue={(p) => p.name}
+                  getSearchText={(p) =>
+                    `${p.name} ${p.gstin || ''} ${p.pan || ''} ${p.address || ''} ${p.phone || ''}`
+                  }
+                  renderTitle={(p) => p.name}
+                  renderBadge={(p) => p.partyType}
+                  renderDetails={(p) => formatPartyDetailsLine(p)}
+                  placeholder="Search Customer by Name, GSTIN, City or Phone..."
+                  required
+                  quickPreview={(() => {
+                    const clean = qParty.trim().toLowerCase();
+                    if (!clean) return null;
+                    const matches = billingCustomerParties.filter(
+                      (x) => x.name.trim().toLowerCase() === clean
+                    );
+                    const resolved =
+                      (selectedQPartyId
+                        ? billingCustomerParties.find((x) => x.id === selectedQPartyId)
+                        : undefined) ||
+                      (matches.length === 1 ? matches[0] : matches[0]);
+                    return (
+                      <EntityQuickPreviewCard
+                        kind="party"
+                        party={resolved}
+                        duplicateCount={matches.length}
+                        ambiguousSelected={matches.length > 1 && !selectedQPartyId}
+                        compact
+                      />
+                    );
+                  })()}
                 />
-                <datalist id="q-party-list">
-                  {parties.map((p) => (
-                    <option key={p.id} value={p.name} />
-                  ))}
-                </datalist>
               </div>
               <div>
                 <label className="block font-semibold text-slate-700 mb-1">Party Address</label>
@@ -2326,27 +2511,62 @@ const BillingQuotesModuleInner: React.FC<BillingQuotesModuleProps> = ({
             <div className="p-4 grid grid-cols-1 md:grid-cols-3 gap-3 text-xs">
               <div>
                 <label className="block font-semibold text-slate-700 mb-1">Select Party (To) *</label>
-                <input
-                  type="text"
-                  required
-                  list="d194-party-list"
+                <RichEntityPicker<Party>
+                  ariaLabel="194C Select Party (To)"
                   value={dParty}
-                  onChange={(e) => {
-                    setDParty(e.target.value);
-                    const p = parties.find((x) => x.name.toLowerCase() === e.target.value.toLowerCase());
-                    if (p) {
-                      setDAddr(p.address || '');
-                      setDGstin(p.gstin || '');
+                  selectedId={selectedDPartyId}
+                  onChangeText={(nextVal) => {
+                    setDParty(nextVal);
+                    const matches = billingCustomerParties.filter(
+                      (x) => x.name.trim().toLowerCase() === nextVal.trim().toLowerCase()
+                    );
+                    if (matches.length === 1) {
+                      setSelectedDPartyId(matches[0].id);
+                      setDAddr(matches[0].address || '');
+                      setDGstin(matches[0].gstin || '');
+                    } else {
+                      setSelectedDPartyId('');
                     }
                   }}
-                  placeholder="BENGAL IRON CORPORATION"
-                  className="w-full px-2.5 py-1.5 rounded border border-slate-300"
+                  onSelectEntity={(p) => {
+                    setDParty(p.name);
+                    setSelectedDPartyId(p.id);
+                    setDAddr(p.address || '');
+                    setDGstin(p.gstin || '');
+                  }}
+                  items={billingCustomerParties}
+                  getId={(p) => p.id}
+                  getValue={(p) => p.name}
+                  getSearchText={(p) =>
+                    `${p.name} ${p.gstin || ''} ${p.pan || ''} ${p.address || ''} ${p.phone || ''}`
+                  }
+                  renderTitle={(p) => p.name}
+                  renderBadge={(p) => p.partyType}
+                  renderDetails={(p) => formatPartyDetailsLine(p)}
+                  placeholder="Search Customer by Name, GSTIN, City or Phone..."
+                  required
+                  quickPreview={(() => {
+                    const clean = dParty.trim().toLowerCase();
+                    if (!clean) return null;
+                    const matches = billingCustomerParties.filter(
+                      (x) => x.name.trim().toLowerCase() === clean
+                    );
+                    const resolved =
+                      (selectedDPartyId
+                        ? billingCustomerParties.find((x) => x.id === selectedDPartyId)
+                        : undefined) ||
+                      (matches.length === 1 ? matches[0] : matches[0]);
+                    return (
+                      <EntityQuickPreviewCard
+                        kind="party"
+                        party={resolved}
+                        duplicateCount={matches.length}
+                        ambiguousSelected={matches.length > 1 && !selectedDPartyId}
+                        compact
+                      />
+                    );
+                  })()}
                 />
-                <datalist id="d194-party-list">
-                  {parties.map((p) => (
-                    <option key={p.id} value={p.name} />
-                  ))}
-                </datalist>
               </div>
               <div>
                 <label className="block font-semibold text-slate-700 mb-1">Party Address</label>

@@ -34,6 +34,13 @@ import {
   generateLogisticsManifestPDF,
 } from '../lib/pdfEngine';
 import { CameraPodQrScannerModal } from './CameraPodQrScannerModal';
+import {
+  EntityQuickPreviewCard,
+  formatDriverDetailsLine,
+  formatPartyDetailsLine,
+  formatVehicleDetailsLine,
+  RichEntityPicker,
+} from './RichEntityPicker';
 
 interface LogisticsDocketManifestPanelProps {
   subView: 'docket' | 'manifest' | 'godown';
@@ -108,9 +115,11 @@ export const LogisticsDocketManifestPanel: React.FC<LogisticsDocketManifestPanel
   const [payMode, setPayMode] = useState<'Paid' | 'To-Pay' | 'TBB'>('TBB');
 
   const [consignorName, setConsignorName] = useState('');
+  const [selectedConsignorId, setSelectedConsignorId] = useState('');
   const [consignorAddress, setConsignorAddress] = useState('');
   const [consignorGstin, setConsignorGstin] = useState('');
   const [consigneeName, setConsigneeName] = useState('');
+  const [selectedConsigneeId, setSelectedConsigneeId] = useState('');
   const [consigneeAddress, setConsigneeAddress] = useState('');
   const [consigneeGstin, setConsigneeGstin] = useState('');
   const [billingPartyName, setBillingPartyName] = useState('');
@@ -148,13 +157,34 @@ export const LogisticsDocketManifestPanel: React.FC<LogisticsDocketManifestPanel
   const [mnfFromBranch, setMnfFromBranch] = useState<string>(defaultOrigin);
   const [mnfToBranch, setMnfToBranch] = useState<string>('SILIGURI');
   const [mnfTruckNo, setMnfTruckNo] = useState('');
+  const [selectedMnfVehicleId, setSelectedMnfVehicleId] = useState('');
   const [mnfDriverName, setMnfDriverName] = useState('');
+  const [selectedMnfDriverId, setSelectedMnfDriverId] = useState('');
   const [mnfDriverPhone, setMnfDriverPhone] = useState('');
   const [mnfBrokerName, setMnfBrokerName] = useState('');
+  const [selectedMnfBrokerId, setSelectedMnfBrokerId] = useState('');
   const [mnfHireAmount, setMnfHireAmount] = useState('14500');
   const [mnfAdvancePaid, setMnfAdvancePaid] = useState('8000');
   const [selectedDocketIds, setSelectedDocketIds] = useState<string[]>([]);
   const [manifestSaving, setManifestSaving] = useState(false);
+
+  const logisticsCustomerParties = useMemo(
+    () =>
+      parties.filter(
+        (p) =>
+          p.partyType === 'Customer' ||
+          p.partyType === 'Consignor' ||
+          p.partyType === 'Consignee'
+      ),
+    [parties]
+  );
+  const logisticsBrokerParties = useMemo(
+    () =>
+      parties.filter(
+        (p) => p.partyType === 'Broker' || p.partyType === 'DeliveryAgent'
+      ),
+    [parties]
+  );
 
   // ---------------- GODOWN STOCK STATE ----------------
   const [godownBranchFilter, setGodownBranchFilter] = useState<string>('ALL');
@@ -197,34 +227,58 @@ export const LogisticsDocketManifestPanel: React.FC<LogisticsDocketManifestPanel
     reverseCharge,
   ]);
 
+  const handlePickConsignorEntity = (found: LogisticsParty) => {
+    setConsignorName(found.name);
+    setSelectedConsignorId(found.id);
+    setConsignorAddress(found.address || '');
+    setConsignorGstin(found.gstin || '');
+    if (payMode === 'TBB' && !billingPartyName) {
+      setBillingPartyName(found.name);
+    }
+  };
+
   const handlePickConsignor = (name: string) => {
     setConsignorName(name);
-    const found = parties.find((p) => p.name.toLowerCase() === name.trim().toLowerCase());
-    if (found) {
-      setConsignorAddress(found.address || '');
-      setConsignorGstin(found.gstin || '');
-      if (payMode === 'TBB' && !billingPartyName) {
-        setBillingPartyName(found.name);
-      }
+    const clean = name.trim().toLowerCase();
+    const matches = logisticsCustomerParties.filter(
+      (p) => p.name.trim().toLowerCase() === clean
+    );
+    if (matches.length === 1) {
+      handlePickConsignorEntity(matches[0]);
+      return;
     }
+    setSelectedConsignorId('');
+  };
+
+  const handlePickConsigneeEntity = (found: LogisticsParty) => {
+    setConsigneeName(found.name);
+    setSelectedConsigneeId(found.id);
+    setConsigneeAddress(found.address || '');
+    setConsigneeGstin(found.gstin || '');
   };
 
   const handlePickConsignee = (name: string) => {
     setConsigneeName(name);
-    const found = parties.find((p) => p.name.toLowerCase() === name.trim().toLowerCase());
-    if (found) {
-      setConsigneeAddress(found.address || '');
-      setConsigneeGstin(found.gstin || '');
+    const clean = name.trim().toLowerCase();
+    const matches = logisticsCustomerParties.filter(
+      (p) => p.name.trim().toLowerCase() === clean
+    );
+    if (matches.length === 1) {
+      handlePickConsigneeEntity(matches[0]);
+      return;
     }
+    setSelectedConsigneeId('');
   };
 
   const resetDocketForm = () => {
     setEditingDocketId(null);
     setDocketNo(buildNextDocketNo(dockets, originBranch, activeFy));
     setConsignorName('');
+    setSelectedConsignorId('');
     setConsignorAddress('');
     setConsignorGstin('');
     setConsigneeName('');
+    setSelectedConsigneeId('');
     setConsigneeAddress('');
     setConsigneeGstin('');
     setBillingPartyName('');
@@ -633,13 +687,44 @@ export const LogisticsDocketManifestPanel: React.FC<LogisticsDocketManifestPanel
               <div className="grid grid-cols-1 sm:grid-cols-2 gap-2 p-2.5 rounded-lg bg-slate-50 border border-slate-200">
                 <div>
                   <label className="block text-[11px] font-bold text-slate-700 mb-0.5">Consignor Name*</label>
-                  <input
-                    required
-                    list="logistics-party-list"
+                  <RichEntityPicker<LogisticsParty>
+                    ariaLabel="Logistics Consignor Name"
                     value={consignorName}
-                    onChange={(e) => handlePickConsignor(e.target.value)}
-                    placeholder="Sender name..."
-                    className="w-full px-2.5 py-1.5 rounded border border-slate-300 bg-white font-semibold"
+                    selectedId={selectedConsignorId}
+                    onChangeText={(val) => handlePickConsignor(val)}
+                    onSelectEntity={(p) => handlePickConsignorEntity(p)}
+                    items={logisticsCustomerParties}
+                    getId={(p) => p.id}
+                    getValue={(p) => p.name}
+                    getSearchText={(p) =>
+                      `${p.name} ${p.gstin || ''} ${p.pan || ''} ${p.address || ''} ${p.phone || ''}`
+                    }
+                    renderTitle={(p) => p.name}
+                    renderBadge={(p) => p.partyType}
+                    renderDetails={(p) => formatPartyDetailsLine(p)}
+                    placeholder="Search Consignor by Name, GSTIN, City or Phone..."
+                    required
+                    quickPreview={(() => {
+                      const clean = consignorName.trim().toLowerCase();
+                      if (!clean) return null;
+                      const matches = logisticsCustomerParties.filter(
+                        (p) => p.name.trim().toLowerCase() === clean
+                      );
+                      const resolved =
+                        (selectedConsignorId
+                          ? logisticsCustomerParties.find((p) => p.id === selectedConsignorId)
+                          : undefined) ||
+                        (matches.length === 1 ? matches[0] : matches[0]);
+                      return (
+                        <EntityQuickPreviewCard
+                          kind="party"
+                          party={resolved}
+                          duplicateCount={matches.length}
+                          ambiguousSelected={matches.length > 1 && !selectedConsignorId}
+                          compact
+                        />
+                      );
+                    })()}
                   />
                   <input
                     value={consignorGstin}
@@ -650,13 +735,44 @@ export const LogisticsDocketManifestPanel: React.FC<LogisticsDocketManifestPanel
                 </div>
                 <div>
                   <label className="block text-[11px] font-bold text-slate-700 mb-0.5">Consignee Name*</label>
-                  <input
-                    required
-                    list="logistics-party-list"
+                  <RichEntityPicker<LogisticsParty>
+                    ariaLabel="Logistics Consignee Name"
                     value={consigneeName}
-                    onChange={(e) => handlePickConsignee(e.target.value)}
-                    placeholder="Receiver name..."
-                    className="w-full px-2.5 py-1.5 rounded border border-slate-300 bg-white font-semibold"
+                    selectedId={selectedConsigneeId}
+                    onChangeText={(val) => handlePickConsignee(val)}
+                    onSelectEntity={(p) => handlePickConsigneeEntity(p)}
+                    items={logisticsCustomerParties}
+                    getId={(p) => p.id}
+                    getValue={(p) => p.name}
+                    getSearchText={(p) =>
+                      `${p.name} ${p.gstin || ''} ${p.pan || ''} ${p.address || ''} ${p.phone || ''}`
+                    }
+                    renderTitle={(p) => p.name}
+                    renderBadge={(p) => p.partyType}
+                    renderDetails={(p) => formatPartyDetailsLine(p)}
+                    placeholder="Search Consignee by Name, GSTIN, City or Phone..."
+                    required
+                    quickPreview={(() => {
+                      const clean = consigneeName.trim().toLowerCase();
+                      if (!clean) return null;
+                      const matches = logisticsCustomerParties.filter(
+                        (p) => p.name.trim().toLowerCase() === clean
+                      );
+                      const resolved =
+                        (selectedConsigneeId
+                          ? logisticsCustomerParties.find((p) => p.id === selectedConsigneeId)
+                          : undefined) ||
+                        (matches.length === 1 ? matches[0] : matches[0]);
+                      return (
+                        <EntityQuickPreviewCard
+                          kind="party"
+                          party={resolved}
+                          duplicateCount={matches.length}
+                          ambiguousSelected={matches.length > 1 && !selectedConsigneeId}
+                          compact
+                        />
+                      );
+                    })()}
                   />
                   <input
                     value={consigneeGstin}
@@ -666,12 +782,6 @@ export const LogisticsDocketManifestPanel: React.FC<LogisticsDocketManifestPanel
                   />
                 </div>
               </div>
-
-              <datalist id="logistics-party-list">
-                {parties.map((p) => (
-                  <option key={p.id} value={p.name} />
-                ))}
-              </datalist>
 
               <div className="grid grid-cols-3 gap-2">
                 <div>
@@ -1088,42 +1198,101 @@ export const LogisticsDocketManifestPanel: React.FC<LogisticsDocketManifestPanel
                 </div>
               </div>
 
-              <div className="grid grid-cols-3 gap-2">
+              <div className="grid grid-cols-1 md:grid-cols-3 gap-2">
                 <div>
                   <label className="block text-[11px] font-bold text-slate-600 mb-0.5">Vehicle / Tempo No*</label>
-                  <input
-                    required
-                    list="logi-vehicles-dl"
+                  <RichEntityPicker<LogisticsVehicle>
+                    ariaLabel="Manifest Vehicle No"
                     value={mnfTruckNo}
-                    onChange={(e) => setMnfTruckNo(e.target.value.toUpperCase())}
-                    placeholder="WB23C6597"
-                    className="w-full px-2 py-1.5 rounded border border-slate-300 font-mono-num font-bold"
+                    selectedId={selectedMnfVehicleId}
+                    onChangeText={(nextText) => {
+                      const upper = nextText.toUpperCase();
+                      setMnfTruckNo(upper);
+                      const matches = vehicles.filter(
+                        (v) => v.truckNo.trim().toUpperCase() === upper.trim()
+                      );
+                      setSelectedMnfVehicleId(matches.length === 1 ? matches[0].id : '');
+                    }}
+                    onSelectEntity={(v) => {
+                      setMnfTruckNo(v.truckNo.toUpperCase());
+                      setSelectedMnfVehicleId(v.id);
+                    }}
+                    items={vehicles}
+                    getId={(v) => v.id}
+                    getValue={(v) => v.truckNo}
+                    getSearchText={(v) =>
+                      `${v.truckNo} ${v.ownerName || ''} ${v.vehicleType || ''} ${v.ownerPhone || ''}`
+                    }
+                    renderTitle={(v) => v.truckNo}
+                    renderBadge={(v) => v.vehicleType || 'Tempo'}
+                    renderDetails={(v) => formatVehicleDetailsLine(v)}
+                    placeholder="WB23C6597 — Search Truck, Owner or Type..."
+                    required
+                    uppercase
+                    inputClassName="font-mono-num font-bold"
+                    quickPreview={(() => {
+                      const clean = mnfTruckNo.trim().toUpperCase();
+                      if (!clean) return null;
+                      const resolved =
+                        (selectedMnfVehicleId
+                          ? vehicles.find((v) => v.id === selectedMnfVehicleId)
+                          : undefined) ||
+                        vehicles.find((v) => v.truckNo.trim().toUpperCase() === clean);
+                      return <EntityQuickPreviewCard kind="vehicle" vehicle={resolved} />;
+                    })()}
                   />
-                  <datalist id="logi-vehicles-dl">
-                    {vehicles.map((v) => (
-                      <option key={v.id} value={v.truckNo} />
-                    ))}
-                  </datalist>
                 </div>
                 <div>
                   <label className="block text-[11px] font-bold text-slate-600 mb-0.5">Driver Name</label>
-                  <input
-                    list="logi-drivers-dl"
+                  <RichEntityPicker<LogisticsDriver>
+                    ariaLabel="Manifest Driver Name"
                     value={mnfDriverName}
-                    onChange={(e) => {
-                      const val = e.target.value;
+                    selectedId={selectedMnfDriverId}
+                    onChangeText={(val) => {
                       setMnfDriverName(val);
-                      const drv = drivers.find((dr) => dr.name.toLowerCase() === val.toLowerCase());
-                      if (drv?.phone) setMnfDriverPhone(drv.phone);
+                      const matches = drivers.filter(
+                        (dr) => dr.name.trim().toLowerCase() === val.trim().toLowerCase()
+                      );
+                      if (matches.length === 1) {
+                        setSelectedMnfDriverId(matches[0].id);
+                        if (matches[0].phone) setMnfDriverPhone(matches[0].phone);
+                      } else {
+                        setSelectedMnfDriverId('');
+                      }
                     }}
-                    placeholder="Driver name"
-                    className="w-full px-2 py-1.5 rounded border border-slate-300"
+                    onSelectEntity={(dr) => {
+                      setMnfDriverName(dr.name);
+                      setSelectedMnfDriverId(dr.id);
+                      if (dr.phone) setMnfDriverPhone(dr.phone);
+                    }}
+                    items={drivers}
+                    getId={(dr) => dr.id}
+                    getValue={(dr) => dr.name}
+                    getSearchText={(dr) => `${dr.name} ${dr.dlNo || ''} ${dr.phone || ''}`}
+                    renderTitle={(dr) => dr.name}
+                    renderDetails={(dr) => formatDriverDetailsLine(dr)}
+                    placeholder="Search Driver by Name, D/L No or Mobile..."
+                    quickPreview={(() => {
+                      const clean = mnfDriverName.trim().toLowerCase();
+                      if (!clean) return null;
+                      const matches = drivers.filter(
+                        (dr) => dr.name.trim().toLowerCase() === clean
+                      );
+                      const resolved =
+                        (selectedMnfDriverId
+                          ? drivers.find((dr) => dr.id === selectedMnfDriverId)
+                          : undefined) ||
+                        (matches.length === 1 ? matches[0] : matches[0]);
+                      return (
+                        <EntityQuickPreviewCard
+                          kind="driver"
+                          driver={resolved}
+                          duplicateCount={matches.length}
+                          compact
+                        />
+                      );
+                    })()}
                   />
-                  <datalist id="logi-drivers-dl">
-                    {drivers.map((dr) => (
-                      <option key={dr.id} value={dr.name} />
-                    ))}
-                  </datalist>
                 </div>
                 <div>
                   <label className="block text-[11px] font-bold text-slate-600 mb-0.5">Driver Phone</label>
@@ -1136,14 +1305,55 @@ export const LogisticsDocketManifestPanel: React.FC<LogisticsDocketManifestPanel
                 </div>
               </div>
 
-              <div className="grid grid-cols-3 gap-2">
+              <div className="grid grid-cols-1 md:grid-cols-3 gap-2">
                 <div>
                   <label className="block text-[11px] font-bold text-slate-600 mb-0.5">Broker / Fleet</label>
-                  <input
+                  <RichEntityPicker<LogisticsParty>
+                    ariaLabel="Manifest Broker / Fleet"
                     value={mnfBrokerName}
-                    onChange={(e) => setMnfBrokerName(e.target.value)}
-                    placeholder="Optional broker"
-                    className="w-full px-2 py-1.5 rounded border border-slate-300"
+                    selectedId={selectedMnfBrokerId}
+                    onChangeText={(val) => {
+                      setMnfBrokerName(val);
+                      const matches = logisticsBrokerParties.filter(
+                        (b) => b.name.trim().toLowerCase() === val.trim().toLowerCase()
+                      );
+                      setSelectedMnfBrokerId(matches.length === 1 ? matches[0].id : '');
+                    }}
+                    onSelectEntity={(b) => {
+                      setMnfBrokerName(b.name);
+                      setSelectedMnfBrokerId(b.id);
+                    }}
+                    items={logisticsBrokerParties}
+                    getId={(b) => b.id}
+                    getValue={(b) => b.name}
+                    getSearchText={(b) =>
+                      `${b.name} ${b.pan || ''} ${b.phone || ''} ${b.address || ''}`
+                    }
+                    renderTitle={(b) => b.name}
+                    renderBadge={(b) => b.partyType}
+                    renderDetails={(b) => formatPartyDetailsLine(b)}
+                    placeholder="Search Broker by Name, PAN, Mobile or City..."
+                    quickPreview={(() => {
+                      const clean = mnfBrokerName.trim().toLowerCase();
+                      if (!clean) return null;
+                      const matches = logisticsBrokerParties.filter(
+                        (b) => b.name.trim().toLowerCase() === clean
+                      );
+                      const resolved =
+                        (selectedMnfBrokerId
+                          ? logisticsBrokerParties.find((b) => b.id === selectedMnfBrokerId)
+                          : undefined) ||
+                        (matches.length === 1 ? matches[0] : matches[0]);
+                      return (
+                        <EntityQuickPreviewCard
+                          kind="broker"
+                          party={resolved}
+                          duplicateCount={matches.length}
+                          ambiguousSelected={matches.length > 1 && !selectedMnfBrokerId}
+                          compact
+                        />
+                      );
+                    })()}
                   />
                 </div>
                 <div>

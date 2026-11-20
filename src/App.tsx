@@ -2415,6 +2415,8 @@ export default function App() {
                 declarations={visibleDeclarations}
                 consignments={visibleConsignments}
                 parties={parties}
+                drivers={drivers}
+                lorryHires={visibleLorryHires}
                 company={companySettings}
                 pendingCnForInvoice={pendingCnForInvoice}
                 onClearPendingCn={() => setPendingCnForInvoice(null)}
@@ -2435,6 +2437,7 @@ export default function App() {
                 lorryHires={visibleLorryHires}
                 consignments={visibleConsignments}
                 parties={parties}
+                vehicles={vehicles}
                 staffAccounts={staffAccounts}
                 staffCommissions={staffCommissions}
                 company={companySettings}

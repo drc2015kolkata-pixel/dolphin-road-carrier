@@ -12,6 +12,7 @@ import { makeSafeDocId, normalizeFyLabel, resolveFinancialYearFromDate, todayISO
 import { sheetToObjectsSmartHeader } from './excelImport';
 import { buildAutomaticNarration, extractPaymentMetadata } from './paymentNarration';
 import { extractCreditReceiptsFromRows } from '../components/BankReceiptImportModule';
+import { analyzeAndSeparateMisclassifiedParties } from './partySeparation';
 
 export interface DbfFieldDescriptor {
   name: string;
@@ -297,15 +298,33 @@ export async function autoCollectOldDataFiles(params: {
         if (code) headCodeToName.set(code.toUpperCase(), name);
 
         const opBal = Math.abs(pickNum(row, ['opbal', 'opening', 'openbal', 'op_bal', 'balance']));
-        const dcRaw = pickStr(row, ['opdc', 'drcr', 'dc', 'type', 'baltype']).toUpperCase();
-        const groupRaw = pickStr(row, ['group', 'grp', 'category', 'type']);
+        const dcRaw = pickStr(row, ['opdc', 'drcr', 'dc', 'baltype']).toUpperCase();
+        const groupRaw = pickStr(row, [
+          'group',
+          'grp',
+          'grpname',
+          'groupname',
+          'acgroup',
+          'acgrp',
+          'grpcd',
+          'category',
+          'type',
+          'sch',
+          'schedule',
+          'headtype',
+        ]);
+        const combinedGroupAndName = `${groupRaw} ${name}`;
         const partyType: Party['partyType'] =
-          /broker|brk/i.test(groupRaw)
+          /broker|\bbrk\b|commission\s*agent|dalal/i.test(combinedGroupAndName)
             ? 'Broker'
-            : /owner|truck|vhl/i.test(groupRaw)
+            : /lorry\s*owner|truck\s*owner|vehicle\s*owner|owner|\bvhl\b/i.test(groupRaw)
             ? 'TruckOwner'
-            : /vendor|fuel|diesel/i.test(groupRaw)
+            : /vendor|fuel|diesel|pump|tyre/i.test(groupRaw)
             ? 'Vendor'
+            : /consignor/i.test(groupRaw)
+            ? 'Consignor'
+            : /consignee/i.test(groupRaw)
+            ? 'Consignee'
             : 'Customer';
 
         result.parties.push({
@@ -667,6 +686,35 @@ export async function autoCollectOldDataFiles(params: {
       );
     }
   }
+
+  // Cross-reference FoxPro masters & transactions so Brokers, Vehicle Owners, and Drivers never leak into Customer Billing Parties
+  const extraBrokerNames = [
+    ...result.parties.filter((p) => p.partyType === 'Broker').map((p) => p.name),
+    ...result.lorryHires.map((lh) => lh.brokerName || ''),
+  ].filter(Boolean);
+  const extraOwnerNames = [
+    ...result.vehicles.map((v) => v.ownerName || ''),
+    ...result.lorryHires.map((lh) => lh.ownerName || ''),
+  ].filter(Boolean);
+  const extraDriverNames = result.drivers.map((d) => d.name).filter(Boolean);
+  const extraCustomerNames = [
+    ...result.invoices.map((inv) => inv.partyName),
+    ...result.consignments.map((cn) => cn.billingPartyName || cn.consignorName),
+  ].filter(Boolean);
+
+  const separated = analyzeAndSeparateMisclassifiedParties({
+    parties: result.parties,
+    drivers: result.drivers,
+    lorryHires: result.lorryHires,
+    invoices: result.invoices,
+    consignments: result.consignments,
+    extraBrokerNames,
+    extraOwnerNames,
+    extraDriverNames,
+    extraCustomerNames,
+  });
+  result.parties = separated.cleanParties;
+  result.brokersAddedCount = result.parties.filter((p) => p.partyType === 'Broker').length;
 
   result.destinations = Array.from(new Set(result.destinations.filter(Boolean))).sort();
   return result;

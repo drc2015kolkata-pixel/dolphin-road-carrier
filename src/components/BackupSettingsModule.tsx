@@ -69,6 +69,7 @@ import {
   AutoCollectedOldDataResult,
   autoCollectOldDataFiles,
 } from '../lib/foxproDbfImport';
+import { analyzeAndSeparateMisclassifiedParties } from '../lib/partySeparation';
 import {
   getLast90DayMaintenanceTimestamp,
   runSystemAutoFixAndClean,
@@ -198,8 +199,29 @@ const BackupSettingsModuleInner: React.FC<BackupSettingsModuleProps> = ({
   const [autoCollectResult, setAutoCollectResult] = useState<AutoCollectedOldDataResult | null>(null);
   const [autoCollecting, setAutoCollecting] = useState(false);
   const [autoCollectImporting, setAutoCollectImporting] = useState(false);
+  const [cleaningParties, setCleaningParties] = useState(false);
   const [copiedDomain, setCopiedDomain] = useState(false);
   const oauthDomain = useMemo(() => getOAuthDomainStatus(), []);
+
+  const partySeparationPreview = useMemo(
+    () =>
+      analyzeAndSeparateMisclassifiedParties({
+        parties: allData.parties,
+        drivers: allData.drivers,
+        lorryHires: allData.lorryHires,
+        invoices: allData.invoices,
+        consignments: allData.consignments,
+        extraOwnerNames: allData.vehicles.map((v) => v.ownerName || '').filter(Boolean),
+      }),
+    [
+      allData.parties,
+      allData.drivers,
+      allData.lorryHires,
+      allData.invoices,
+      allData.consignments,
+      allData.vehicles,
+    ]
+  );
 
   // Master Admin ID & Password Management
   const [adminCurrentPwd, setAdminCurrentPwd] = useState('');
@@ -404,6 +426,49 @@ const BackupSettingsModuleInner: React.FC<BackupSettingsModuleProps> = ({
       setDriveError(err instanceof Error ? err.message : 'Auto-Collect import failed.');
     } finally {
       setAutoCollectImporting(false);
+    }
+  };
+
+  const handleSeparateBrokersFromCustomers = async () => {
+    setCleaningParties(true);
+    setDriveError(null);
+    try {
+      const analysis = analyzeAndSeparateMisclassifiedParties({
+        parties: allData.parties,
+        drivers: allData.drivers,
+        lorryHires: allData.lorryHires,
+        invoices: allData.invoices,
+        consignments: allData.consignments,
+        extraOwnerNames: allData.vehicles.map((v) => v.ownerName || '').filter(Boolean),
+      });
+
+      if (analysis.updatedParties.length === 0 && analysis.duplicatePartyIds.length === 0) {
+        const customerCount = allData.parties.filter(
+          (p) => p.partyType === 'Customer' || p.partyType === 'Consignor' || p.partyType === 'Consignee'
+        ).length;
+        setDriveStatus(
+          `Verified Customer Master (${customerCount} Customers): All Brokers, Vehicle Owners & Drivers are already cleanly separated from Billing Parties.`
+        );
+        return;
+      }
+
+      if (analysis.updatedParties.length > 0) {
+        await bulkUpsertDocuments(
+          'parties',
+          analysis.updatedParties as unknown as Array<Record<string, unknown>>
+        );
+      }
+      for (const dupId of analysis.duplicatePartyIds) {
+        await removeDocument('parties', dupId);
+      }
+
+      setDriveStatus(
+        `Clean / Separate Complete: Moved ${analysis.brokersSeparated} Broker(s), ${analysis.ownersSeparated} Vehicle Owner(s), and ${analysis.driversSeparated} Driver Ledger(s) out of Billing Customers (${analysis.duplicatesMerged} duplicate rows merged). Tax Invoice "Bill To Party *" now shows strictly Customer / Billing Parties.`
+      );
+    } catch (err) {
+      setDriveError(err instanceof Error ? err.message : 'Failed to separate brokers from billing parties.');
+    } finally {
+      setCleaningParties(false);
     }
   };
 
@@ -1221,6 +1286,59 @@ const BackupSettingsModuleInner: React.FC<BackupSettingsModuleProps> = ({
                   Select Multiple .DBF / Excel Files
                 </button>
               </div>
+            </div>
+
+            {/* One-Click Cleanup Bar for Already-Imported FoxPro / Party Master Records */}
+            <div className="px-4 py-2.5 bg-slate-50 border-b border-slate-200 flex flex-wrap items-center justify-between gap-2 text-xs">
+              <div className="flex flex-wrap items-center gap-2 text-slate-700">
+                <Users className="w-4 h-4 text-blue-700 shrink-0" />
+                <span className="font-bold text-slate-900">Party Master Hygiene:</span>
+                <span>
+                  Customers:{' '}
+                  <strong className="text-emerald-700 font-mono-num">
+                    {
+                      allData.parties.filter(
+                        (p) =>
+                          p.partyType === 'Customer' ||
+                          p.partyType === 'Consignor' ||
+                          p.partyType === 'Consignee'
+                      ).length
+                    }
+                  </strong>
+                  {' · '}Brokers:{' '}
+                  <strong className="text-indigo-700 font-mono-num">
+                    {allData.parties.filter((p) => p.partyType === 'Broker').length}
+                  </strong>
+                  {' · '}Vehicle Owners:{' '}
+                  <strong className="text-amber-700 font-mono-num">
+                    {allData.parties.filter((p) => p.partyType === 'TruckOwner').length}
+                  </strong>
+                </span>
+                {partySeparationPreview.brokersSeparated +
+                  partySeparationPreview.ownersSeparated +
+                  partySeparationPreview.driversSeparated +
+                  partySeparationPreview.duplicatesMerged >
+                  0 && (
+                  <span className="px-2 py-0.5 rounded bg-amber-100 text-amber-900 font-bold text-[11px]">
+                    {partySeparationPreview.brokersSeparated +
+                      partySeparationPreview.ownersSeparated +
+                      partySeparationPreview.driversSeparated +
+                      partySeparationPreview.duplicatesMerged}{' '}
+                    misclassified FoxPro / Broker record(s) found
+                  </span>
+                )}
+              </div>
+              <button
+                type="button"
+                disabled={cleaningParties}
+                onClick={handleSeparateBrokersFromCustomers}
+                className="inline-flex items-center gap-1.5 px-3.5 py-1.5 rounded-lg bg-indigo-700 hover:bg-indigo-800 text-white text-xs font-extrabold cursor-pointer whitespace-nowrap disabled:opacity-60"
+              >
+                <Sparkles className="w-3.5 h-3.5" />
+                {cleaningParties
+                  ? 'Separating...'
+                  : 'Clean / Separate Brokers from Billing Parties'}
+              </button>
             </div>
 
             {autoCollectResult && (

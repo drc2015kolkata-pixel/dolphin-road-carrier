@@ -24,6 +24,11 @@ import {
   generateFoxproStatementPDF,
   generateLogisticsInvoicePDF,
 } from '../lib/pdfEngine';
+import {
+  EntityQuickPreviewCard,
+  formatPartyDetailsLine,
+  RichEntityPicker,
+} from './RichEntityPicker';
 
 interface LogisticsBillingLedgerPanelProps {
   subView: 'billing' | 'ledgers';
@@ -85,6 +90,7 @@ export const LogisticsBillingLedgerPanel: React.FC<LogisticsBillingLedgerPanelPr
   const [docDate, setDocDate] = useState(today);
   const [linkedDocNo, setLinkedDocNo] = useState('');
   const [partyName, setPartyName] = useState('');
+  const [selectedBillPartyId, setSelectedBillPartyId] = useState('');
   const [partyAddress, setPartyAddress] = useState('');
   const [partyGstin, setPartyGstin] = useState('');
   const [partyPan, setPartyPan] = useState('');
@@ -102,6 +108,7 @@ export const LogisticsBillingLedgerPanel: React.FC<LogisticsBillingLedgerPanelPr
   const [voucherDate, setVoucherDate] = useState(today);
   const [voucherType, setVoucherType] = useState<'Receipt' | 'Payment' | 'COD Cash' | 'Adjustment'>('Receipt');
   const [ledgerParty, setLedgerParty] = useState('');
+  const [selectedLedgerPartyId, setSelectedLedgerPartyId] = useState('');
   const [ledgerAmt, setLedgerAmt] = useState('');
   const [tdsAmt, setTdsAmt] = useState('0');
   const [paymentMode, setPaymentMode] = useState('UPI');
@@ -112,14 +119,36 @@ export const LogisticsBillingLedgerPanel: React.FC<LogisticsBillingLedgerPanelPr
   const [ledgerSearch, setLedgerSearch] = useState('');
   const [savingVoucher, setSavingVoucher] = useState(false);
 
+  const logisticsBillingParties = useMemo(
+    () =>
+      parties.filter(
+        (p) =>
+          p.partyType === 'Customer' ||
+          p.partyType === 'Consignor' ||
+          p.partyType === 'Consignee'
+      ),
+    [parties]
+  );
+
+  const applySelectedBillingParty = (p: LogisticsParty) => {
+    setPartyName(p.name);
+    setSelectedBillPartyId(p.id);
+    setPartyAddress(p.address || '');
+    setPartyGstin(p.gstin || '');
+    setPartyPan(p.pan || '');
+  };
+
   const handleSelectParty = (val: string) => {
     setPartyName(val);
-    const p = parties.find((x) => x.name.toLowerCase() === val.trim().toLowerCase());
-    if (p) {
-      setPartyAddress(p.address || '');
-      setPartyGstin(p.gstin || '');
-      setPartyPan(p.pan || '');
+    const clean = val.trim().toLowerCase();
+    const matches = logisticsBillingParties.filter(
+      (x) => x.name.trim().toLowerCase() === clean
+    );
+    if (matches.length === 1) {
+      applySelectedBillingParty(matches[0]);
+      return;
     }
+    setSelectedBillPartyId('');
   };
 
   const unbilledDocketsForParty = useMemo(() => {
@@ -469,20 +498,48 @@ export const LogisticsBillingLedgerPanel: React.FC<LogisticsBillingLedgerPanelPr
 
               <div className="grid grid-cols-1 sm:grid-cols-2 gap-2">
                 <div>
-                  <label className="block text-[11px] font-bold text-slate-600 mb-0.5">Billing Party*</label>
-                  <input
-                    required
-                    list="logi-billing-parties"
+                  <label className="block text-[11px] font-bold text-slate-600 mb-0.5">
+                    Billing Party* (Customers Only: {logisticsBillingParties.length})
+                  </label>
+                  <RichEntityPicker<LogisticsParty>
+                    ariaLabel="Logistics Billing Party"
                     value={partyName}
-                    onChange={(e) => handleSelectParty(e.target.value)}
-                    placeholder="Select Logistics Party..."
-                    className="w-full px-2.5 py-1.5 rounded border border-slate-300 font-semibold"
+                    selectedId={selectedBillPartyId}
+                    onChangeText={(val) => handleSelectParty(val)}
+                    onSelectEntity={(p) => applySelectedBillingParty(p)}
+                    items={logisticsBillingParties}
+                    getId={(p) => p.id}
+                    getValue={(p) => p.name}
+                    getSearchText={(p) =>
+                      `${p.name} ${p.gstin || ''} ${p.pan || ''} ${p.address || ''} ${p.phone || ''}`
+                    }
+                    renderTitle={(p) => p.name}
+                    renderBadge={(p) => p.partyType}
+                    renderDetails={(p) => formatPartyDetailsLine(p)}
+                    placeholder="Search Customer by Name, GSTIN, City or Phone..."
+                    required
+                    quickPreview={(() => {
+                      const clean = partyName.trim().toLowerCase();
+                      if (!clean) return null;
+                      const matches = logisticsBillingParties.filter(
+                        (p) => p.name.trim().toLowerCase() === clean
+                      );
+                      const resolved =
+                        (selectedBillPartyId
+                          ? logisticsBillingParties.find((p) => p.id === selectedBillPartyId)
+                          : undefined) ||
+                        (matches.length === 1 ? matches[0] : matches[0]);
+                      return (
+                        <EntityQuickPreviewCard
+                          kind="party"
+                          party={resolved}
+                          duplicateCount={matches.length}
+                          ambiguousSelected={matches.length > 1 && !selectedBillPartyId}
+                          compact
+                        />
+                      );
+                    })()}
                   />
-                  <datalist id="logi-billing-parties">
-                    {parties.map((p) => (
-                      <option key={p.id} value={p.name} />
-                    ))}
-                  </datalist>
                 </div>
                 <div>
                   <label className="block text-[11px] font-bold text-slate-600 mb-0.5">Party GSTIN</label>
@@ -812,19 +869,54 @@ export const LogisticsBillingLedgerPanel: React.FC<LogisticsBillingLedgerPanelPr
                 <div className="grid grid-cols-2 gap-2">
                   <div>
                     <label className="block text-[11px] font-bold text-slate-600 mb-0.5">Party / Driver Name*</label>
-                    <input
-                      required
-                      list="logi-ledger-parties"
+                    <RichEntityPicker<LogisticsParty>
+                      ariaLabel="Logistics Ledger Party"
                       value={ledgerParty}
-                      onChange={(e) => setLedgerParty(e.target.value)}
-                      placeholder="Select party..."
-                      className="w-full px-2.5 py-1.5 rounded border border-slate-300 font-semibold"
+                      selectedId={selectedLedgerPartyId}
+                      onChangeText={(val) => {
+                        setLedgerParty(val);
+                        const matches = parties.filter(
+                          (p) => p.name.trim().toLowerCase() === val.trim().toLowerCase()
+                        );
+                        setSelectedLedgerPartyId(matches.length === 1 ? matches[0].id : '');
+                      }}
+                      onSelectEntity={(p) => {
+                        setLedgerParty(p.name);
+                        setSelectedLedgerPartyId(p.id);
+                      }}
+                      items={parties}
+                      getId={(p) => p.id}
+                      getValue={(p) => p.name}
+                      getSearchText={(p) =>
+                        `${p.name} ${p.gstin || ''} ${p.pan || ''} ${p.address || ''} ${p.phone || ''} ${p.partyType}`
+                      }
+                      renderTitle={(p) => p.name}
+                      renderBadge={(p) => p.partyType}
+                      renderDetails={(p) => formatPartyDetailsLine(p)}
+                      placeholder="Search Party by Name, GSTIN, PAN, City or Phone..."
+                      required
+                      quickPreview={(() => {
+                        const clean = ledgerParty.trim().toLowerCase();
+                        if (!clean) return null;
+                        const matches = parties.filter(
+                          (p) => p.name.trim().toLowerCase() === clean
+                        );
+                        const resolved =
+                          (selectedLedgerPartyId
+                            ? parties.find((p) => p.id === selectedLedgerPartyId)
+                            : undefined) ||
+                          (matches.length === 1 ? matches[0] : matches[0]);
+                        return (
+                          <EntityQuickPreviewCard
+                            kind="party"
+                            party={resolved}
+                            duplicateCount={matches.length}
+                            ambiguousSelected={matches.length > 1 && !selectedLedgerPartyId}
+                            compact
+                          />
+                        );
+                      })()}
                     />
-                    <datalist id="logi-ledger-parties">
-                      {parties.map((p) => (
-                        <option key={p.id} value={p.name} />
-                      ))}
-                    </datalist>
                   </div>
                   <div>
                     <label className="block text-[11px] font-bold text-slate-600 mb-0.5">Linked Invoice / Docket No</label>

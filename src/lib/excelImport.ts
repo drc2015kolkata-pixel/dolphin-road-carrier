@@ -162,7 +162,9 @@ export async function parseExcelOrCsvFile(params: {
       const balType: 'Dr' | 'Cr' = drCrRaw.startsWith('C') ? 'Cr' : 'Dr';
       const catRaw = getField(row, ['Category', 'Party Type', 'Group']);
       const partyType: Party['partyType'] =
-        /truck|owner|broker/i.test(catRaw)
+        /broker|\bbrk\b/i.test(catRaw)
+          ? 'Broker'
+          : /truck|owner|vhl|lorry/i.test(catRaw)
           ? 'TruckOwner'
           : /vendor|fuel|diesel/i.test(catRaw)
           ? 'Vendor'
