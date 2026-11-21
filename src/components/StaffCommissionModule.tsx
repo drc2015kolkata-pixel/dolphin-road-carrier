@@ -2,6 +2,8 @@ import React, { useEffect, useMemo, useState } from 'react';
 import {
   CheckCircle2,
   Edit3,
+  Keyboard,
+  Landmark,
   Plus,
   Printer,
   Search,
@@ -11,8 +13,20 @@ import {
 import { logBranchActivity, removeDocument, upsertDocument } from '../lib/firestoreStore';
 import { formatDateDDMMYYYY, formatINR } from '../lib/formatters';
 import { GeneratedPdfResult, generateFoxproStatementPDF } from '../lib/pdfEngine';
-import { CompanySettings, StaffAccount, StaffCommissionEntry } from '../types/erp';
+import { playVerifiedBeep } from '../lib/audioFeedback';
+import {
+  BUSINESS_MODE_META,
+  BusinessMode,
+  CompanySettings,
+  StaffAccount,
+  StaffCommissionEntry,
+  StaffMultiAdvanceLog,
+  StaffMultiBalanceDateLog,
+  StaffMultiPaidReturnLog,
+} from '../types/erp';
 import { ConfirmModal } from './ConfirmModal';
+import { SearchableSelect } from './SearchableSelect';
+import { COMMON_REMARK_PRESETS, PAYMENT_MODE_OPTIONS } from '../lib/dropdownMasterStore';
 
 export const WHEEL_TYPES = [
   '4-Wheeler',
@@ -74,24 +88,74 @@ export const StaffCommissionModule: React.FC<StaffCommissionModuleProps> = ({
   const [searchTerm, setSearchTerm] = useState('');
   const [editingId, setEditingId] = useState<string | null>(null);
   const [entryDate, setEntryDate] = useState(() => new Date().toISOString().slice(0, 10));
+  const [division, setDivision] = useState<BusinessMode>('FTL');
   const [staffName, setStaffName] = useState(
     () => staffAccounts[0]?.displayName || 'Field Booking Staff'
   );
+  const [staffBankAccount, setStaffBankAccount] = useState('');
+  const [staffUpiId, setStaffUpiId] = useState('');
   const [challanNo, setChallanNo] = useState(prefillChallanNo);
   const [truckNo, setTruckNo] = useState(prefillTruckNo);
   const [wheelType, setWheelType] = useState<string>('10-Wheeler');
   const [entryType, setEntryType] = useState<'Commission' | 'Advance Taken' | 'Paid'>('Commission');
   const [amount, setAmount] = useState<string>(() => String(DEFAULT_WHEEL_RATES['10-Wheeler']));
+  const [travellingAmt, setTravellingAmt] = useState<string>('0');
+  const [miscAmt, setMiscAmt] = useState<string>('0');
   const [paymentMode, setPaymentMode] = useState('Cash');
   const [remarks, setRemarks] = useState('');
+  const [showMultiLogs, setShowMultiLogs] = useState(false);
+  const [multiAdvances, setMultiAdvances] = useState<StaffMultiAdvanceLog[]>([]);
+  const [multiPaidReturns, setMultiPaidReturns] = useState<StaffMultiPaidReturnLog[]>([]);
+  const [multiBalanceDates, setMultiBalanceDates] = useState<StaffMultiBalanceDateLog[]>([]);
   const [saving, setSaving] = useState(false);
   const [bannerMsg, setBannerMsg] = useState<string | null>(null);
   const [deleteTarget, setDeleteTarget] = useState<StaffCommissionEntry | null>(null);
+
+  const matchedStaffProfile = useMemo(
+    () =>
+      staffAccounts.find(
+        (s) => s.displayName.trim().toLowerCase() === staffName.trim().toLowerCase()
+      ) || null,
+    [staffAccounts, staffName]
+  );
+
+  useEffect(() => {
+    if (!matchedStaffProfile) return;
+    const formattedBank = matchedStaffProfile.bankAccountNo
+      ? `${matchedStaffProfile.bankName || 'Bank'} A/c ${matchedStaffProfile.bankAccountNo}${
+          matchedStaffProfile.bankIfsc ? ` (${matchedStaffProfile.bankIfsc})` : ''
+        }`
+      : '';
+    if (formattedBank && !editingId) setStaffBankAccount(formattedBank);
+    if (matchedStaffProfile.upiId && !editingId) setStaffUpiId(matchedStaffProfile.upiId);
+  }, [matchedStaffProfile, editingId]);
 
   useEffect(() => {
     if (prefillChallanNo) setChallanNo(prefillChallanNo);
     if (prefillTruckNo) setTruckNo(prefillTruckNo);
   }, [prefillChallanNo, prefillTruckNo]);
+
+  useEffect(() => {
+    if (readOnly) return;
+    const onKeyDown = (e: KeyboardEvent) => {
+      if (e.key !== 'm' && e.key !== 'M') return;
+      if (e.ctrlKey || e.metaKey || e.altKey) return;
+      const target = e.target as HTMLElement | null;
+      if (
+        target &&
+        (target.tagName === 'INPUT' ||
+          target.tagName === 'TEXTAREA' ||
+          target.tagName === 'SELECT' ||
+          target.isContentEditable)
+      ) {
+        return;
+      }
+      e.preventDefault();
+      setShowMultiLogs((v) => !v);
+    };
+    window.addEventListener('keydown', onKeyDown);
+    return () => window.removeEventListener('keydown', onKeyDown);
+  }, [readOnly]);
 
   const handleWheelChange = (nextWheel: string) => {
     setWheelType(nextWheel);
@@ -179,13 +243,19 @@ export const StaffCommissionModule: React.FC<StaffCommissionModuleProps> = ({
   const resetForm = () => {
     setEditingId(null);
     setEntryDate(new Date().toISOString().slice(0, 10));
+    setDivision('FTL');
     setChallanNo(prefillChallanNo || '');
     setTruckNo(prefillTruckNo || '');
     setEntryType('Commission');
     setWheelType('10-Wheeler');
     setAmount(String(wheelRates['10-Wheeler'] ?? 600));
+    setTravellingAmt('0');
+    setMiscAmt('0');
     setPaymentMode('Cash');
     setRemarks('');
+    setMultiAdvances([]);
+    setMultiPaidReturns([]);
+    setMultiBalanceDates([]);
   };
 
   const handleSave = async (e: React.FormEvent) => {
@@ -196,7 +266,9 @@ export const StaffCommissionModule: React.FC<StaffCommissionModuleProps> = ({
       return;
     }
     const numAmount = Math.max(0, Number(amount || 0));
-    if (numAmount <= 0) {
+    const numTrav = Math.max(0, Number(travellingAmt || 0));
+    const numMisc = Math.max(0, Number(miscAmt || 0));
+    if (numAmount <= 0 && numTrav <= 0 && numMisc <= 0) {
       setBannerMsg('Please enter an amount greater than 0.');
       return;
     }
@@ -205,6 +277,33 @@ export const StaffCommissionModule: React.FC<StaffCommissionModuleProps> = ({
     setBannerMsg(null);
     const id = editingId || `comm_${Date.now()}_${Math.random().toString(36).slice(2, 6)}`;
     try {
+      const cleanAdvances = multiAdvances
+        .filter((a) => Number(a.amount) > 0 || a.account.trim())
+        .slice(0, 50)
+        .map((a) => ({
+          date: a.date || entryDate,
+          account: (a.account || 'Cash').trim(),
+          amount: Math.max(0, Number(a.amount) || 0),
+          mode: a.mode || 'Cash',
+        }));
+      const cleanReturns = multiPaidReturns
+        .filter((r) => Number(r.amount) > 0 || (r.refNo || '').trim())
+        .slice(0, 50)
+        .map((r) => ({
+          date: r.date || entryDate,
+          amount: Math.max(0, Number(r.amount) || 0),
+          mode: r.mode || 'Cash',
+          refNo: (r.refNo || '').trim(),
+        }));
+      const cleanBalDates = multiBalanceDates
+        .filter((b) => Number(b.balanceAmt) > 0 || (b.note || '').trim())
+        .slice(0, 50)
+        .map((b) => ({
+          date: b.date || entryDate,
+          balanceAmt: Math.max(0, Number(b.balanceAmt) || 0),
+          note: (b.note || '').trim(),
+        }));
+
       await upsertDocument(
         'staff_commissions',
         id,
@@ -212,15 +311,23 @@ export const StaffCommissionModule: React.FC<StaffCommissionModuleProps> = ({
           id,
           entryDate,
           financialYear: activeFy,
+          division,
           staffName: staffName.trim(),
+          staffBankAccount: staffBankAccount.trim(),
+          staffUpiId: staffUpiId.trim(),
           challanNo: challanNo.trim().toUpperCase(),
           truckNo: truckNo.trim().toUpperCase(),
           wheelType,
           entryType,
           commissionRate: wheelRates[wheelType] ?? 0,
+          travellingAmt: numTrav,
+          miscAmt: numMisc,
           amount: numAmount,
           paymentMode,
           remarks: remarks.trim(),
+          multiAdvances: cleanAdvances,
+          multiPaidReturns: cleanReturns,
+          multiBalanceDates: cleanBalDates,
           branchCode: currentBranchCode,
           createdByStaff: currentStaffCode,
           ownerUid,
@@ -232,12 +339,13 @@ export const StaffCommissionModule: React.FC<StaffCommissionModuleProps> = ({
         action: editingId ? 'UPDATE_STAFF_COMMISSION' : 'ADD_STAFF_COMMISSION',
         module: 'STAFF_COMMISSION',
         docRefCode: challanNo || staffName,
-        summary: `${entryType} Rs.${numAmount} for ${staffName} (${wheelType})`,
+        summary: `[${division}] ${entryType} Rs.${numAmount} for ${staffName} (${wheelType})`,
         staffCode: currentStaffCode,
         branchCode: currentBranchCode,
         ownerUid,
       });
 
+      playVerifiedBeep();
       setBannerMsg(
         editingId
           ? `Updated ${entryType} entry (Rs. ${formatINR(numAmount)}) for ${staffName}.`
@@ -253,14 +361,29 @@ export const StaffCommissionModule: React.FC<StaffCommissionModuleProps> = ({
     if (readOnly) return;
     setEditingId(row.id);
     setEntryDate(row.entryDate || new Date().toISOString().slice(0, 10));
+    setDivision((row.division as BusinessMode) || 'FTL');
     setStaffName(row.staffName);
+    setStaffBankAccount(row.staffBankAccount || '');
+    setStaffUpiId(row.staffUpiId || '');
     setChallanNo(row.challanNo || '');
     setTruckNo(row.truckNo || '');
     setWheelType(row.wheelType || '10-Wheeler');
     setEntryType(row.entryType);
     setAmount(String(row.amount || 0));
+    setTravellingAmt(String(row.travellingAmt ?? 0));
+    setMiscAmt(String(row.miscAmt ?? 0));
     setPaymentMode(row.paymentMode || 'Cash');
     setRemarks(row.remarks || '');
+    setMultiAdvances(Array.isArray(row.multiAdvances) ? row.multiAdvances : []);
+    setMultiPaidReturns(Array.isArray(row.multiPaidReturns) ? row.multiPaidReturns : []);
+    setMultiBalanceDates(Array.isArray(row.multiBalanceDates) ? row.multiBalanceDates : []);
+    if (
+      (row.multiAdvances?.length || 0) > 0 ||
+      (row.multiPaidReturns?.length || 0) > 0 ||
+      (row.multiBalanceDates?.length || 0) > 0
+    ) {
+      setShowMultiLogs(true);
+    }
   };
 
   const handleConfirmDelete = async () => {
@@ -340,18 +463,19 @@ export const StaffCommissionModule: React.FC<StaffCommissionModuleProps> = ({
           </div>
 
           <div className="flex flex-wrap items-center gap-2">
-            <select
-              value={staffFilter}
-              onChange={(e) => setStaffFilter(e.target.value)}
-              className="px-2.5 py-1.5 rounded-lg border border-slate-300 bg-white text-xs font-bold text-slate-800"
-            >
-              <option value="ALL">All Staff Members</option>
-              {staffNameOptions.map((n) => (
-                <option key={n} value={n}>
-                  {n}
-                </option>
-              ))}
-            </select>
+            <div className="min-w-[185px]">
+              <SearchableSelect
+                ariaLabel="Filter by Staff Member"
+                value={staffFilter}
+                onChange={setStaffFilter}
+                options={[
+                  { value: 'ALL', label: 'All Staff Members', pinFirst: true },
+                  ...staffNameOptions.map((n) => ({ value: n, label: n })),
+                ]}
+                triggerClassName="!py-1.5 !font-bold"
+                searchPlaceholder="Search staff member..."
+              />
+            </div>
             <button
               type="button"
               onClick={() => void handlePrintPdf()}
@@ -417,19 +541,35 @@ export const StaffCommissionModule: React.FC<StaffCommissionModuleProps> = ({
           onSubmit={(e) => void handleSave(e)}
           className="bg-white rounded-xl border border-slate-200 shadow-sm p-4 space-y-3"
         >
-          <div className="flex items-center justify-between">
+          <div className="flex flex-wrap items-center justify-between gap-2">
             <h4 className="text-sm font-extrabold text-slate-900">
               {editingId ? 'Edit Staff Commission / Advance Entry' : 'Add Staff Commission / Advance / Settlement'}
             </h4>
-            {editingId && (
+            <div className="flex items-center gap-2">
               <button
                 type="button"
-                onClick={resetForm}
-                className="text-xs font-bold text-red-700 hover:underline cursor-pointer"
+                onClick={() => setShowMultiLogs((v) => !v)}
+                className={`inline-flex items-center gap-1.5 px-2.5 py-1 rounded-lg border text-xs font-bold cursor-pointer ${
+                  showMultiLogs
+                    ? 'bg-amber-100 border-amber-400 text-amber-900'
+                    : 'bg-slate-100 border-slate-300 text-slate-700 hover:bg-slate-200'
+                }`}
+                title="Shortcut: Press M when outside text inputs"
               >
-                Cancel Edit
+                <Keyboard className="w-3.5 h-3.5" />
+                M (Multi Logs:{' '}
+                {multiAdvances.length + multiPaidReturns.length + multiBalanceDates.length})
               </button>
-            )}
+              {editingId && (
+                <button
+                  type="button"
+                  onClick={resetForm}
+                  className="text-xs font-bold text-red-700 hover:underline cursor-pointer"
+                >
+                  Cancel Edit
+                </button>
+              )}
+            </div>
           </div>
 
           <div className="grid grid-cols-1 sm:grid-cols-2 lg:grid-cols-4 gap-3">
@@ -441,6 +581,24 @@ export const StaffCommissionModule: React.FC<StaffCommissionModuleProps> = ({
                 onChange={(e) => setEntryDate(e.target.value)}
                 required
                 className="w-full px-2.5 py-2 rounded-lg border border-slate-300 text-xs bg-white"
+              />
+            </div>
+
+            <div>
+              <label className="block text-[11px] font-bold text-slate-700 mb-1">
+                Business Division
+              </label>
+              <SearchableSelect
+                ariaLabel="Staff Commission Division"
+                value={division}
+                onChange={(val) => setDivision((val as BusinessMode) || 'FTL')}
+                options={[
+                  { value: 'FTL', label: BUSINESS_MODE_META.FTL.shortLabel },
+                  { value: 'LOGISTICS', label: BUSINESS_MODE_META.LOGISTICS.shortLabel },
+                  { value: 'PTL', label: BUSINESS_MODE_META.PTL.shortLabel },
+                  { value: 'COURIER', label: BUSINESS_MODE_META.COURIER.shortLabel },
+                ]}
+                triggerClassName="!py-2 !font-bold"
               />
             </div>
 
@@ -467,38 +625,40 @@ export const StaffCommissionModule: React.FC<StaffCommissionModuleProps> = ({
               <label className="block text-[11px] font-bold text-slate-700 mb-1">
                 Entry Type
               </label>
-              <select
+              <SearchableSelect
+                ariaLabel="Staff Commission Entry Type"
                 value={entryType}
-                onChange={(e) =>
-                  handleEntryTypeChange(e.target.value as 'Commission' | 'Advance Taken' | 'Paid')
+                onChange={(val) =>
+                  handleEntryTypeChange(val as 'Commission' | 'Advance Taken' | 'Paid')
                 }
-                className="w-full px-2.5 py-2 rounded-lg border border-slate-300 text-xs bg-white font-bold"
-              >
-                <option value="Commission">Commission Earned (+)</option>
-                <option value="Advance Taken">Advance Taken (-)</option>
-                <option value="Paid">Settlement Paid (-)</option>
-              </select>
+                options={[
+                  { value: 'Advance Taken', label: 'Advance Taken (-)' },
+                  { value: 'Commission', label: 'Commission Earned (+)' },
+                  { value: 'Paid', label: 'Settlement Paid (-)' },
+                ]}
+                triggerClassName="!py-2 !font-bold"
+              />
             </div>
 
             <div>
               <label className="block text-[11px] font-bold text-slate-700 mb-1">
                 Vehicle Wheel Type
               </label>
-              <select
+              <SearchableSelect
+                ariaLabel="Vehicle Wheel Type"
                 value={wheelType}
-                onChange={(e) => handleWheelChange(e.target.value)}
-                className="w-full px-2.5 py-2 rounded-lg border border-slate-300 text-xs bg-white font-bold"
-              >
-                {WHEEL_TYPES.map((w) => (
-                  <option key={w} value={w}>
-                    {w} (Rate Rs.{wheelRates[w] ?? 500})
-                  </option>
-                ))}
-              </select>
+                onChange={handleWheelChange}
+                options={WHEEL_TYPES.map((w) => ({
+                  value: w,
+                  label: `${w} (Rate Rs.${wheelRates[w] ?? 500})`,
+                }))}
+                triggerClassName="!py-2 !font-bold"
+                searchPlaceholder="Search wheel type..."
+              />
             </div>
 
             <div>
-              <label className="block text-[11px] font-bold text-slate-700 mb-1">Challan / CN No.</label>
+              <label className="block text-[11px] font-bold text-slate-700 mb-1">Challan Against (CN/Challan)</label>
               <input
                 type="text"
                 value={challanNo}
@@ -521,11 +681,11 @@ export const StaffCommissionModule: React.FC<StaffCommissionModuleProps> = ({
 
             <div>
               <label className="block text-[11px] font-bold text-slate-700 mb-1">
-                Amount (Rs.)
+                Amount / Rupees (Rs.)
               </label>
               <input
                 type="number"
-                min="0.01"
+                min="0"
                 step="0.01"
                 value={amount}
                 onChange={(e) => setAmount(e.target.value)}
@@ -536,29 +696,306 @@ export const StaffCommissionModule: React.FC<StaffCommissionModuleProps> = ({
 
             <div>
               <label className="block text-[11px] font-bold text-slate-700 mb-1">
+                Travelling Expense (Rs.)
+              </label>
+              <input
+                type="number"
+                min="0"
+                step="0.01"
+                value={travellingAmt}
+                onChange={(e) => setTravellingAmt(e.target.value)}
+                className="w-full px-2.5 py-2 rounded-lg border border-slate-300 text-xs bg-white font-mono-num"
+              />
+            </div>
+
+            <div>
+              <label className="block text-[11px] font-bold text-slate-700 mb-1">
+                Miscellaneous Expense (Rs.)
+              </label>
+              <input
+                type="number"
+                min="0"
+                step="0.01"
+                value={miscAmt}
+                onChange={(e) => setMiscAmt(e.target.value)}
+                className="w-full px-2.5 py-2 rounded-lg border border-slate-300 text-xs bg-white font-mono-num"
+              />
+            </div>
+
+            <div className="sm:col-span-2">
+              <label className="block text-[11px] font-bold text-slate-700 mb-1">
+                Staff Bank A/c &amp; UPI (Auto-Fetched)
+              </label>
+              <div className="grid grid-cols-1 sm:grid-cols-2 gap-1.5">
+                <input
+                  type="text"
+                  value={staffBankAccount}
+                  onChange={(e) => setStaffBankAccount(e.target.value)}
+                  placeholder="Bank Name & Account No / IFSC"
+                  className="w-full px-2.5 py-2 rounded-lg border border-slate-300 text-xs bg-slate-50 font-mono-num"
+                />
+                <input
+                  type="text"
+                  value={staffUpiId}
+                  onChange={(e) => setStaffUpiId(e.target.value)}
+                  placeholder="Staff UPI ID"
+                  className="w-full px-2.5 py-2 rounded-lg border border-slate-300 text-xs bg-slate-50 font-mono-num"
+                />
+              </div>
+              {matchedStaffProfile && (
+                <div className="mt-1 inline-flex items-center gap-1 text-[10px] font-semibold text-emerald-700">
+                  <Landmark className="w-3 h-3" />
+                  <span>
+                    Verified Staff Profile ({matchedStaffProfile.staffCode}) · Bank:{' '}
+                    {matchedStaffProfile.bankName || 'N/A'} {matchedStaffProfile.bankAccountNo || ''}
+                  </span>
+                </div>
+              )}
+            </div>
+
+            <div className="sm:col-span-2 lg:col-span-4">
+              <label className="block text-[11px] font-bold text-slate-700 mb-1">
                 Payment Mode &amp; Remarks
               </label>
-              <div className="flex gap-1.5">
-                <select
+              <div className="grid grid-cols-1 sm:grid-cols-3 gap-1.5">
+                <SearchableSelect
+                  ariaLabel="Commission Payment Mode"
                   value={paymentMode}
-                  onChange={(e) => setPaymentMode(e.target.value)}
-                  className="px-2 py-2 rounded-lg border border-slate-300 text-xs bg-white"
-                >
-                  <option value="Cash">Cash</option>
-                  <option value="UPI">UPI</option>
-                  <option value="Bank">Bank</option>
-                  <option value="Adjustment">Adj</option>
-                </select>
+                  onChange={setPaymentMode}
+                  options={[...PAYMENT_MODE_OPTIONS, 'Adjustment']}
+                  triggerClassName="!py-2"
+                />
                 <input
                   type="text"
                   value={remarks}
                   onChange={(e) => setRemarks(e.target.value)}
                   placeholder="Optional remark..."
-                  className="flex-1 min-w-0 px-2.5 py-2 rounded-lg border border-slate-300 text-xs bg-white"
+                  className="w-full px-2.5 py-2 rounded-lg border border-slate-300 text-xs bg-white"
+                />
+                <SearchableSelect
+                  ariaLabel="Quick Remark Preset"
+                  value=""
+                  onChange={(val) => {
+                    if (val) setRemarks(val);
+                  }}
+                  options={[
+                    { value: '', label: '+ Quick Remark Preset (A-Z)...', pinFirst: true },
+                    ...COMMON_REMARK_PRESETS.map((r) => ({ value: r, label: r })),
+                  ]}
+                  triggerClassName="!py-2 !text-xs"
+                  searchPlaceholder="Search remarks..."
                 />
               </div>
             </div>
           </div>
+
+          {showMultiLogs && (
+            <div className="grid grid-cols-1 lg:grid-cols-3 gap-3 p-3 rounded-lg bg-amber-50/70 border border-amber-200">
+              {/* Log 1: Multi Advances */}
+              <div className="bg-white p-2.5 rounded-lg border border-amber-200 space-y-2">
+                <div className="flex items-center justify-between">
+                  <span className="text-[11px] font-extrabold text-amber-900">
+                    Multi-Advance Log ({multiAdvances.length}/50)
+                  </span>
+                  <button
+                    type="button"
+                    disabled={multiAdvances.length >= 50}
+                    onClick={() =>
+                      setMultiAdvances((prev) => [
+                        ...prev,
+                        { date: entryDate, account: 'Cash', amount: 0, mode: 'Cash' },
+                      ])
+                    }
+                    className="px-2 py-0.5 rounded bg-amber-600 text-white text-[10px] font-bold cursor-pointer disabled:opacity-50"
+                  >
+                    + Add
+                  </button>
+                </div>
+                {multiAdvances.map((a, idx) => (
+                  <div key={idx} className="grid grid-cols-12 gap-1 items-center text-[11px]">
+                    <input
+                      type="date"
+                      value={a.date}
+                      onChange={(e) =>
+                        setMultiAdvances((prev) =>
+                          prev.map((r, i) => (i === idx ? { ...r, date: e.target.value } : r))
+                        )
+                      }
+                      className="col-span-4 px-1.5 py-1 rounded border border-slate-300"
+                    />
+                    <input
+                      value={a.account}
+                      placeholder="Account"
+                      onChange={(e) =>
+                        setMultiAdvances((prev) =>
+                          prev.map((r, i) => (i === idx ? { ...r, account: e.target.value } : r))
+                        )
+                      }
+                      className="col-span-4 px-1.5 py-1 rounded border border-slate-300"
+                    />
+                    <input
+                      type="number"
+                      step="0.01"
+                      value={a.amount}
+                      onChange={(e) =>
+                        setMultiAdvances((prev) =>
+                          prev.map((r, i) =>
+                            i === idx ? { ...r, amount: Number(e.target.value) || 0 } : r
+                          )
+                        )
+                      }
+                      className="col-span-3 px-1.5 py-1 rounded border border-slate-300 font-mono-num text-right"
+                    />
+                    <button
+                      type="button"
+                      onClick={() =>
+                        setMultiAdvances((prev) => prev.filter((_, i) => i !== idx))
+                      }
+                      className="col-span-1 text-red-600 font-bold cursor-pointer"
+                    >
+                      ×
+                    </button>
+                  </div>
+                ))}
+              </div>
+
+              {/* Log 2: Multi Paid / Returns */}
+              <div className="bg-white p-2.5 rounded-lg border border-emerald-200 space-y-2">
+                <div className="flex items-center justify-between">
+                  <span className="text-[11px] font-extrabold text-emerald-900">
+                    Multi Paid / Returns ({multiPaidReturns.length}/50)
+                  </span>
+                  <button
+                    type="button"
+                    disabled={multiPaidReturns.length >= 50}
+                    onClick={() =>
+                      setMultiPaidReturns((prev) => [
+                        ...prev,
+                        { date: entryDate, amount: 0, mode: 'Cash', refNo: '' },
+                      ])
+                    }
+                    className="px-2 py-0.5 rounded bg-emerald-600 text-white text-[10px] font-bold cursor-pointer disabled:opacity-50"
+                  >
+                    + Add
+                  </button>
+                </div>
+                {multiPaidReturns.map((r, idx) => (
+                  <div key={idx} className="grid grid-cols-12 gap-1 items-center text-[11px]">
+                    <input
+                      type="date"
+                      value={r.date}
+                      onChange={(e) =>
+                        setMultiPaidReturns((prev) =>
+                          prev.map((row, i) => (i === idx ? { ...row, date: e.target.value } : row))
+                        )
+                      }
+                      className="col-span-4 px-1.5 py-1 rounded border border-slate-300"
+                    />
+                    <input
+                      value={r.refNo || ''}
+                      placeholder="Ref/Mode"
+                      onChange={(e) =>
+                        setMultiPaidReturns((prev) =>
+                          prev.map((row, i) => (i === idx ? { ...row, refNo: e.target.value } : row))
+                        )
+                      }
+                      className="col-span-4 px-1.5 py-1 rounded border border-slate-300"
+                    />
+                    <input
+                      type="number"
+                      step="0.01"
+                      value={r.amount}
+                      onChange={(e) =>
+                        setMultiPaidReturns((prev) =>
+                          prev.map((row, i) =>
+                            i === idx ? { ...row, amount: Number(e.target.value) || 0 } : row
+                          )
+                        )
+                      }
+                      className="col-span-3 px-1.5 py-1 rounded border border-slate-300 font-mono-num text-right"
+                    />
+                    <button
+                      type="button"
+                      onClick={() =>
+                        setMultiPaidReturns((prev) => prev.filter((_, i) => i !== idx))
+                      }
+                      className="col-span-1 text-red-600 font-bold cursor-pointer"
+                    >
+                      ×
+                    </button>
+                  </div>
+                ))}
+              </div>
+
+              {/* Log 3: Multi Balance Dates */}
+              <div className="bg-white p-2.5 rounded-lg border border-blue-200 space-y-2">
+                <div className="flex items-center justify-between">
+                  <span className="text-[11px] font-extrabold text-blue-900">
+                    Multi Balance Dates ({multiBalanceDates.length}/50)
+                  </span>
+                  <button
+                    type="button"
+                    disabled={multiBalanceDates.length >= 50}
+                    onClick={() =>
+                      setMultiBalanceDates((prev) => [
+                        ...prev,
+                        { date: entryDate, balanceAmt: 0, note: '' },
+                      ])
+                    }
+                    className="px-2 py-0.5 rounded bg-blue-600 text-white text-[10px] font-bold cursor-pointer disabled:opacity-50"
+                  >
+                    + Add
+                  </button>
+                </div>
+                {multiBalanceDates.map((b, idx) => (
+                  <div key={idx} className="grid grid-cols-12 gap-1 items-center text-[11px]">
+                    <input
+                      type="date"
+                      value={b.date}
+                      onChange={(e) =>
+                        setMultiBalanceDates((prev) =>
+                          prev.map((row, i) => (i === idx ? { ...row, date: e.target.value } : row))
+                        )
+                      }
+                      className="col-span-4 px-1.5 py-1 rounded border border-slate-300"
+                    />
+                    <input
+                      value={b.note || ''}
+                      placeholder="Note"
+                      onChange={(e) =>
+                        setMultiBalanceDates((prev) =>
+                          prev.map((row, i) => (i === idx ? { ...row, note: e.target.value } : row))
+                        )
+                      }
+                      className="col-span-4 px-1.5 py-1 rounded border border-slate-300"
+                    />
+                    <input
+                      type="number"
+                      step="0.01"
+                      value={b.balanceAmt}
+                      onChange={(e) =>
+                        setMultiBalanceDates((prev) =>
+                          prev.map((row, i) =>
+                            i === idx ? { ...row, balanceAmt: Number(e.target.value) || 0 } : row
+                          )
+                        )
+                      }
+                      className="col-span-3 px-1.5 py-1 rounded border border-slate-300 font-mono-num text-right"
+                    />
+                    <button
+                      type="button"
+                      onClick={() =>
+                        setMultiBalanceDates((prev) => prev.filter((_, i) => i !== idx))
+                      }
+                      className="col-span-1 text-red-600 font-bold cursor-pointer"
+                    >
+                      ×
+                    </button>
+                  </div>
+                ))}
+              </div>
+            </div>
+          )}
 
           <div className="flex justify-end gap-2 pt-1">
             {ledgerRows.netBalance > 0 && !editingId && (

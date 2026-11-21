@@ -44,6 +44,13 @@ import {
   Declaration194C,
   Driver,
   Invoice,
+  LogisticsDocket,
+  LogisticsDriver,
+  LogisticsInvoice,
+  LogisticsLedgerEntry,
+  LogisticsManifest,
+  LogisticsParty,
+  LogisticsVehicle,
   LorryHire,
   Party,
   PermissionKey,
@@ -53,12 +60,17 @@ import {
   StaffRole,
   TransactionRecord,
   Vehicle,
+  getLogisticsDivisionFromId,
 } from '../types/erp';
 import {
+  downloadIsolatedBusinessFileFromDrive,
   downloadMasterBackupFromDrive,
   DriveFileSummary,
+  getIsolatedDriveFileNames,
+  INSTALLER_VAULT_FOLDER,
   listDriveBackupFiles,
   runDailyDrive8FileCleanup,
+  uploadIsolatedBusinessBackupsToDrive,
   uploadMasterBackupToDrive,
 } from '../lib/driveBackup';
 import {
@@ -72,13 +84,17 @@ import {
 import { analyzeAndSeparateMisclassifiedParties } from '../lib/partySeparation';
 import {
   getLast90DayMaintenanceTimestamp,
+  getStoredAdminPin,
   runSystemAutoFixAndClean,
+  saveAdminPin,
+  verifyAdminPin,
 } from '../lib/selfHealing';
 import {
   bulkUpsertDocuments,
   CustomAuthSession,
   removeDocument,
   restoreErpBackupBundle,
+  restoreLogisticsBackupBundle,
   saveSettingsDocument,
   updateMasterAdminCredentials,
   upsertDocument,
@@ -111,6 +127,7 @@ import { formatINR, makeSafeDocId, normalizeFyLabel, PRECREATED_FYS, todayISO } 
 import { DEFAULT_BHOLE_BABA_IMAGE, DEFAULT_KHATU_SHYAM_IMAGE } from '../lib/sacredDefaults';
 import { useDebouncedValue } from '../hooks/useDebounce';
 import { PaginatedDataTable, TableColumn } from './PaginatedDataTable';
+import { SearchableSelect } from './SearchableSelect';
 
 interface BackupSettingsModuleProps {
   mode: 'backup' | 'settings';
@@ -136,6 +153,15 @@ interface BackupSettingsModuleProps {
     declarations: Declaration194C[];
     bankReceipts?: BankReceiptRecord[];
     staffCommissions?: StaffCommissionEntry[];
+  };
+  logisticsData?: {
+    parties: LogisticsParty[];
+    vehicles: LogisticsVehicle[];
+    drivers: LogisticsDriver[];
+    dockets: LogisticsDocket[];
+    manifests: LogisticsManifest[];
+    invoices: LogisticsInvoice[];
+    ledgers: LogisticsLedgerEntry[];
   };
   onSwitchGmail: () => Promise<void>;
   onSwitchStaffSession: (staff: StaffAccount | null) => void;
@@ -176,6 +202,7 @@ const BackupSettingsModuleInner: React.FC<BackupSettingsModuleProps> = ({
   staffAccounts,
   activeStaffSession,
   allData,
+  logisticsData,
   onSwitchGmail,
   onSwitchStaffSession,
   onUpdateAdminSession,
@@ -229,6 +256,13 @@ const BackupSettingsModuleInner: React.FC<BackupSettingsModuleProps> = ({
   const [adminNewPwd, setAdminNewPwd] = useState('');
   const [adminSaving, setAdminSaving] = useState(false);
 
+  // Admin PIN for 2-Second Drive Email Switch & Protected Settings
+  const [drivePinModalOpen, setDrivePinModalOpen] = useState(false);
+  const [drivePinInput, setDrivePinInput] = useState('');
+  const [drivePinError, setDrivePinError] = useState<string | null>(null);
+  const [newAdminPinInput, setNewAdminPinInput] = useState(() => getStoredAdminPin());
+  const isolatedDriveNames = useMemo(() => getIsolatedDriveFileNames(activeFy), [activeFy]);
+
   // Live Version Sync State
   const [versionInfo, setVersionInfo] = useState<VersionStatusInfo>(() => getVersionStatus());
 
@@ -238,6 +272,10 @@ const BackupSettingsModuleInner: React.FC<BackupSettingsModuleProps> = ({
   const [staffRole, setStaffRole] = useState<StaffRole>('Billing');
   const [staffBranch, setStaffBranch] = useState<string>('KOL-HQ');
   const [staffPin, setStaffPin] = useState('1234');
+  const [staffBankName, setStaffBankName] = useState('');
+  const [staffBankAcc, setStaffBankAcc] = useState('');
+  const [staffBankIfsc, setStaffBankIfsc] = useState('');
+  const [staffUpi, setStaffUpi] = useState('');
   const [staffPerms, setStaffPerms] = useState<PermissionKey[]>([
     'dashboard',
     'lr',
@@ -341,6 +379,141 @@ const BackupSettingsModuleInner: React.FC<BackupSettingsModuleProps> = ({
         }
       },
     });
+  };
+
+  const handleUploadIsolated5Files = async () => {
+    if (!driveAccessToken) {
+      await onSwitchGmail();
+      return;
+    }
+    setBusyDrive(true);
+    setDriveError(null);
+    try {
+      const fyNorm = normalizeFyLabel(activeFy);
+      const matchFy = (recFy?: string) => !recFy || normalizeFyLabel(recFy) === fyNorm;
+
+      const ftlPayload = {
+        division: 'FTL',
+        financialYear: fyNorm,
+        consignments: allData.consignments.filter((c) => matchFy(c.financialYear)),
+        invoices: allData.invoices.filter((i) => matchFy(i.financialYear)),
+        quotations: allData.quotations,
+        lorryHires: allData.lorryHires.filter((l) => matchFy(l.financialYear)),
+        transactions: allData.transactions.filter((t) => matchFy(t.financialYear)),
+        bankReceipts: (allData.bankReceipts || []).filter((b) => matchFy(b.financialYear)),
+        staffCommissions: (allData.staffCommissions || []).filter((s) => matchFy(s.financialYear)),
+      };
+
+      const logi = logisticsData || {
+        parties: [],
+        vehicles: [],
+        drivers: [],
+        dockets: [],
+        manifests: [],
+        invoices: [],
+        ledgers: [],
+      };
+      const buildDivisionPayload = (div: 'LOGISTICS' | 'PTL' | 'COURIER') => ({
+        division: div,
+        financialYear: fyNorm,
+        logistics_dockets: logi.dockets.filter(
+          (d) => getLogisticsDivisionFromId(d.id) === div && matchFy(d.financialYear)
+        ),
+        logistics_manifests: logi.manifests.filter(
+          (m) => getLogisticsDivisionFromId(m.id) === div && matchFy(m.financialYear)
+        ),
+        logistics_invoices: logi.invoices.filter(
+          (i) => getLogisticsDivisionFromId(i.id) === div && matchFy(i.financialYear)
+        ),
+        logistics_ledgers: logi.ledgers.filter(
+          (l) => getLogisticsDivisionFromId(l.id) === div && matchFy(l.financialYear)
+        ),
+      });
+
+      const mastersVaultPayload = {
+        company: compState,
+        parties: allData.parties,
+        vehicles: allData.vehicles,
+        drivers: allData.drivers,
+        declarations: allData.declarations,
+        staff_accounts: staffAccounts,
+        logistics_parties: logi.parties,
+        logistics_vehicles: logi.vehicles,
+        logistics_drivers: logi.drivers,
+      };
+
+      const res = await uploadIsolatedBusinessBackupsToDrive({
+        accessToken: driveAccessToken,
+        activeFy: fyNorm,
+        ftlPayload,
+        logisticsPayload: buildDivisionPayload('LOGISTICS'),
+        ptlPayload: buildDivisionPayload('PTL'),
+        courierPayload: buildDivisionPayload('COURIER'),
+        mastersVaultPayload,
+      });
+
+      setDriveStatus(
+        `App-Only Sandbox Drive Backup Complete: Uploaded ${res.uploadedFiles.length} isolated JSON files (${res.names.all.join(', ')}) + ensured inactive "${INSTALLER_VAULT_FOLDER}" folder.`
+      );
+      const files = await listDriveBackupFiles(driveAccessToken);
+      setDriveFiles(files);
+    } catch (err) {
+      setDriveError(err instanceof Error ? err.message : 'Isolated 5-file Drive backup failed');
+    } finally {
+      setBusyDrive(false);
+    }
+  };
+
+  const handleRestoreIsolatedFile = async (fileName: string) => {
+    if (!driveAccessToken) {
+      await onSwitchGmail();
+      return;
+    }
+    setBusyDrive(true);
+    setDriveError(null);
+    try {
+      const payload = await downloadIsolatedBusinessFileFromDrive(driveAccessToken, fileName);
+      if (!payload) {
+        setDriveError(`"${fileName}" was not found in your App Sandbox Drive folder yet. Upload first.`);
+        return;
+      }
+      if (fileName === isolatedDriveNames.ftl) {
+        await restoreErpBackupBundle(payload);
+      } else if (fileName === isolatedDriveNames.mastersVault) {
+        await restoreErpBackupBundle(payload);
+        await restoreLogisticsBackupBundle(payload);
+      } else {
+        await restoreLogisticsBackupBundle(payload);
+      }
+      setDriveStatus(`Restored isolated business data from "${fileName}" cleanly.`);
+    } catch (err) {
+      setDriveError(err instanceof Error ? err.message : `Restore of ${fileName} failed.`);
+    } finally {
+      setBusyDrive(false);
+    }
+  };
+
+  const handleVerifyDrivePinAndSwitch = async (e: React.FormEvent) => {
+    e.preventDefault();
+    if (!verifyAdminPin(drivePinInput)) {
+      setDrivePinError('Invalid Admin Security PIN. Default PIN is 1234 unless changed below.');
+      return;
+    }
+    setDrivePinError(null);
+    setDrivePinModalOpen(false);
+    setDrivePinInput('');
+    await onSwitchGmail();
+  };
+
+  const handleSaveNewAdminPin = () => {
+    const clean = newAdminPinInput.trim();
+    if (clean.length < 4) {
+      setDriveError('Admin Security PIN must be at least 4 characters.');
+      return;
+    }
+    saveAdminPin(clean);
+    setDriveError(null);
+    setDriveStatus('Admin Security PIN updated cleanly in local device security vault.');
   };
 
   const handleAutoCollectSelected = async (fileList: FileList | null) => {
@@ -605,11 +778,19 @@ const BackupSettingsModuleInner: React.FC<BackupSettingsModuleProps> = ({
         pinHash: cleanPwd,
         active: true,
         permissions: staffPerms,
+        bankName: staffBankName.trim(),
+        bankAccountNo: staffBankAcc.trim(),
+        bankIfsc: staffBankIfsc.trim().toUpperCase(),
+        upiId: staffUpi.trim(),
         ownerUid,
       },
       true
     );
     setStaffName('');
+    setStaffBankName('');
+    setStaffBankAcc('');
+    setStaffBankIfsc('');
+    setStaffUpi('');
     setStaffCode(`DRC-STF-${String(staffAccounts.length + 2).padStart(2, '0')}`);
     setDriveStatus(
       `Created Staff User ID ${cleanCode} (Branch: ${staffBranch}) — ready to sign in on Windows & Android.`
@@ -1067,24 +1248,36 @@ const BackupSettingsModuleInner: React.FC<BackupSettingsModuleProps> = ({
         cellClassName: 'font-mono-num font-bold text-blue-800 whitespace-nowrap',
         render: (s) => s.staffCode,
       },
-      { key: 'displayName', header: 'Name', cellClassName: 'font-medium', render: (s) => s.displayName },
+      {
+        key: 'displayName',
+        header: 'Name & Bank / UPI',
+        cellClassName: 'font-medium',
+        render: (s) => (
+          <div>
+            <div className="font-bold text-slate-900">{s.displayName}</div>
+            {(s.bankAccountNo || s.upiId) && (
+              <div className="text-[10px] font-mono-num text-slate-500">
+                {s.bankAccountNo ? `${s.bankName || 'Bank'} A/c ${s.bankAccountNo}` : ''}
+                {s.upiId ? ` · UPI: ${s.upiId}` : ''}
+              </div>
+            )}
+          </div>
+        ),
+      },
       {
         key: 'branchCode',
         header: 'Branch',
         render: (s) => (
-          <select
-            value={s.branchCode || 'ALL'}
-            onChange={(e) =>
-              upsertDocument('staff_accounts', s.id, { branchCode: e.target.value }, false)
-            }
-            className="px-2 py-1 rounded border border-slate-300 bg-white text-[11px] font-semibold"
-          >
-            {BRANCH_OPTIONS.map((b) => (
-              <option key={b} value={b}>
-                {b}
-              </option>
-            ))}
-          </select>
+          <div className="min-w-[115px]">
+            <SearchableSelect
+              ariaLabel={`Branch for ${s.staffCode}`}
+              value={s.branchCode || 'ALL'}
+              onChange={(val) => upsertDocument('staff_accounts', s.id, { branchCode: val }, false)}
+              options={BRANCH_OPTIONS.map((b) => ({ value: b, label: b }))}
+              triggerClassName="!py-1 !text-[11px] !font-semibold"
+              searchPlaceholder="Search branch..."
+            />
+          </div>
         ),
       },
       { key: 'role', header: 'Role', render: (s) => s.role },
@@ -1515,6 +1708,71 @@ const BackupSettingsModuleInner: React.FC<BackupSettingsModuleProps> = ({
                   Export Local JSON
                 </button>
               </div>
+
+              {/* Isolated 5-File Business Backup & App Sandbox Vault */}
+              <div className="p-3.5 rounded-xl border border-emerald-200 bg-emerald-50/50 space-y-3">
+                <div className="flex flex-wrap items-center justify-between gap-2">
+                  <div>
+                    <div className="text-xs font-extrabold text-emerald-950 flex items-center gap-1.5">
+                      <ShieldCheck className="w-4 h-4 text-emerald-700" />
+                      <span>
+                        App-Only Sandbox Google Drive Vault (5 Isolated Business Files · {activeFy})
+                      </span>
+                    </div>
+                    <p className="text-[11px] text-emerald-900 mt-0.5">
+                      Strictly uses <code className="font-mono-num">drive.file</code> scope (zero access to device photos or personal Drive files). Includes inactive folder <strong className="font-mono-num">{INSTALLER_VAULT_FOLDER}</strong>.
+                    </p>
+                  </div>
+                  <button
+                    type="button"
+                    disabled={busyDrive}
+                    onClick={() => void handleUploadIsolated5Files()}
+                    className="inline-flex items-center gap-1.5 px-3.5 py-2 rounded-lg bg-emerald-700 hover:bg-emerald-800 text-white text-xs font-extrabold cursor-pointer disabled:opacity-60 whitespace-nowrap"
+                  >
+                    <CloudUpload className="w-4 h-4" />
+                    Upload All 5 Isolated Drive Files
+                  </button>
+                </div>
+
+                <div className="grid grid-cols-1 md:grid-cols-2 lg:grid-cols-3 gap-2">
+                  {[
+                    { name: isolatedDriveNames.ftl, desc: 'FTL Business Data (LRs, Bills, Hire, Vouchers)' },
+                    { name: isolatedDriveNames.logistics, desc: 'Logistics Business Data (Dockets, Manifests, Bills)' },
+                    { name: isolatedDriveNames.ptl, desc: 'PTL Part-Load Data (Isolated)' },
+                    { name: isolatedDriveNames.courier, desc: 'Courier & Parcel Data (Isolated)' },
+                    { name: isolatedDriveNames.mastersVault, desc: 'All Masters, Parties, Fleet, Drivers & KYC Vault' },
+                  ].map((item) => (
+                    <div
+                      key={item.name}
+                      className="p-2.5 rounded-lg bg-white border border-emerald-200 flex items-center justify-between gap-2"
+                    >
+                      <div className="min-w-0">
+                        <div className="text-[11px] font-mono-num font-bold text-slate-900 truncate">
+                          {item.name}
+                        </div>
+                        <div className="text-[10px] text-slate-500 truncate">{item.desc}</div>
+                      </div>
+                      <button
+                        type="button"
+                        disabled={busyDrive}
+                        onClick={() => void handleRestoreIsolatedFile(item.name)}
+                        className="shrink-0 px-2.5 py-1 rounded border border-emerald-300 bg-emerald-50 hover:bg-emerald-100 text-emerald-900 text-[11px] font-bold cursor-pointer disabled:opacity-50"
+                      >
+                        Restore
+                      </button>
+                    </div>
+                  ))}
+                  <div className="p-2.5 rounded-lg bg-slate-100 border border-slate-200 flex items-center gap-2">
+                    <FolderArchive className="w-4 h-4 text-slate-500 shrink-0" />
+                    <div className="min-w-0">
+                      <div className="text-[11px] font-mono-num font-bold text-slate-700 truncate">
+                        {INSTALLER_VAULT_FOLDER}
+                      </div>
+                      <div className="text-[10px] text-slate-500">Inactive Installer Vault Folder</div>
+                    </div>
+                  </div>
+                </div>
+              </div>
             </div>
           </div>
 
@@ -1668,6 +1926,110 @@ const BackupSettingsModuleInner: React.FC<BackupSettingsModuleProps> = ({
                 </div>
               </div>
             </div>
+          </div>
+
+          {/* 2-Second Change Backup Email & Google Drive + Admin PIN Vault */}
+          <div className="bg-white rounded-xl border border-slate-200 shadow-sm overflow-hidden">
+            <div className="bg-gradient-to-r from-emerald-800 to-teal-800 text-white px-4 py-2.5 flex flex-wrap items-center justify-between gap-2">
+              <div className="flex items-center gap-2 text-sm font-bold">
+                <RefreshCw className="w-4 h-4 text-amber-300" />
+                <span>Google Drive Backup Email &amp; Admin Security PIN Vault</span>
+              </div>
+              <span className="text-[11px] text-emerald-100">
+                App-Only Sandbox (<code className="font-mono-num">drive.file</code>)
+              </span>
+            </div>
+            <div className="p-4 flex flex-wrap items-center justify-between gap-4 text-xs">
+              <div className="space-y-1">
+                <p className="font-bold text-slate-900">
+                  Active Backup Email:{' '}
+                  <span className="text-blue-800 font-mono-num">
+                    {connectedEmail || 'Not Connected'}
+                  </span>
+                </p>
+                <p className="text-slate-600">
+                  Switch Google Drive account in 2 seconds with Admin PIN verification. Only DRC sandbox backups are touched.
+                </p>
+              </div>
+              <div className="flex flex-wrap items-center gap-2">
+                <div className="flex items-center gap-1.5 bg-slate-50 px-2.5 py-1.5 rounded-lg border border-slate-200">
+                  <span className="text-[11px] font-bold text-slate-700">Admin PIN:</span>
+                  <input
+                    type="password"
+                    value={newAdminPinInput}
+                    onChange={(e) => setNewAdminPinInput(e.target.value)}
+                    className="w-20 px-2 py-1 rounded border border-slate-300 text-xs font-mono-num bg-white"
+                    placeholder="1234"
+                  />
+                  <button
+                    type="button"
+                    onClick={handleSaveNewAdminPin}
+                    className="px-2.5 py-1 rounded bg-slate-800 hover:bg-slate-900 text-white text-[11px] font-bold cursor-pointer"
+                  >
+                    Save PIN
+                  </button>
+                </div>
+                <button
+                  type="button"
+                  onClick={() => {
+                    setDrivePinError(null);
+                    setDrivePinInput('');
+                    setDrivePinModalOpen(true);
+                  }}
+                  className="inline-flex items-center gap-1.5 px-4 py-2 rounded-lg bg-[#0D47A1] hover:bg-blue-900 text-white font-extrabold cursor-pointer whitespace-nowrap"
+                >
+                  <RefreshCw className="w-3.5 h-3.5" />
+                  Change Backup Email &amp; Google Drive
+                </button>
+              </div>
+            </div>
+
+            {drivePinModalOpen && (
+              <form
+                onSubmit={(e) => void handleVerifyDrivePinAndSwitch(e)}
+                className="mx-4 mb-4 p-3.5 rounded-lg bg-amber-50 border border-amber-300 flex flex-wrap items-end justify-between gap-3 text-xs"
+              >
+                <div className="space-y-1 flex-1 min-w-[210px]">
+                  <div className="font-extrabold text-amber-950 flex items-center gap-1.5">
+                    <Lock className="w-3.5 h-3.5 text-amber-800" />
+                    <span>Enter Admin Security PIN to Switch Google Drive Email</span>
+                  </div>
+                  <p className="text-[11px] text-amber-900">
+                    Default Admin PIN is <strong className="font-mono-num">1234</strong> (unless customized above).
+                  </p>
+                  {drivePinError && (
+                    <p className="text-[11px] font-bold text-red-700">{drivePinError}</p>
+                  )}
+                </div>
+                <div className="flex items-center gap-2">
+                  <input
+                    type="password"
+                    autoFocus
+                    required
+                    value={drivePinInput}
+                    onChange={(e) => setDrivePinInput(e.target.value)}
+                    placeholder="Enter Admin PIN"
+                    className="w-36 px-2.5 py-1.5 rounded border border-amber-400 bg-white font-mono-num"
+                  />
+                  <button
+                    type="submit"
+                    className="px-3.5 py-1.5 rounded bg-emerald-700 hover:bg-emerald-800 text-white font-bold cursor-pointer"
+                  >
+                    Verify &amp; Switch Email
+                  </button>
+                  <button
+                    type="button"
+                    onClick={() => {
+                      setDrivePinModalOpen(false);
+                      setDrivePinError(null);
+                    }}
+                    className="px-3 py-1.5 rounded border border-slate-300 bg-white text-slate-700 font-semibold cursor-pointer"
+                  >
+                    Cancel
+                  </button>
+                </div>
+              </form>
+            )}
           </div>
 
           {/* Master Admin Credentials Management (User Management) */}
@@ -1847,34 +2209,29 @@ const BackupSettingsModuleInner: React.FC<BackupSettingsModuleProps> = ({
                     <label className="block text-[10px] font-bold text-slate-600 mb-0.5">
                       Assigned Branch
                     </label>
-                    <select
+                    <SearchableSelect
+                      ariaLabel="Assigned Branch"
                       value={staffBranch}
-                      onChange={(e) => setStaffBranch(e.target.value)}
-                      className="w-full px-2.5 py-1.5 rounded border border-slate-300 font-semibold"
-                      title="Assigned Branch"
-                    >
-                      {BRANCH_OPTIONS.map((b) => (
-                        <option key={b} value={b}>
-                          Branch: {b}
-                        </option>
-                      ))}
-                    </select>
+                      onChange={setStaffBranch}
+                      options={BRANCH_OPTIONS.map((b) => ({
+                        value: b,
+                        label: `Branch: ${b}`,
+                      }))}
+                      triggerClassName="!py-1.5 !font-semibold"
+                      searchPlaceholder="Search branch..."
+                    />
                   </div>
                   <div>
                     <label className="block text-[10px] font-bold text-slate-600 mb-0.5">
                       Role
                     </label>
-                    <select
+                    <SearchableSelect
+                      ariaLabel="Staff Role"
                       value={staffRole}
-                      onChange={(e) => setStaffRole(e.target.value as StaffRole)}
-                      className="w-full px-2.5 py-1.5 rounded border border-slate-300"
-                    >
-                      <option value="Billing">Billing</option>
-                      <option value="Accounts">Accounts</option>
-                      <option value="Dispatch">Dispatch</option>
-                      <option value="Manager">Manager</option>
-                      <option value="Viewer">Viewer</option>
-                    </select>
+                      onChange={(val) => setStaffRole(val as StaffRole)}
+                      options={['Accounts', 'Billing', 'Dispatch', 'Manager', 'Viewer']}
+                      triggerClassName="!py-1.5"
+                    />
                   </div>
                   <div>
                     <label className="block text-[10px] font-bold text-slate-600 mb-0.5">
@@ -1890,6 +2247,36 @@ const BackupSettingsModuleInner: React.FC<BackupSettingsModuleProps> = ({
                       className="w-full px-2.5 py-1.5 rounded border border-slate-300 font-mono-num"
                     />
                   </div>
+                </div>
+                <div className="grid grid-cols-1 sm:grid-cols-4 gap-2">
+                  <input
+                    type="text"
+                    value={staffBankName}
+                    onChange={(e) => setStaffBankName(e.target.value)}
+                    placeholder="Staff Bank Name (Optional)"
+                    className="w-full px-2.5 py-1.5 rounded border border-slate-300"
+                  />
+                  <input
+                    type="text"
+                    value={staffBankAcc}
+                    onChange={(e) => setStaffBankAcc(e.target.value)}
+                    placeholder="Staff Bank A/C No (Auto-Fetch)"
+                    className="w-full px-2.5 py-1.5 rounded border border-slate-300 font-mono-num"
+                  />
+                  <input
+                    type="text"
+                    value={staffBankIfsc}
+                    onChange={(e) => setStaffBankIfsc(e.target.value.toUpperCase())}
+                    placeholder="IFSC Code"
+                    className="w-full px-2.5 py-1.5 rounded border border-slate-300 font-mono-num uppercase"
+                  />
+                  <input
+                    type="text"
+                    value={staffUpi}
+                    onChange={(e) => setStaffUpi(e.target.value)}
+                    placeholder="Staff UPI ID (e.g. name@upi)"
+                    className="w-full px-2.5 py-1.5 rounded border border-slate-300 font-mono-num"
+                  />
                 </div>
                 <div className="flex flex-wrap gap-3">
                   {ALL_PERMISSIONS.map((perm) => (
@@ -1993,17 +2380,14 @@ const BackupSettingsModuleInner: React.FC<BackupSettingsModuleProps> = ({
               </div>
               <div>
                 <label className="block font-semibold text-slate-700 mb-1">Active Default FY</label>
-                <select
+                <SearchableSelect
+                  ariaLabel="Active Default FY"
                   value={compState.currentFy}
-                  onChange={(e) => setCompState({ ...compState, currentFy: e.target.value })}
-                  className="w-full px-2.5 py-1.5 rounded border border-slate-300 font-mono-num bg-white"
-                >
-                  {fyChoices.map((fy) => (
-                    <option key={fy} value={fy}>
-                      {fy}
-                    </option>
-                  ))}
-                </select>
+                  onChange={(val) => setCompState({ ...compState, currentFy: val })}
+                  options={fyChoices}
+                  triggerClassName="!py-1.5 !font-mono-num"
+                  searchPlaceholder="Search FY..."
+                />
               </div>
               <div>
                 <label className="block font-semibold text-slate-700 mb-1">Bank Name</label>
@@ -2041,20 +2425,22 @@ const BackupSettingsModuleInner: React.FC<BackupSettingsModuleProps> = ({
                 <label className="block font-semibold text-slate-700 mb-1">
                   Auto-Lock Screen Timer (Idle Timeout)
                 </label>
-                <select
+                <SearchableSelect
+                  ariaLabel="Auto-Lock Screen Timer"
                   value={String(compState.autoLockMinutes ?? 5)}
-                  onChange={(e) =>
-                    setCompState({ ...compState, autoLockMinutes: Number(e.target.value) })
+                  onChange={(val) =>
+                    setCompState({ ...compState, autoLockMinutes: Number(val) })
                   }
-                  className="w-full px-2.5 py-1.5 rounded border border-slate-300 bg-white font-semibold"
-                >
-                  <option value="1">1 Minute</option>
-                  <option value="2">2 Minutes</option>
-                  <option value="5">5 Minutes (Recommended Default)</option>
-                  <option value="10">10 Minutes</option>
-                  <option value="15">15 Minutes</option>
-                  <option value="0">Off (Disable Auto-Lock)</option>
-                </select>
+                  options={[
+                    { value: '1', label: '1 Minute' },
+                    { value: '2', label: '2 Minutes' },
+                    { value: '5', label: '5 Minutes (Recommended Default)' },
+                    { value: '10', label: '10 Minutes' },
+                    { value: '15', label: '15 Minutes' },
+                    { value: '0', label: 'Off (Disable Auto-Lock)' },
+                  ]}
+                  triggerClassName="!py-1.5 !font-semibold"
+                />
               </div>
               <div>
                 <label className="block font-semibold text-slate-700 mb-1">Add Future Financial Year</label>
@@ -2691,17 +3077,14 @@ const BackupSettingsModuleInner: React.FC<BackupSettingsModuleProps> = ({
                         <label className="block font-semibold text-slate-700 mb-1">
                           Select State / UT / Country
                         </label>
-                        <select
+                        <SearchableSelect
+                          ariaLabel="Select State / UT / Country"
                           value={ddSelectedState}
-                          onChange={(e) => setDdSelectedState(e.target.value)}
-                          className="w-full px-2.5 py-1.5 rounded border border-slate-300 bg-white font-semibold"
-                        >
-                          {effectiveStates.map((st) => (
-                            <option key={st} value={st}>
-                              {st}
-                            </option>
-                          ))}
-                        </select>
+                          onChange={setDdSelectedState}
+                          options={effectiveStates}
+                          triggerClassName="!py-1.5 !font-semibold"
+                          searchPlaceholder="Search state A-Z..."
+                        />
                       </div>
                     )}
                     <div className="flex-1 min-w-[200px]">
@@ -2840,36 +3223,34 @@ const BackupSettingsModuleInner: React.FC<BackupSettingsModuleProps> = ({
             </div>
             <div className="p-4 space-y-3 text-xs">
               <div className="flex flex-wrap items-end gap-3">
-                <div>
+                <div className="min-w-[205px]">
                   <label className="block font-semibold text-slate-700 mb-1">Record Type</label>
-                  <select
+                  <SearchableSelect
+                    ariaLabel="Import Record Type"
                     value={importEntity}
-                    onChange={(e) => {
-                      setImportEntity(e.target.value as ImportEntityType);
+                    onChange={(val) => {
+                      setImportEntity(val as ImportEntityType);
                       setParsedImport(null);
                     }}
-                    className="px-3 py-1.5 rounded border border-slate-300 bg-white font-semibold"
-                  >
-                    <option value="consignments">Consignments / LRs</option>
-                    <option value="invoices">Tax Invoices / Bills</option>
-                    <option value="transactions">Ledgers / Vouchers</option>
-                    <option value="parties">Party / Customer Master</option>
-                    <option value="vehicles">Vehicle Fleet Master</option>
-                  </select>
+                    options={[
+                      { value: 'consignments', label: 'Consignments / LRs' },
+                      { value: 'transactions', label: 'Ledgers / Vouchers' },
+                      { value: 'parties', label: 'Party / Customer Master' },
+                      { value: 'invoices', label: 'Tax Invoices / Bills' },
+                      { value: 'vehicles', label: 'Vehicle Fleet Master' },
+                    ]}
+                    triggerClassName="!py-1.5 !font-semibold"
+                  />
                 </div>
-                <div>
+                <div className="min-w-[140px]">
                   <label className="block font-semibold text-slate-700 mb-1">Target Financial Year</label>
-                  <select
+                  <SearchableSelect
+                    ariaLabel="Import Target Financial Year"
                     value={importTargetFy}
-                    onChange={(e) => setImportTargetFy(e.target.value)}
-                    className="px-3 py-1.5 rounded border border-slate-300 bg-white font-mono-num font-bold"
-                  >
-                    {fyChoices.map((fy) => (
-                      <option key={fy} value={fy}>
-                        {fy}
-                      </option>
-                    ))}
-                  </select>
+                    onChange={setImportTargetFy}
+                    options={fyChoices}
+                    triggerClassName="!py-1.5 !font-mono-num !font-bold"
+                  />
                 </div>
                 <button
                   type="button"
@@ -2967,33 +3348,25 @@ const BackupSettingsModuleInner: React.FC<BackupSettingsModuleProps> = ({
             <div className="p-4 space-y-3 text-xs">
               <div className="flex flex-wrap items-end justify-between gap-3">
                 <div className="flex flex-wrap items-end gap-3">
-                  <div>
+                  <div className="min-w-[140px]">
                     <label className="block font-semibold text-slate-700 mb-1">From Source FY</label>
-                    <select
+                    <SearchableSelect
+                      ariaLabel="From Source FY"
                       value={carrySourceFy}
-                      onChange={(e) => setCarrySourceFy(e.target.value)}
-                      className="px-3 py-1.5 rounded border border-slate-300 bg-white font-mono-num font-bold"
-                    >
-                      {fyChoices.map((fy) => (
-                        <option key={fy} value={fy}>
-                          {fy}
-                        </option>
-                      ))}
-                    </select>
+                      onChange={setCarrySourceFy}
+                      options={fyChoices}
+                      triggerClassName="!py-1.5 !font-mono-num !font-bold"
+                    />
                   </div>
-                  <div>
+                  <div className="min-w-[180px]">
                     <label className="block font-semibold text-slate-700 mb-1">To Target FY (Opening Balance)</label>
-                    <select
+                    <SearchableSelect
+                      ariaLabel="To Target FY"
                       value={carryTargetFy}
-                      onChange={(e) => setCarryTargetFy(e.target.value)}
-                      className="px-3 py-1.5 rounded border border-slate-300 bg-white font-mono-num font-bold"
-                    >
-                      {fyChoices.map((fy) => (
-                        <option key={fy} value={fy}>
-                          {fy}
-                        </option>
-                      ))}
-                    </select>
+                      onChange={setCarryTargetFy}
+                      options={fyChoices}
+                      triggerClassName="!py-1.5 !font-mono-num !font-bold"
+                    />
                   </div>
                 </div>
                 <button

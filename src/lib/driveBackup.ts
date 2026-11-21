@@ -600,3 +600,151 @@ export async function listLogisticsDriveBackupFiles(accessToken: string): Promis
   return allFiles;
 }
 
+// ============================================================================
+// ISOLATED APP-ONLY SANDBOX GOOGLE DRIVE BACKUP (5 CLEARLY NAMED JSON FILES)
+// + INACTIVE DRC_APP_INSTALLER_VAULT FOLDER
+// Uses strictly app-only `drive.file` OAuth scope (zero access to device photos/personal files)
+// ============================================================================
+
+export const INSTALLER_VAULT_FOLDER = 'DRC_APP_INSTALLER_VAULT';
+
+export function formatDriveYearCode(fy: string): string {
+  const clean = String(fy || 'FY 2026-27')
+    .trim()
+    .replace(/^FY\s*/i, '')
+    .replace(/[^a-zA-Z0-9_-]/g, '-');
+  return clean || '2026-27';
+}
+
+export interface IsolatedDriveFileNames {
+  yearCode: string;
+  ftl: string;
+  logistics: string;
+  ptl: string;
+  courier: string;
+  mastersVault: string;
+  all: string[];
+}
+
+export function getIsolatedDriveFileNames(fy: string): IsolatedDriveFileNames {
+  const yearCode = formatDriveYearCode(fy);
+  const ftl = `DRC_FTL_BUSINESS_${yearCode}.json`;
+  const logistics = `DRC_LOGISTICS_BUSINESS_${yearCode}.json`;
+  const ptl = `DRC_PTL_BUSINESS_${yearCode}.json`;
+  const courier = `DRC_COURIER_PARCEL_${yearCode}.json`;
+  const mastersVault = 'DRC_MASTERS_AND_KYC_VAULT.json';
+  return {
+    yearCode,
+    ftl,
+    logistics,
+    ptl,
+    courier,
+    mastersVault,
+    all: [ftl, logistics, ptl, courier, mastersVault],
+  };
+}
+
+export async function ensureInstallerVaultFolder(accessToken: string): Promise<string> {
+  const rootId = await findOrCreateFolder(ROOT_FOLDER_NAME, accessToken);
+  return findOrCreateFolder(INSTALLER_VAULT_FOLDER, accessToken, rootId);
+}
+
+async function uploadPlainJsonFileToFolder(
+  accessToken: string,
+  folderId: string,
+  fileName: string,
+  payload: unknown
+): Promise<{ id: string; name: string; webViewLink?: string }> {
+  const mimeType = 'application/json';
+  const jsonText = JSON.stringify(payload, null, 2);
+  const bytes = new TextEncoder().encode(jsonText);
+  const existingId = await findFileInFolder(fileName, folderId, accessToken);
+  const boundary = 'drc_iso_json_' + Date.now() + '_' + Math.random().toString(36).slice(2, 6);
+  const metadata = existingId
+    ? { name: fileName, mimeType }
+    : { name: fileName, mimeType, parents: [folderId] };
+
+  const base64Body = uint8ArrayToBase64(bytes);
+  const multipartBody =
+    `--${boundary}\r\n` +
+    `Content-Type: application/json; charset=UTF-8\r\n\r\n` +
+    `${JSON.stringify(metadata)}\r\n` +
+    `--${boundary}\r\n` +
+    `Content-Type: ${mimeType}\r\n` +
+    `Content-Transfer-Encoding: base64\r\n\r\n` +
+    `${base64Body}\r\n` +
+    `--${boundary}--`;
+
+  const url = existingId
+    ? `https://www.googleapis.com/upload/drive/v3/files/${existingId}?uploadType=multipart&fields=id,name,webViewLink`
+    : `https://www.googleapis.com/upload/drive/v3/files?uploadType=multipart&fields=id,name,webViewLink`;
+
+  const res = await driveFetch(url, accessToken, {
+    method: existingId ? 'PATCH' : 'POST',
+    headers: { 'Content-Type': `multipart/related; boundary=${boundary}` },
+    body: multipartBody,
+  });
+
+  return (await res.json()) as { id: string; name: string; webViewLink?: string };
+}
+
+export async function uploadIsolatedBusinessBackupsToDrive(params: {
+  accessToken: string;
+  activeFy: string;
+  ftlPayload: Record<string, unknown>;
+  logisticsPayload: Record<string, unknown>;
+  ptlPayload: Record<string, unknown>;
+  courierPayload: Record<string, unknown>;
+  mastersVaultPayload: Record<string, unknown>;
+}): Promise<{
+  names: IsolatedDriveFileNames;
+  uploadedFiles: Array<{ id: string; name: string }>;
+  installerVaultFolderId: string;
+}> {
+  const { rootId } = await ensureDriveBackupHierarchy(params.accessToken);
+  const installerVaultFolderId = await findOrCreateFolder(
+    INSTALLER_VAULT_FOLDER,
+    params.accessToken,
+    rootId
+  );
+  const names = getIsolatedDriveFileNames(params.activeFy);
+
+  const pairs: Array<[string, Record<string, unknown>]> = [
+    [names.ftl, params.ftlPayload],
+    [names.logistics, params.logisticsPayload],
+    [names.ptl, params.ptlPayload],
+    [names.courier, params.courierPayload],
+    [names.mastersVault, params.mastersVaultPayload],
+  ];
+
+  const uploadedFiles: Array<{ id: string; name: string }> = [];
+  for (const [fileName, payload] of pairs) {
+    const res = await uploadPlainJsonFileToFolder(params.accessToken, rootId, fileName, {
+      ...payload,
+      backupSchema: 'DRC_ISOLATED_V1',
+      sandboxScope: 'drive.file',
+      exportedAt: new Date().toISOString(),
+    });
+    uploadedFiles.push({ id: res.id, name: res.name });
+  }
+
+  return { names, uploadedFiles, installerVaultFolderId };
+}
+
+export async function downloadIsolatedBusinessFileFromDrive(
+  accessToken: string,
+  fileName: string
+): Promise<Record<string, unknown> | null> {
+  const { rootId } = await ensureDriveBackupHierarchy(accessToken);
+  const fileId = await findFileInFolder(fileName, rootId, accessToken);
+  if (!fileId) return null;
+
+  const res = await driveFetch(
+    `https://www.googleapis.com/drive/v3/files/${fileId}?alt=media`,
+    accessToken
+  );
+  const buf = await res.arrayBuffer();
+  return decompressGzipOrJsonBuffer(buf);
+}
+
+

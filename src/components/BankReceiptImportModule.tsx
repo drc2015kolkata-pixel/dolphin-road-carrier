@@ -26,6 +26,8 @@ import {
 import { GeneratedPdfResult, generateFoxproStatementPDF } from '../lib/pdfEngine';
 import { BankReceiptRecord, CompanySettings, Invoice } from '../types/erp';
 import { ConfirmModal } from './ConfirmModal';
+import { SearchableSelect } from './SearchableSelect';
+import { PAYMENT_MODE_OPTIONS } from '../lib/dropdownMasterStore';
 
 interface BankReceiptImportModuleProps {
   bankReceipts: BankReceiptRecord[];
@@ -627,17 +629,14 @@ export const BankReceiptImportModule: React.FC<BankReceiptImportModuleProps> = (
               <label className="block text-[11px] font-bold text-slate-700 mb-1">
                 Target Company Bank Account
               </label>
-              <select
+              <SearchableSelect
+                ariaLabel="Target Company Bank Account"
                 value={selectedBank}
-                onChange={(e) => setSelectedBank(e.target.value)}
-                className="w-full px-3 py-2 rounded-lg border border-slate-300 bg-white text-xs font-bold"
-              >
-                {bankNames.map((n) => (
-                  <option key={n} value={n}>
-                    {n}
-                  </option>
-                ))}
-              </select>
+                onChange={setSelectedBank}
+                options={bankNames.map((n) => ({ value: n, label: n }))}
+                triggerClassName="!py-2 !font-bold"
+                searchPlaceholder="Search bank account..."
+              />
             </div>
 
             <div className="md:col-span-4 flex items-center gap-2 pt-4 md:pt-5">
@@ -754,23 +753,16 @@ export const BankReceiptImportModule: React.FC<BankReceiptImportModuleProps> = (
                         </p>
                       </td>
                       <td className="p-2 min-w-[115px]">
-                        <select
-                          aria-label="Payment Mode"
+                        <SearchableSelect
+                          ariaLabel="Payment Mode"
                           disabled={readOnly || rec.appliedToInvoice}
                           value={rec.paymentMode || 'NEFT'}
-                          onChange={(e) =>
-                            void handleUpdateReceiptField(rec, { paymentMode: e.target.value })
+                          onChange={(val) =>
+                            void handleUpdateReceiptField(rec, { paymentMode: val })
                           }
-                          className="w-full px-2 py-1 rounded border border-slate-200 bg-white text-xs font-bold"
-                        >
-                          <option value="UPI">UPI</option>
-                          <option value="NEFT">NEFT</option>
-                          <option value="RTGS">RTGS</option>
-                          <option value="Cheque">Cheque</option>
-                          <option value="Cash">Cash</option>
-                          <option value="Advance">Advance</option>
-                          <option value="Bank Transfer">Bank Transfer</option>
-                        </select>
+                          options={PAYMENT_MODE_OPTIONS}
+                          triggerClassName="!py-1 !font-bold"
+                        />
                       </td>
                       <td className="p-2 min-w-[185px] space-y-1">
                         <input
@@ -805,23 +797,25 @@ export const BankReceiptImportModule: React.FC<BankReceiptImportModuleProps> = (
                         />
                       </td>
                       <td className="p-2 min-w-[165px]">
-                        <select
+                        <SearchableSelect
+                          ariaLabel="Matched Invoice"
                           disabled={readOnly || rec.appliedToInvoice}
                           value={rec.matchedInvoiceId || ''}
-                          onChange={(e) =>
+                          onChange={(val) =>
                             void handleUpdateReceiptField(rec, {
-                              matchedInvoiceId: e.target.value || undefined,
+                              matchedInvoiceId: val || undefined,
                             })
                           }
-                          className="w-full px-2 py-1 rounded border border-slate-200 bg-white text-xs font-semibold"
-                        >
-                          <option value="">-- Select Bill --</option>
-                          {fyInvoices.map((inv) => (
-                            <option key={inv.id} value={inv.id}>
-                              {inv.invoiceNo} ({inv.partyName.slice(0, 18)})
-                            </option>
-                          ))}
-                        </select>
+                          options={[
+                            { value: '', label: '-- Select Bill --', pinFirst: true },
+                            ...fyInvoices.map((inv) => ({
+                              value: inv.id,
+                              label: `${inv.invoiceNo} (${inv.partyName.slice(0, 18)})`,
+                            })),
+                          ]}
+                          triggerClassName="!py-1 !font-semibold"
+                          searchPlaceholder="Search invoice / party..."
+                        />
                       </td>
                       <td className="p-2 text-right font-mono-num">
                         {formatINR(rec.billAmount || 0)}

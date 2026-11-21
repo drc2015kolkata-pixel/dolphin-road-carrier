@@ -2,14 +2,17 @@ import React, { useEffect, useMemo, useRef, useState } from 'react';
 import {
   AlertTriangle,
   CheckCircle2,
+  Edit3,
   FileCheck2,
   FileSpreadsheet,
+  Keyboard,
   Lock,
   Mail,
   MessageSquare,
   Plus,
   Printer,
   ReceiptText,
+  RotateCcw,
   Save,
   ScanLine,
   Search,
@@ -52,9 +55,15 @@ import {
   upsertDocument,
 } from '../lib/firestoreStore';
 import {
+  ALL_INDIA_BRANCH_OPTIONS,
   ALL_INDIA_STATES_DISTRICTS,
+  BILL_FOOTNOTE_PRESETS,
+  BILL_REMARK_PRESETS,
+  COMMON_REMARK_PRESETS,
+  PAYMENT_MODE_OPTIONS,
   getEffectiveDropdownList,
 } from '../lib/dropdownMasterStore';
+import { playVerifiedBeep } from '../lib/audioFeedback';
 import {
   filterBillingCustomerParties,
   resolveGstStateCode,
@@ -69,6 +78,8 @@ import {
 } from '../lib/shareUtils';
 import { useDebouncedValue } from '../hooks/useDebounce';
 import { PaginatedDataTable, TableColumn } from './PaginatedDataTable';
+import { EditableSearchSelect } from './EditableSearchSelect';
+import { SearchableSelect } from './SearchableSelect';
 import {
   EntityQuickPreviewCard,
   formatPartyDetailsLine,
@@ -201,12 +212,23 @@ const BillingQuotesModuleInner: React.FC<BillingQuotesModuleProps> = ({
   );
 
   const lrScanRef = useRef<HTMLInputElement | null>(null);
+  const billDateInputRef = useRef<HTMLInputElement | null>(null);
+  const remarksInputRef = useRef<HTMLInputElement | null>(null);
+  const saveInvBtnRef = useRef<HTMLButtonElement | null>(null);
   const fyShort = getFyShortCode(activeFy);
 
   // ---- TAX INVOICE STATE ----
   const branchTag = activeBranchCode && activeBranchCode !== 'ALL' ? activeBranchCode.slice(0, 3) : 'KOL';
+  const defaultBranchLabel =
+    activeBranchCode && activeBranchCode !== 'ALL' ? activeBranchCode : 'KOLKATA';
+  const [editingInvoiceId, setEditingInvoiceId] = useState<string | null>(null);
+  const [editingOriginalPaidAmount, setEditingOriginalPaidAmount] = useState(0);
   const [invDivision, setInvDivision] = useState<'FTL' | 'LOGISTICS'>('FTL');
   const [autoAtomicInvoice, setAutoAtomicInvoice] = useState(true);
+  const [billedAtBranch, setBilledAtBranch] = useState(defaultBranchLabel);
+  const [billId, setBillId] = useState(() => String(105 + invoices.length));
+  const [billedByCode, setBilledByCode] = useState<'B' | 'P'>('B');
+  const [finalizeBill, setFinalizeBill] = useState(true);
   const [invoiceNo, setInvoiceNo] = useState(`${branchTag}/${105 + invoices.length}/${fyShort}`);
   const [invoiceDate, setInvoiceDate] = useState(todayISO());
   const [dueDate, setDueDate] = useState(() => {
@@ -228,10 +250,22 @@ const BillingQuotesModuleInner: React.FC<BillingQuotesModuleProps> = ({
   const [interstate, setInterstate] = useState(false);
   const [copyCount, setCopyCount] = useState<BillCopyCount>(1);
   const [invValidationError, setInvValidationError] = useState<string | null>(null);
+  const [insuranceCharge, setInsuranceCharge] = useState('0');
+  const [collCharge, setCollCharge] = useState('0');
+  const [loadingCharge, setLoadingCharge] = useState('0');
   const [detentionCharges, setDetentionCharges] = useState('0');
   const [unloadingCharges, setUnloadingCharges] = useState('0');
+  const [surchargeAmt, setSurchargeAmt] = useState('0');
   const [stCharges, setStCharges] = useState('0');
+  const [fumigationCharge, setFumigationCharge] = useState('0');
+  const [extraCharge, setExtraCharge] = useState('0');
+  const [advanceReceived, setAdvanceReceived] = useState('0');
+  const [advanceMode, setAdvanceMode] = useState('NEFT');
+  const [fullPaymentReceived, setFullPaymentReceived] = useState(false);
+  const [fullPaymentMode, setFullPaymentMode] = useState('NEFT');
   const [remarks, setRemarks] = useState('');
+  const [billFootnote, setBillFootnote] = useState(BILL_FOOTNOTE_PRESETS[0] || '');
+  const [additionalNotes, setAdditionalNotes] = useState('');
   const [includeAnnexure, setIncludeAnnexure] = useState(true);
   const [rows, setRows] = useState<InvoiceConsignmentRow[]>([
     {
@@ -250,6 +284,9 @@ const BillingQuotesModuleInner: React.FC<BillingQuotesModuleProps> = ({
   ]);
   const [scanMsg, setScanMsg] = useState<string | null>(null);
   const [showCnPicker, setShowCnPicker] = useState(false);
+  const [biltyModalOpen, setBiltyModalOpen] = useState(false);
+  const [biltyCursorIdx, setBiltyCursorIdx] = useState(0);
+  const [selectedModalCnIds, setSelectedModalCnIds] = useState<string[]>([]);
   const [cnPickerSearch, setCnPickerSearch] = useState('');
   const debouncedCnPickerSearch = useDebouncedValue(cnPickerSearch, 200);
   const [savingInv, setSavingInv] = useState(false);
@@ -402,24 +439,43 @@ const BillingQuotesModuleInner: React.FC<BillingQuotesModuleProps> = ({
     [rows]
   );
 
+  const insNum = Math.max(0, Number(insuranceCharge) || 0);
+  const collNum = Math.max(0, Number(collCharge) || 0);
+  const loadChgNum = Math.max(0, Number(loadingCharge) || 0);
   const detNum = Math.max(0, Number(detentionCharges) || 0);
   const unlNum = Math.max(0, Number(unloadingCharges) || 0);
+  const surchgNum = Math.max(0, Number(surchargeAmt) || 0);
   const stNum = Math.max(0, Number(stCharges) || 0);
-  const taxableSubtotal = freightSum + detNum + unlNum + stNum;
+  const fumNum = Math.max(0, Number(fumigationCharge) || 0);
+  const extraChgNum = Math.max(0, Number(extraCharge) || 0);
+  const taxableSubtotal =
+    freightSum +
+    insNum +
+    collNum +
+    loadChgNum +
+    detNum +
+    unlNum +
+    surchgNum +
+    stNum +
+    fumNum +
+    extraChgNum;
   const effectiveGstRate = isExportCountry ? 0 : gstRate;
   const totalTax = Number(((taxableSubtotal * effectiveGstRate) / 100).toFixed(2));
   const cgstAmt = isExportCountry || interstate ? 0 : Number((totalTax / 2).toFixed(2));
   const sgstAmt = isExportCountry || interstate ? 0 : Number((totalTax - cgstAmt).toFixed(2));
   const igstAmt = !isExportCountry && interstate ? totalTax : 0;
-  const grandTotal = Number(
+  const grossBillAmount = Number(
     (isExportCountry || reverseCharge ? taxableSubtotal : taxableSubtotal + totalTax).toFixed(2)
   );
+  const advRecNum = Math.min(grossBillAmount, Math.max(0, Number(advanceReceived) || 0));
+  const netBalanceAfterAdvance = Number(Math.max(0, grossBillAmount - advRecNum).toFixed(2));
+  const grandTotal = grossBillAmount;
 
   const pickerConsignments = useMemo(() => {
     const q = debouncedCnPickerSearch.trim().toLowerCase();
     const list = q
       ? consignments.filter((cn) =>
-          `${cn.cnNo} ${cn.truckNo} ${cn.consignorName} ${cn.fromCity} ${cn.toCity}`
+          `${cn.cnNo} ${cn.truckNo} ${cn.consignorName} ${cn.billingPartyName || ''} ${cn.fromCity} ${cn.toCity}`
             .toLowerCase()
             .includes(q)
         )
@@ -427,18 +483,118 @@ const BillingQuotesModuleInner: React.FC<BillingQuotesModuleProps> = ({
     return list.slice(0, 50);
   }, [consignments, debouncedCnPickerSearch]);
 
-  // Strictly Customer / Billing Parties ONLY (excludes Brokers, Vehicle Owners, Vendors & Drivers)
-  const billingCustomerParties = useMemo(
-    () =>
-      filterBillingCustomerParties({
-        parties,
-        drivers,
-        lorryHires,
-        invoices,
-        consignments,
-      }),
-    [parties, drivers, lorryHires, invoices, consignments]
-  );
+  const unbilledPartyCounts = useMemo(() => {
+    const counts = new Map<string, number>();
+    consignments.forEach((c) => {
+      if (c.billed) return;
+      const key = (c.billingPartyName || c.consignorName || '').trim().toLowerCase();
+      if (key) counts.set(key, (counts.get(key) || 0) + 1);
+    });
+    return counts;
+  }, [consignments]);
+
+  // Strictly Customer / Billing Parties ONLY, prioritizing those with Unbilled CNs first
+  const billingCustomerParties = useMemo(() => {
+    const base = filterBillingCustomerParties({
+      parties,
+      drivers,
+      lorryHires,
+      invoices,
+      consignments,
+    });
+    return [...base].sort((a, b) => {
+      const ca = unbilledPartyCounts.get(a.name.trim().toLowerCase()) || 0;
+      const cb = unbilledPartyCounts.get(b.name.trim().toLowerCase()) || 0;
+      if (ca > 0 && cb === 0) return -1;
+      if (cb > 0 && ca === 0) return 1;
+      return a.name.localeCompare(b.name);
+    });
+  }, [parties, drivers, lorryHires, invoices, consignments, unbilledPartyCounts]);
+
+  const modalUnbilledCns = useMemo(() => {
+    const partyClean = partyName.trim().toLowerCase();
+    const unbilled = consignments.filter((c) => !c.billed);
+    if (!partyClean) return unbilled;
+    const matching = unbilled.filter(
+      (c) =>
+        (c.billingPartyName || c.consignorName || '').trim().toLowerCase() === partyClean ||
+        c.consignorName.trim().toLowerCase() === partyClean
+    );
+    const others = unbilled.filter((c) => !matching.includes(c));
+    return [...matching, ...others];
+  }, [consignments, partyName]);
+
+  const commitSelectedModalCns = () => {
+    const chosen = modalUnbilledCns.filter((c) => selectedModalCnIds.includes(c.id));
+    if (chosen.length > 0) {
+      const pastedRows: InvoiceConsignmentRow[] = chosen.map((cn) => {
+        const isPerTon = /ton|mt/i.test(cn.rateMode || '');
+        const pkgText = [cn.packages, cn.packageMode?.split(' ')[0]].filter(Boolean).join(' ');
+        return {
+          cnNo: cn.cnNo,
+          cnDate: cn.cnDate,
+          vehicle: cn.truckNo,
+          from: cn.fromCity,
+          to: cn.toCity,
+          weight: Number(cn.nettWeight || 0),
+          packages: pkgText,
+          rateType: isPerTon ? 'Per Ton' : 'Fixed',
+          ratePerMt: Number(cn.ratePerUnit || cn.totalFreight || 0),
+          freight: Number(cn.totalFreight || 0),
+          description: cn.particulars || 'GOODS TRANSPORT',
+        };
+      });
+      setRows((prev) => {
+        const existingNonEmpty = prev.filter(
+          (r) => (r.cnNo || r.freight > 0) && !pastedRows.some((p) => p.cnNo === r.cnNo)
+        );
+        return [...existingNonEmpty, ...pastedRows];
+      });
+      const cnListText = chosen.map((c) => c.cnNo).join(', ');
+      setAdditionalNotes(`Linked Bilty/CN(s): ${cnListText}`);
+      if (!partyName.trim() && chosen[0]) {
+        handlePartySelect(chosen[0].billingPartyName || chosen[0].consignorName);
+      }
+      setScanMsg(`Pasted ${chosen.length} Bilty/CN row(s) (${cnListText}). Finalize Bill: Y`);
+    }
+    setFinalizeBill(true);
+    setBiltyModalOpen(false);
+  };
+
+  useEffect(() => {
+    if (!biltyModalOpen) return;
+    const onKeyDown = (e: KeyboardEvent) => {
+      if (modalUnbilledCns.length === 0) {
+        if (e.key === 'Escape') {
+          e.preventDefault();
+          setBiltyModalOpen(false);
+        }
+        return;
+      }
+      if (e.key === 'ArrowDown') {
+        e.preventDefault();
+        setBiltyCursorIdx((prev) => Math.min(modalUnbilledCns.length - 1, prev + 1));
+      } else if (e.key === 'ArrowUp') {
+        e.preventDefault();
+        setBiltyCursorIdx((prev) => Math.max(0, prev - 1));
+      } else if (e.key === 's' || e.key === 'S' || e.key === ' ') {
+        e.preventDefault();
+        const target = modalUnbilledCns[biltyCursorIdx];
+        if (target) {
+          setSelectedModalCnIds((prev) =>
+            prev.includes(target.id)
+              ? prev.filter((id) => id !== target.id)
+              : [...prev, target.id]
+          );
+        }
+      } else if (e.key === 'Escape' || e.key === 'Enter') {
+        e.preventDefault();
+        commitSelectedModalCns();
+      }
+    };
+    window.addEventListener('keydown', onKeyDown);
+    return () => window.removeEventListener('keydown', onKeyDown);
+  });
 
   const applyPartyEntityDetails = (p: Party) => {
     setPartyName(p.name);
@@ -597,45 +753,191 @@ const BillingQuotesModuleInner: React.FC<BillingQuotesModuleProps> = ({
     setShowCnPicker(false);
   };
 
-  const buildInvoiceObject = (overrideNo?: string): Invoice => ({
-    id: 'preview',
-    invoiceNo: (overrideNo || invoiceNo).trim(),
-    invoiceDate,
-    dueDate,
-    financialYear: normalizeFyLabel(activeFy),
-    division: invDivision,
-    partyName: partyName.trim(),
-    partyAddress: partyAddress.trim(),
-    partyGstin: partyGstin.trim(),
-    partyPan: partyPan.trim().toUpperCase(),
-    billingCountry,
-    sac,
-    reverseCharge: isExportCountry ? false : reverseCharge,
-    interstate: isExportCountry ? false : interstate,
-    gstPaidBy,
-    gstRate: effectiveGstRate,
-    cgstAmt,
-    sgstAmt,
-    igstAmt,
-    totalTax,
-    freightCharges: freightSum,
-    detentionCharges: detNum,
-    unloadingCharges: unlNum,
-    stCharges: stNum,
-    grandTotal,
-    paidAmount: 0,
-    status: 'Unpaid',
-    remarks,
-    copyCount,
-    selectedBankId: selectedBankId || undefined,
-    consignmentRows: rows.filter((r) => r.cnNo || r.vehicle || r.freight > 0),
-    annexureLorries: rows
-      .filter((r) => r.cnNo || r.vehicle)
-      .map((r) => ({ cnNo: r.cnNo || '-', lorryNumbers: r.vehicle || '-' })),
-    branchCode: activeBranchCode,
-    createdByStaff: activeStaffCode,
-    ownerUid,
-  });
+  const computeSettlementAmounts = (): { paid: number; status: 'Unpaid' | 'Partial' | 'Paid' } => {
+    if (fullPaymentReceived) {
+      return { paid: grossBillAmount, status: 'Paid' };
+    }
+    const basePaid = Math.max(advRecNum, editingInvoiceId ? editingOriginalPaidAmount : 0);
+    const clamped = Math.min(grossBillAmount, Math.round(basePaid * 100) / 100);
+    const status: 'Unpaid' | 'Partial' | 'Paid' =
+      clamped >= grossBillAmount && grossBillAmount > 0
+        ? 'Paid'
+        : clamped > 0
+          ? 'Partial'
+          : 'Unpaid';
+    return { paid: clamped, status };
+  };
+
+  const resetInvoiceForm = () => {
+    setEditingInvoiceId(null);
+    setEditingOriginalPaidAmount(0);
+    const nextSeq = 106 + invoices.length;
+    setBillId(String(nextSeq));
+    setInvoiceNo(`${(billedAtBranch || branchTag).slice(0, 3).toUpperCase()}/${nextSeq}/${fyShort}`);
+    setPartyName('');
+    setSelectedInvPartyId('');
+    setPartyAddress('');
+    setPartyGstin('');
+    setPartyPan('');
+    setPartyStateCode('');
+    setInsuranceCharge('0');
+    setCollCharge('0');
+    setLoadingCharge('0');
+    setDetentionCharges('0');
+    setUnloadingCharges('0');
+    setSurchargeAmt('0');
+    setStCharges('0');
+    setFumigationCharge('0');
+    setExtraCharge('0');
+    setAdvanceReceived('0');
+    setFullPaymentReceived(false);
+    setRemarks('');
+    setAdditionalNotes('');
+    setRows([
+      {
+        cnNo: '',
+        cnDate: todayISO(),
+        vehicle: '',
+        from: 'KOLKATA',
+        to: '',
+        weight: 0,
+        packages: '',
+        rateType: 'Fixed',
+        ratePerMt: 0,
+        freight: 0,
+        description: '',
+      },
+    ]);
+  };
+
+  const handleLoadInvoiceForEdit = (inv: Invoice) => {
+    setSubTab('invoice');
+    setEditingInvoiceId(inv.id);
+    setEditingOriginalPaidAmount(Number(inv.paidAmount || 0));
+    setInvDivision(inv.division === 'LOGISTICS' ? 'LOGISTICS' : 'FTL');
+    setBilledAtBranch(inv.billedAtBranch || inv.branchCode || defaultBranchLabel);
+    setBillId(inv.billId || inv.invoiceNo.split('/')[1] || inv.invoiceNo);
+    setBilledByCode(inv.billedByCode === 'P' ? 'P' : 'B');
+    setInvoiceNo(inv.invoiceNo);
+    setInvoiceDate(inv.invoiceDate || todayISO());
+    setDueDate(inv.dueDate || todayISO());
+    setPartyName(inv.partyName || '');
+    const matched = billingCustomerParties.find(
+      (p) => p.name.trim().toLowerCase() === (inv.partyName || '').trim().toLowerCase()
+    );
+    setSelectedInvPartyId(matched?.id || '');
+    setPartyAddress(inv.partyAddress || '');
+    setPartyGstin(inv.partyGstin || '');
+    setPartyPan(inv.partyPan || '');
+    const ctry = (inv.billingCountry as 'India' | 'Nepal' | 'Bangladesh' | 'Bhutan') || 'India';
+    setBillingCountry(ctry);
+    const st = resolveGstStateCode(inv.partyGstin || '', inv.partyAddress || '', ctry);
+    setPartyStateCode(st.code);
+    setSac(inv.sac || company.hsn || '996791');
+    setReverseCharge(Boolean(inv.reverseCharge));
+    setInterstate(Boolean(inv.interstate));
+    setGstPaidBy((inv.gstPaidBy as 'Consignee' | 'Consignor' | 'Transporter' | 'Others') || 'Consignee');
+    setGstRate(Number(inv.gstRate ?? 5));
+    setCopyCount((inv.copyCount as BillCopyCount) || 1);
+    if (inv.selectedBankId) setSelectedBankId(inv.selectedBankId);
+    setInsuranceCharge(String(inv.insuranceCharge ?? 0));
+    setCollCharge(String(inv.collCharge ?? 0));
+    setLoadingCharge(String(inv.loadingCharge ?? 0));
+    setDetentionCharges(String(inv.detentionCharges ?? 0));
+    setUnloadingCharges(String(inv.unloadingCharges ?? 0));
+    setSurchargeAmt(String(inv.surchargeAmt ?? 0));
+    setStCharges(String(inv.stCharges ?? 0));
+    setFumigationCharge(String(inv.fumigationCharge ?? 0));
+    setExtraCharge(String(inv.extraCharge ?? 0));
+    setAdvanceReceived(String(inv.advanceReceived ?? 0));
+    setAdvanceMode(inv.advanceMode || 'NEFT');
+    setFullPaymentMode(inv.fullPaymentMode || 'NEFT');
+    setFullPaymentReceived(inv.status === 'Paid');
+    setRemarks(inv.remarks || '');
+    setBillFootnote(inv.billFootnote || BILL_FOOTNOTE_PRESETS[0] || '');
+    setAdditionalNotes(inv.additionalNotes || '');
+    setRows(
+      inv.consignmentRows && inv.consignmentRows.length > 0
+        ? inv.consignmentRows
+        : [
+            {
+              cnNo: '',
+              cnDate: todayISO(),
+              vehicle: '',
+              from: 'KOLKATA',
+              to: '',
+              weight: 0,
+              packages: '',
+              rateType: 'Fixed',
+              ratePerMt: 0,
+              freight: 0,
+              description: '',
+            },
+          ]
+    );
+    setScanMsg(`Editing Tax Invoice ${inv.invoiceNo} — make changes and click Update & Preview PDF.`);
+    if (typeof window !== 'undefined') {
+      window.scrollTo({ top: 0, behavior: 'smooth' });
+    }
+  };
+
+  const buildInvoiceObject = (overrideNo?: string): Invoice => {
+    const settlement = computeSettlementAmounts();
+    return {
+      id: editingInvoiceId || 'preview',
+      billId: billId.trim(),
+      invoiceNo: (overrideNo || invoiceNo).trim(),
+      invoiceDate,
+      dueDate,
+      financialYear: normalizeFyLabel(activeFy),
+      division: invDivision,
+      billedByCode,
+      billedAtBranch: billedAtBranch.trim() || defaultBranchLabel,
+      partyName: partyName.trim(),
+      partyAddress: partyAddress.trim(),
+      partyGstin: partyGstin.trim(),
+      partyPan: partyPan.trim().toUpperCase(),
+      billingCountry,
+      sac,
+      reverseCharge: isExportCountry ? false : reverseCharge,
+      interstate: isExportCountry ? false : interstate,
+      gstPaidBy,
+      gstRate: effectiveGstRate,
+      cgstAmt,
+      sgstAmt,
+      igstAmt,
+      totalTax,
+      freightCharges: freightSum,
+      insuranceCharge: insNum,
+      collCharge: collNum,
+      loadingCharge: loadChgNum,
+      detentionCharges: detNum,
+      unloadingCharges: unlNum,
+      surchargeAmt: surchgNum,
+      stCharges: stNum,
+      fumigationCharge: fumNum,
+      extraCharge: extraChgNum,
+      grossBillAmount,
+      advanceReceived: advRecNum,
+      advanceMode,
+      fullPaymentMode,
+      grandTotal,
+      paidAmount: settlement.paid,
+      status: settlement.status,
+      remarks,
+      billFootnote: billFootnote.trim(),
+      additionalNotes: additionalNotes.trim(),
+      copyCount,
+      selectedBankId: selectedBankId || undefined,
+      consignmentRows: rows.filter((r) => r.cnNo || r.vehicle || r.freight > 0),
+      annexureLorries: rows
+        .filter((r) => r.cnNo || r.vehicle)
+        .map((r) => ({ cnNo: r.cnNo || '-', lorryNumbers: r.vehicle || '-' })),
+      branchCode: billedAtBranch.trim() || activeBranchCode,
+      createdByStaff: activeStaffCode,
+      ownerUid,
+    };
+  };
 
   const handleSaveInvoice = async (e: React.FormEvent) => {
     e.preventDefault();
@@ -654,12 +956,12 @@ const BillingQuotesModuleInner: React.FC<BillingQuotesModuleProps> = ({
     setSavingInv(true);
     try {
       let finalInvoiceNo = invoiceNo.trim();
-      if (autoAtomicInvoice) {
+      if (!editingInvoiceId && autoAtomicInvoice) {
         try {
           const serial = await reserveNextSerialNumber({
             type: 'invoice',
             fy: activeFy,
-            branchCode: activeBranchCode,
+            branchCode: billedAtBranch || activeBranchCode,
             staffCode: activeStaffCode,
             ownerUid,
           });
@@ -670,63 +972,95 @@ const BillingQuotesModuleInner: React.FC<BillingQuotesModuleProps> = ({
         }
       }
 
-      const id = makeSafeDocId('inv');
+      const id = editingInvoiceId || makeSafeDocId('inv');
       const invObj = buildInvoiceObject(finalInvoiceNo);
       await upsertDocument(
         'invoices',
         id,
         {
+          billId: invObj.billId || '',
           invoiceNo: invObj.invoiceNo,
           invoiceDate: invObj.invoiceDate,
-          dueDate: invObj.dueDate,
+          dueDate: invObj.dueDate || '',
           financialYear: normalizeFyLabel(activeFy),
           division: invDivision,
+          billedByCode: invObj.billedByCode || 'B',
+          billedAtBranch: invObj.billedAtBranch || defaultBranchLabel,
           partyName: invObj.partyName,
-          partyAddress: invObj.partyAddress,
-          partyGstin: invObj.partyGstin,
-          partyPan: invObj.partyPan,
-          billingCountry: invObj.billingCountry,
-          sac: invObj.sac,
-          reverseCharge: invObj.reverseCharge,
-          interstate: invObj.interstate,
-          gstPaidBy: invObj.gstPaidBy,
-          gstRate: invObj.gstRate,
-          cgstAmt: invObj.cgstAmt,
-          sgstAmt: invObj.sgstAmt,
-          igstAmt: invObj.igstAmt,
-          totalTax: invObj.totalTax,
-          freightCharges: invObj.freightCharges,
-          detentionCharges: invObj.detentionCharges,
-          unloadingCharges: invObj.unloadingCharges,
-          stCharges: invObj.stCharges,
+          partyAddress: invObj.partyAddress || '',
+          partyGstin: invObj.partyGstin || '',
+          partyPan: invObj.partyPan || '',
+          billingCountry: invObj.billingCountry || 'India',
+          sac: invObj.sac || '996791',
+          reverseCharge: Boolean(invObj.reverseCharge),
+          interstate: Boolean(invObj.interstate),
+          gstPaidBy: invObj.gstPaidBy || 'Consignee',
+          gstRate: invObj.gstRate ?? 5,
+          cgstAmt: invObj.cgstAmt ?? 0,
+          sgstAmt: invObj.sgstAmt ?? 0,
+          igstAmt: invObj.igstAmt ?? 0,
+          totalTax: invObj.totalTax ?? 0,
+          freightCharges: invObj.freightCharges ?? 0,
+          insuranceCharge: invObj.insuranceCharge ?? 0,
+          collCharge: invObj.collCharge ?? 0,
+          loadingCharge: invObj.loadingCharge ?? 0,
+          detentionCharges: invObj.detentionCharges ?? 0,
+          unloadingCharges: invObj.unloadingCharges ?? 0,
+          surchargeAmt: invObj.surchargeAmt ?? 0,
+          stCharges: invObj.stCharges ?? 0,
+          fumigationCharge: invObj.fumigationCharge ?? 0,
+          extraCharge: invObj.extraCharge ?? 0,
+          grossBillAmount: invObj.grossBillAmount ?? invObj.grandTotal,
+          advanceReceived: invObj.advanceReceived ?? 0,
+          advanceMode: invObj.advanceMode || 'NEFT',
+          fullPaymentMode: invObj.fullPaymentMode || 'NEFT',
           grandTotal: invObj.grandTotal,
-          paidAmount: 0,
-          status: 'Unpaid',
-          remarks: invObj.remarks,
-          copyCount: invObj.copyCount,
+          paidAmount: invObj.paidAmount,
+          status: invObj.status,
+          remarks: invObj.remarks || '',
+          billFootnote: invObj.billFootnote || '',
+          additionalNotes: invObj.additionalNotes || '',
+          copyCount: invObj.copyCount || 1,
           selectedBankId: invObj.selectedBankId || '',
           consignmentRows: validRows,
           annexureLorries: invObj.annexureLorries || [],
-          branchCode: activeBranchCode,
+          branchCode: invObj.billedAtBranch || activeBranchCode,
           createdByStaff: activeStaffCode,
           ownerUid,
         },
-        true
+        !editingInvoiceId
       );
+
+      // Sync linked consignments as billed
+      const billedCnSet = new Set(
+        validRows.map((r) => String(r.cnNo || '').trim().toUpperCase()).filter(Boolean)
+      );
+      for (const cn of consignments) {
+        if (billedCnSet.has(cn.cnNo.trim().toUpperCase()) && (!cn.billed || cn.invoiceId !== id)) {
+          await upsertDocument(
+            'consignments',
+            cn.id,
+            { billed: true, invoiceId: id },
+            false
+          );
+        }
+      }
+
       await logBranchActivity({
-        action: 'Created Tax Invoice',
+        action: editingInvoiceId ? 'Updated Tax Invoice' : 'Created Tax Invoice',
         module: 'Billing',
         docRefCode: finalInvoiceNo,
         summary: `Billed ${invObj.partyName} (${billingCountry}) · ₹${formatINR(invObj.grandTotal)} (${validRows.length} CNs)`,
         staffCode: activeStaffCode,
         staffName: activeStaffName,
-        branchCode: activeBranchCode,
+        branchCode: invObj.billedAtBranch || activeBranchCode,
         ownerUid,
       });
 
+      playVerifiedBeep();
       const pdf = await generateInvoicePDF(invObj, company, includeAnnexure, 'p', copyCount);
       onPreviewPdf(pdf, 'Bills_Invoices');
-      setInvoiceNo(`${branchTag}/${106 + invoices.length}/${fyShort}`);
+      resetInvoiceForm();
     } finally {
       setSavingInv(false);
     }
@@ -1054,6 +1388,17 @@ const BillingQuotesModuleInner: React.FC<BillingQuotesModuleProps> = ({
                 <Printer className="w-3 h-3" />
                 PDF
               </button>
+              {!readOnly && (
+                <button
+                  type="button"
+                  onClick={() => handleLoadInvoiceForEdit(inv)}
+                  className="inline-flex items-center gap-1 px-2 py-1 rounded bg-amber-50 hover:bg-amber-100 text-amber-800 font-semibold cursor-pointer"
+                  title="Edit / Rectify Bill"
+                >
+                  <Edit3 className="w-3 h-3" />
+                  Edit
+                </button>
+              )}
               {inv.status !== 'Paid' && pendingDays >= 15 && (
                 <>
                   <button
@@ -1327,18 +1672,33 @@ const BillingQuotesModuleInner: React.FC<BillingQuotesModuleProps> = ({
           >
             <div className="bg-gradient-to-r from-[#0D47A1] to-[#1976D2] text-white px-4 py-2.5 flex flex-wrap items-center justify-between gap-2">
               <span className="text-sm font-bold">
-                Tax Invoice / Bill of Supply Builder ({activeBranchCode}) — Background PDF &amp; Atomic Serials
+                {editingInvoiceId
+                  ? `Editing Invoice ${invoiceNo} (${billedAtBranch})`
+                  : `Tax Invoice / Bill of Supply Builder (${billedAtBranch}) — Background PDF & Atomic Serials`}
               </span>
               <div className="flex flex-wrap items-center gap-2">
-                <select
-                  aria-label="Invoice Division"
-                  value={invDivision}
-                  onChange={(e) => setInvDivision(e.target.value === 'LOGISTICS' ? 'LOGISTICS' : 'FTL')}
-                  className="px-2 py-1 rounded bg-white text-[#0D47A1] text-xs font-extrabold cursor-pointer"
-                >
-                  <option value="FTL">FTL Division</option>
-                  <option value="LOGISTICS">LOGISTICS Division</option>
-                </select>
+                {editingInvoiceId && (
+                  <button
+                    type="button"
+                    onClick={resetInvoiceForm}
+                    className="inline-flex items-center gap-1 px-2.5 py-1 rounded bg-amber-500 hover:bg-amber-600 text-slate-950 text-xs font-extrabold cursor-pointer"
+                  >
+                    <RotateCcw className="w-3 h-3" />
+                    Cancel Edit
+                  </button>
+                )}
+                <div className="w-40">
+                  <SearchableSelect
+                    ariaLabel="Invoice Division"
+                    value={invDivision}
+                    onChange={(val) => setInvDivision(val === 'LOGISTICS' ? 'LOGISTICS' : 'FTL')}
+                    options={[
+                      { value: 'FTL', label: 'FTL Division' },
+                      { value: 'LOGISTICS', label: 'LOGISTICS Division' },
+                    ]}
+                    buttonClassName="py-1 text-[#0D47A1] font-extrabold"
+                  />
+                </div>
                 <label className="inline-flex items-center gap-1.5 text-[11px] bg-white/10 px-2.5 py-1 rounded cursor-pointer">
                   <input
                     type="checkbox"
@@ -1364,11 +1724,121 @@ const BillingQuotesModuleInner: React.FC<BillingQuotesModuleProps> = ({
                 </button>
                 <button
                   type="button"
+                  onClick={() => {
+                    setSelectedModalCnIds([]);
+                    setBiltyCursorIdx(0);
+                    setBiltyModalOpen(true);
+                  }}
+                  className="inline-flex items-center gap-1.5 px-3 py-1 rounded bg-amber-400 hover:bg-amber-500 text-slate-950 text-xs font-extrabold cursor-pointer whitespace-nowrap"
+                >
+                  <Keyboard className="w-3.5 h-3.5" />
+                  Select Bilty? [Y/N] ({modalUnbilledCns.length})
+                </button>
+                <button
+                  type="button"
                   onClick={() => setShowCnPicker((v) => !v)}
                   className="inline-flex items-center gap-1.5 px-3 py-1 rounded bg-white/15 hover:bg-white/25 text-white text-xs font-bold cursor-pointer whitespace-nowrap"
                 >
                   <Plus className="w-3.5 h-3.5" />
-                  Pick Saved CNs ({consignments.length})
+                  Quick CNs ({consignments.length})
+                </button>
+              </div>
+            </div>
+
+            {/* FoxPro Fast Keyboard Billing Strip */}
+            <div className="px-4 py-2.5 bg-slate-900 text-white grid grid-cols-2 sm:grid-cols-5 gap-2 text-xs border-b border-slate-700">
+              <div>
+                <label className="block text-[10px] font-bold text-amber-300 uppercase mb-0.5">
+                  Billing Branch (Billed At)
+                </label>
+                <EditableSearchSelect
+                  ariaLabel="Bill Branch"
+                  value={billedAtBranch}
+                  onChange={(val) => {
+                    setBilledAtBranch(val);
+                    if (!editingInvoiceId && val.trim()) {
+                      const code = val.replace(/[^A-Z0-9]/gi, '').slice(0, 3).toUpperCase() || branchTag;
+                      setInvoiceNo(`${code}/${billId || '105'}/${fyShort}`);
+                    }
+                  }}
+                  options={ALL_INDIA_BRANCH_OPTIONS}
+                  placeholder="Branch..."
+                />
+              </div>
+              <div>
+                <label className="block text-[10px] font-bold text-amber-300 uppercase mb-0.5">
+                  Bill ID (Editable)
+                </label>
+                <input
+                  type="text"
+                  value={billId}
+                  onChange={(e) => {
+                    const nextId = e.target.value;
+                    setBillId(nextId);
+                    if (!editingInvoiceId) {
+                      const code = (billedAtBranch || branchTag).replace(/[^A-Z0-9]/gi, '').slice(0, 3).toUpperCase() || branchTag;
+                      setInvoiceNo(`${code}/${nextId || '105'}/${fyShort}`);
+                    }
+                  }}
+                  className="w-full px-2 py-1.5 rounded bg-slate-800 border border-slate-600 text-white font-mono-num font-bold"
+                />
+              </div>
+              <div>
+                <label className="block text-[10px] font-bold text-amber-300 uppercase mb-0.5">
+                  Billed By [B / P] + Enter
+                </label>
+                <input
+                  type="text"
+                  maxLength={1}
+                  value={billedByCode}
+                  onChange={(e) => {
+                    const v = e.target.value.toUpperCase();
+                    if (v === 'P') setBilledByCode('P');
+                    else setBilledByCode('B');
+                  }}
+                  onKeyDown={(e) => {
+                    if (e.key === 'b' || e.key === 'B') {
+                      e.preventDefault();
+                      setBilledByCode('B');
+                    } else if (e.key === 'p' || e.key === 'P') {
+                      e.preventDefault();
+                      setBilledByCode('P');
+                    } else if (e.key === 'Enter') {
+                      e.preventDefault();
+                      billDateInputRef.current?.focus();
+                    }
+                  }}
+                  className="w-full px-2 py-1.5 rounded bg-slate-800 border border-slate-600 text-amber-300 font-mono-num font-extrabold text-center uppercase"
+                />
+              </div>
+              <div>
+                <label className="block text-[10px] font-bold text-amber-300 uppercase mb-0.5">
+                  Select Bilty? [Y / N]
+                </label>
+                <button
+                  type="button"
+                  onClick={() => {
+                    setSelectedModalCnIds([]);
+                    setBiltyCursorIdx(0);
+                    setBiltyModalOpen(true);
+                  }}
+                  className="w-full px-2.5 py-1.5 rounded bg-amber-400 hover:bg-amber-500 text-slate-950 font-extrabold text-xs cursor-pointer"
+                >
+                  Open Unbilled Bilty List ({modalUnbilledCns.length})
+                </button>
+              </div>
+              <div>
+                <label className="block text-[10px] font-bold text-amber-300 uppercase mb-0.5">
+                  Finalize Bill [Y / N]
+                </label>
+                <button
+                  type="button"
+                  onClick={() => setFinalizeBill((v) => !v)}
+                  className={`w-full px-2.5 py-1.5 rounded font-extrabold text-xs cursor-pointer ${
+                    finalizeBill ? 'bg-emerald-500 text-slate-950' : 'bg-slate-700 text-white'
+                  }`}
+                >
+                  Finalize: {finalizeBill ? 'YES [Y]' : 'DRAFT [N]'}
                 </button>
               </div>
             </div>
@@ -1426,36 +1896,44 @@ const BillingQuotesModuleInner: React.FC<BillingQuotesModuleProps> = ({
                   <label className="block font-semibold text-slate-700 mb-1">
                     Bill To Party *{' '}
                     <span className="text-[10px] font-bold text-blue-700">
-                      (Customers Only: {billingCustomerParties.length})
+                      (Customers Only: {billingCustomerParties.length} · Unbilled CN Parties First)
                     </span>
                   </label>
-                  <select
-                    aria-label="Bill To Party Customer Dropdown"
-                    value={
-                      selectedInvPartyId ||
-                      (() => {
-                        const clean = partyName.trim().toLowerCase();
-                        const m = billingCustomerParties.filter(
-                          (p) => p.name.trim().toLowerCase() === clean
-                        );
-                        return m.length === 1 ? m[0].id : '';
-                      })()
-                    }
-                    onChange={(e) => {
-                      const chosen = billingCustomerParties.find((p) => p.id === e.target.value);
-                      if (chosen) applyPartyEntityDetails(chosen);
-                    }}
-                    className="w-full px-2.5 py-1.5 rounded border border-blue-300 bg-blue-50/40 font-semibold text-slate-900 mb-1.5 cursor-pointer"
-                  >
-                    <option value="">
-                      -- Select Customer / Billing Party ({billingCustomerParties.length}) --
-                    </option>
-                    {billingCustomerParties.map((p) => (
-                      <option key={p.id} value={p.id}>
-                        {p.name} | {formatPartyDetailsLine(p)}
-                      </option>
-                    ))}
-                  </select>
+                  <div className="mb-1.5">
+                    <SearchableSelect
+                      ariaLabel="Bill To Party Customer Dropdown"
+                      value={
+                        selectedInvPartyId ||
+                        (() => {
+                          const clean = partyName.trim().toLowerCase();
+                          const m = billingCustomerParties.filter(
+                            (p) => p.name.trim().toLowerCase() === clean
+                          );
+                          return m.length === 1 ? m[0].id : '';
+                        })()
+                      }
+                      onChange={(nextId) => {
+                        const chosen = billingCustomerParties.find((p) => p.id === nextId);
+                        if (chosen) applyPartyEntityDetails(chosen);
+                      }}
+                      placeholder={`-- Select Customer / Billing Party (${billingCustomerParties.length}) --`}
+                      searchPlaceholder="Search Customer A-Z by Name, GSTIN, City..."
+                      options={[
+                        {
+                          value: '',
+                          label: `-- Select Customer / Billing Party (${billingCustomerParties.length}) --`,
+                        },
+                        ...billingCustomerParties.map((p) => {
+                          const unb = unbilledPartyCounts.get(p.name.trim().toLowerCase()) || 0;
+                          return {
+                            value: p.id,
+                            label: `${unb > 0 ? `[${unb} UNBILLED CN] ` : ''}${p.name} | ${formatPartyDetailsLine(p)}`,
+                          };
+                        }),
+                      ]}
+                      buttonClassName="border-blue-300 bg-blue-50/40"
+                    />
+                  </div>
                   <RichEntityPicker<Party>
                     ariaLabel="Bill To Party Search"
                     value={partyName}
@@ -1506,24 +1984,24 @@ const BillingQuotesModuleInner: React.FC<BillingQuotesModuleProps> = ({
                 </div>
                 <div>
                   <label className="block font-semibold text-slate-700 mb-1">Billing Country *</label>
-                  <select
-                    aria-label="Billing Country"
+                  <SearchableSelect
+                    ariaLabel="Billing Country"
                     value={billingCountry}
-                    onChange={(e) => {
-                      const nextC = e.target.value as 'India' | 'Nepal' | 'Bangladesh' | 'Bhutan';
+                    onChange={(val) => {
+                      const nextC = val as 'India' | 'Nepal' | 'Bangladesh' | 'Bhutan';
                       setBillingCountry(nextC);
                       setInvValidationError(null);
                       const st = resolveGstStateCode(partyGstin, partyAddress, nextC);
                       setPartyStateCode(st.code);
                       applyAutoGstRules(nextC, partyGstin, gstPaidBy);
                     }}
-                    className="w-full px-2.5 py-1.5 rounded border border-slate-300 bg-white font-bold"
-                  >
-                    <option value="India">India (Auto GST by State Code)</option>
-                    <option value="Nepal">Nepal (GST Exempt 0% · PAN Only)</option>
-                    <option value="Bangladesh">Bangladesh (GST Exempt 0% · PAN Only)</option>
-                    <option value="Bhutan">Bhutan (GST Exempt 0% · PAN Only)</option>
-                  </select>
+                    options={[
+                      { value: 'Bangladesh', label: 'Bangladesh (GST Exempt 0% · PAN Only)' },
+                      { value: 'Bhutan', label: 'Bhutan (GST Exempt 0% · PAN Only)' },
+                      { value: 'India', label: 'India (Auto GST by State Code)' },
+                      { value: 'Nepal', label: 'Nepal (GST Exempt 0% · PAN Only)' },
+                    ]}
+                  />
                 </div>
 
                 <div className="grid grid-cols-3 gap-1.5">
@@ -1547,25 +2025,24 @@ const BillingQuotesModuleInner: React.FC<BillingQuotesModuleProps> = ({
                   </div>
                   <div>
                     <label className="block font-semibold text-slate-700 mb-1">State Code</label>
-                    <select
-                      aria-label="Party State Code"
+                    <SearchableSelect
+                      ariaLabel="Party State Code"
                       value={partyStateCode}
-                      onChange={(e) => {
-                        const nextCode = e.target.value;
+                      onChange={(nextCode) => {
                         setPartyStateCode(nextCode);
                         if (billingCountry === 'India' && nextCode) {
                           setInterstate(nextCode !== '19' && nextCode !== '99');
                         }
                       }}
-                      className="w-full px-1.5 py-1.5 rounded border border-slate-300 bg-white font-mono-num font-bold text-blue-900"
-                    >
-                      <option value="">--</option>
-                      {ALL_INDIA_STATES_DISTRICTS.map((st) => (
-                        <option key={st.code} value={st.code}>
-                          {st.code} - {st.name}
-                        </option>
-                      ))}
-                    </select>
+                      options={[
+                        { value: '', label: '--' },
+                        ...ALL_INDIA_STATES_DISTRICTS.map((st) => ({
+                          value: st.code,
+                          label: `${st.code} - ${st.name}`,
+                        })),
+                      ]}
+                      buttonClassName="font-mono-num font-bold text-blue-900"
+                    />
                   </div>
                 </div>
                 <div>
@@ -1602,10 +2079,19 @@ const BillingQuotesModuleInner: React.FC<BillingQuotesModuleProps> = ({
                   <div>
                     <label className="block font-semibold text-slate-700 mb-1">Inv Date *</label>
                     <input
+                      ref={billDateInputRef}
                       type="date"
                       required
                       value={invoiceDate}
                       onChange={(e) => setInvoiceDate(e.target.value)}
+                      onKeyDown={(e) => {
+                        if (e.key === 'Enter') {
+                          e.preventDefault();
+                          setSelectedModalCnIds([]);
+                          setBiltyCursorIdx(0);
+                          setBiltyModalOpen(true);
+                        }
+                      }}
                       className="w-full px-2 py-1.5 rounded border border-slate-300 font-mono-num"
                     />
                   </div>
@@ -1632,18 +2118,15 @@ const BillingQuotesModuleInner: React.FC<BillingQuotesModuleProps> = ({
                   <label className="block font-semibold text-slate-700 mb-1">
                     Bank Account &amp; UPI QR on Invoice PDF
                   </label>
-                  <select
-                    aria-label="Bank Account for Tax Invoice"
+                  <SearchableSelect
+                    ariaLabel="Bank Account for Tax Invoice"
                     value={selectedBankId}
-                    onChange={(e) => setSelectedBankId(e.target.value)}
-                    className="w-full px-2.5 py-1.5 rounded border border-slate-300 bg-white font-semibold"
-                  >
-                    {availableBanks.map((b) => (
-                      <option key={b.id} value={b.id}>
-                        {b.accountName} — {b.bankName} ({b.accountNo})
-                      </option>
-                    ))}
-                  </select>
+                    onChange={setSelectedBankId}
+                    options={availableBanks.map((b) => ({
+                      value: b.id,
+                      label: `${b.accountName} — ${b.bankName} (${b.accountNo})`,
+                    }))}
+                  />
                 </div>
               </div>
 
@@ -1802,11 +2285,12 @@ const BillingQuotesModuleInner: React.FC<BillingQuotesModuleProps> = ({
                               className="w-16 px-2 py-1 rounded border border-slate-300"
                             />
                           </td>
-                          <td className="p-1.5">
-                            <select
+                          <td className="p-1.5 min-w-[110px]">
+                            <SearchableSelect
+                              ariaLabel="Row Rate Type"
                               value={row.rateType || 'Fixed'}
-                              onChange={(e) => {
-                                const rt = e.target.value as 'Fixed' | 'Per Ton';
+                              onChange={(val) => {
+                                const rt = val as 'Fixed' | 'Per Ton';
                                 setRows((prev) =>
                                   prev.map((r, i) => {
                                     if (i !== idx) return r;
@@ -1818,11 +2302,8 @@ const BillingQuotesModuleInner: React.FC<BillingQuotesModuleProps> = ({
                                   })
                                 );
                               }}
-                              className="px-1.5 py-1 rounded border border-slate-300 bg-white font-semibold"
-                            >
-                              <option value="Fixed">Fixed</option>
-                              <option value="Per Ton">Per Ton</option>
-                            </select>
+                              options={['Fixed', 'Per Ton']}
+                            />
                           </td>
                           <td className="p-1.5">
                             <input
@@ -1873,6 +2354,12 @@ const BillingQuotesModuleInner: React.FC<BillingQuotesModuleProps> = ({
                                   )
                                 )
                               }
+                              onKeyDown={(e) => {
+                                if (e.key === 'Enter' || (e.key === 'Tab' && !e.shiftKey && idx === rows.length - 1)) {
+                                  e.preventDefault();
+                                  remarksInputRef.current?.focus();
+                                }
+                              }}
                               className="w-28 px-2 py-1 rounded border border-slate-300"
                             />
                           </td>
@@ -1941,39 +2428,41 @@ const BillingQuotesModuleInner: React.FC<BillingQuotesModuleProps> = ({
                     </label>
                     <div className="flex items-center gap-1.5">
                       <span>GST %:</span>
-                      <select
-                        disabled={isExportCountry}
-                        value={effectiveGstRate}
-                        onChange={(e) => setGstRate(Number(e.target.value))}
-                        className="px-2 py-1 rounded border border-slate-300 bg-white font-mono-num"
-                      >
-                        <option value={5}>5%</option>
-                        <option value={12}>12%</option>
-                        <option value={0}>0% (Exempt)</option>
-                      </select>
+                      <div className="w-32">
+                        <SearchableSelect
+                          ariaLabel="GST Slab Percent"
+                          disabled={isExportCountry}
+                          value={String(effectiveGstRate)}
+                          onChange={(val) => setGstRate(Number(val))}
+                          options={[
+                            { value: '0', label: '0% (Exempt)' },
+                            { value: '12', label: '12%' },
+                            { value: '5', label: '5%' },
+                          ]}
+                          buttonClassName="font-mono-num"
+                        />
+                      </div>
                     </div>
                   </div>
 
                   <div className="flex flex-wrap items-center gap-2">
                     <label className="font-bold text-slate-800">GST Paid By:</label>
-                    <select
-                      aria-label="GST Paid By"
-                      value={gstPaidBy}
-                      onChange={(e) => {
-                        const next = e.target.value as 'Consignee' | 'Consignor' | 'Transporter' | 'Others';
-                        setGstPaidBy(next);
-                        if (!isExportCountry) {
-                          if (next === 'Transporter') setReverseCharge(false);
-                          else if (next === 'Consignee' || next === 'Consignor') setReverseCharge(true);
-                        }
-                      }}
-                      className="px-2.5 py-1 rounded border border-slate-300 bg-white font-bold text-blue-900"
-                    >
-                      <option value="Consignee">Consignee</option>
-                      <option value="Consignor">Consignor</option>
-                      <option value="Transporter">Transporter</option>
-                      <option value="Others">Others</option>
-                    </select>
+                    <div className="w-40">
+                      <SearchableSelect
+                        ariaLabel="GST Paid By"
+                        value={gstPaidBy}
+                        onChange={(val) => {
+                          const next = val as 'Consignee' | 'Consignor' | 'Transporter' | 'Others';
+                          setGstPaidBy(next);
+                          if (!isExportCountry) {
+                            if (next === 'Transporter') setReverseCharge(false);
+                            else if (next === 'Consignee' || next === 'Consignor') setReverseCharge(true);
+                          }
+                        }}
+                        options={['Consignee', 'Consignor', 'Others', 'Transporter']}
+                        buttonClassName="font-bold text-blue-900"
+                      />
+                    </div>
                   </div>
 
                   <div className="grid grid-cols-2 gap-1 text-slate-700 font-mono-num pt-1">
@@ -1984,51 +2473,198 @@ const BillingQuotesModuleInner: React.FC<BillingQuotesModuleProps> = ({
                   </div>
                 </div>
 
-                <div className="space-y-2">
-                  <p className="font-bold text-slate-900">FREIGHT DETAILS &amp; TOTAL</p>
-                  <div className="grid grid-cols-3 gap-2">
+                <div className="space-y-2.5">
+                  <p className="font-bold text-slate-900">PARTY BILL ITEMIZED CHARGES &amp; SETTLEMENT</p>
+                  <div className="grid grid-cols-3 sm:grid-cols-5 gap-2">
                     <div>
-                      <label className="block text-[11px] text-slate-600">Detention (₹)</label>
+                      <label className="block text-[10px] font-semibold text-slate-600">Insurance (₹)</label>
                       <input
                         type="number"
-                        value={detentionCharges}
-                        onChange={(e) => setDetentionCharges(e.target.value)}
+                        min={0}
+                        step="0.01"
+                        value={insuranceCharge}
+                        onChange={(e) => setInsuranceCharge(e.target.value)}
                         className="w-full px-2 py-1 rounded border border-slate-300 bg-white font-mono-num"
                       />
                     </div>
                     <div>
-                      <label className="block text-[11px] text-slate-600">Unloading (₹)</label>
+                      <label className="block text-[10px] font-semibold text-slate-600">Coll. Chg (₹)</label>
                       <input
                         type="number"
+                        min={0}
+                        step="0.01"
+                        value={collCharge}
+                        onChange={(e) => setCollCharge(e.target.value)}
+                        className="w-full px-2 py-1 rounded border border-slate-300 bg-white font-mono-num"
+                      />
+                    </div>
+                    <div>
+                      <label className="block text-[10px] font-semibold text-slate-600">Loading (₹)</label>
+                      <input
+                        type="number"
+                        min={0}
+                        step="0.01"
+                        value={loadingCharge}
+                        onChange={(e) => setLoadingCharge(e.target.value)}
+                        className="w-full px-2 py-1 rounded border border-slate-300 bg-white font-mono-num"
+                      />
+                    </div>
+                    <div>
+                      <label className="block text-[10px] font-semibold text-slate-600">Unloading (₹)</label>
+                      <input
+                        type="number"
+                        min={0}
+                        step="0.01"
                         value={unloadingCharges}
                         onChange={(e) => setUnloadingCharges(e.target.value)}
                         className="w-full px-2 py-1 rounded border border-slate-300 bg-white font-mono-num"
                       />
                     </div>
                     <div>
-                      <label className="block text-[11px] text-slate-600">ST Charges (₹)</label>
+                      <label className="block text-[10px] font-semibold text-slate-600">Surcharge (₹)</label>
                       <input
                         type="number"
+                        min={0}
+                        step="0.01"
+                        value={surchargeAmt}
+                        onChange={(e) => setSurchargeAmt(e.target.value)}
+                        className="w-full px-2 py-1 rounded border border-slate-300 bg-white font-mono-num"
+                      />
+                    </div>
+                    <div>
+                      <label className="block text-[10px] font-semibold text-slate-600">Detention (₹)</label>
+                      <input
+                        type="number"
+                        min={0}
+                        step="0.01"
+                        value={detentionCharges}
+                        onChange={(e) => setDetentionCharges(e.target.value)}
+                        className="w-full px-2 py-1 rounded border border-slate-300 bg-white font-mono-num"
+                      />
+                    </div>
+                    <div>
+                      <label className="block text-[10px] font-semibold text-slate-600">ST Charges (₹)</label>
+                      <input
+                        type="number"
+                        min={0}
+                        step="0.01"
                         value={stCharges}
                         onChange={(e) => setStCharges(e.target.value)}
                         className="w-full px-2 py-1 rounded border border-slate-300 bg-white font-mono-num"
                       />
                     </div>
+                    <div>
+                      <label className="block text-[10px] font-semibold text-slate-600">Fumigation (₹)</label>
+                      <input
+                        type="number"
+                        min={0}
+                        step="0.01"
+                        value={fumigationCharge}
+                        onChange={(e) => setFumigationCharge(e.target.value)}
+                        className="w-full px-2 py-1 rounded border border-slate-300 bg-white font-mono-num"
+                      />
+                    </div>
+                    <div>
+                      <label className="block text-[10px] font-semibold text-slate-600">Extra Chg (₹)</label>
+                      <input
+                        type="number"
+                        min={0}
+                        step="0.01"
+                        value={extraCharge}
+                        onChange={(e) => setExtraCharge(e.target.value)}
+                        className="w-full px-2 py-1 rounded border border-slate-300 bg-white font-mono-num"
+                      />
+                    </div>
                   </div>
-                  <div className="pt-1 flex items-center justify-between border-t border-slate-300">
-                    <span className="font-bold text-slate-900">GRAND TOTAL:</span>
-                    <span className="text-base font-extrabold font-mono-num text-[#0D47A1]">
-                      ₹ {formatINR(grandTotal)}
-                    </span>
+
+                  <div className="grid grid-cols-2 sm:grid-cols-4 gap-2 pt-1 border-t border-slate-200">
+                    <div>
+                      <label className="block text-[10px] font-bold text-slate-600">Adv. Recd (₹)</label>
+                      <input
+                        type="number"
+                        min={0}
+                        step="0.01"
+                        value={advanceReceived}
+                        onChange={(e) => setAdvanceReceived(e.target.value)}
+                        className="w-full px-2 py-1 rounded border border-slate-300 bg-white font-mono-num"
+                      />
+                    </div>
+                    <div>
+                      <label className="block text-[10px] font-bold text-slate-600">Adv. Mode</label>
+                      <select
+                        value={advanceMode}
+                        onChange={(e) => setAdvanceMode(e.target.value)}
+                        className="w-full px-2 py-1 rounded border border-slate-300 bg-white"
+                      >
+                        {PAYMENT_MODE_OPTIONS.map((m) => (
+                          <option key={m} value={m}>
+                            {m}
+                          </option>
+                        ))}
+                      </select>
+                    </div>
+                    <div className="flex items-end pb-1">
+                      <label className="inline-flex items-center gap-1.5 font-bold text-emerald-800 cursor-pointer">
+                        <input
+                          type="checkbox"
+                          checked={fullPaymentReceived}
+                          onChange={(e) => setFullPaymentReceived(e.target.checked)}
+                        />
+                        Full Paid Now
+                      </label>
+                    </div>
+                    <div>
+                      <label className="block text-[10px] font-bold text-slate-600">Pay Mode</label>
+                      <select
+                        value={fullPaymentMode}
+                        onChange={(e) => setFullPaymentMode(e.target.value)}
+                        className="w-full px-2 py-1 rounded border border-slate-300 bg-white"
+                      >
+                        {PAYMENT_MODE_OPTIONS.map((m) => (
+                          <option key={m} value={m}>
+                            {m}
+                          </option>
+                        ))}
+                      </select>
+                    </div>
+                  </div>
+
+                  <div className="pt-1 flex flex-wrap items-center justify-between gap-2 border-t border-slate-300">
+                    <div>
+                      <span className="font-bold text-slate-900">GROSS / GRAND TOTAL:</span>{' '}
+                      <span className="text-base font-extrabold font-mono-num text-[#0D47A1]">
+                        ₹ {formatINR(grandTotal)}
+                      </span>
+                    </div>
+                    {advRecNum > 0 && !fullPaymentReceived && (
+                      <div className="text-xs font-extrabold text-orange-700 font-mono-num">
+                        Net Due after Adv: ₹ {formatINR(netBalanceAfterAdvance)}
+                      </div>
+                    )}
                   </div>
                   <p className="text-[11px] text-slate-600">{amountToIndianWords(grandTotal)}</p>
                 </div>
               </div>
 
-              <div className="grid grid-cols-1 md:grid-cols-3 gap-3 items-center">
-                <div className="md:col-span-2">
-                  <label className="block font-semibold text-slate-700 mb-1">Remarks</label>
+              <div className="grid grid-cols-1 md:grid-cols-3 gap-3 items-start">
+                <div className="space-y-1.5">
+                  <div className="flex flex-wrap items-center justify-between gap-1">
+                    <label className="font-semibold text-slate-700">Remarks</label>
+                    <div className="w-48 max-w-full">
+                      <SearchableSelect
+                        ariaLabel="Invoice Remark Preset"
+                        value=""
+                        onChange={(preset) => {
+                          if (!preset) return;
+                          setRemarks((prev) => (prev.trim() ? `${prev.trim()} | ${preset}` : preset));
+                        }}
+                        placeholder="+ Remark Preset..."
+                        options={[...BILL_REMARK_PRESETS, ...COMMON_REMARK_PRESETS]}
+                      />
+                    </div>
+                  </div>
                   <input
+                    ref={remarksInputRef}
                     type="text"
                     value={remarks}
                     onChange={(e) => setRemarks(e.target.value)}
@@ -2036,31 +2672,143 @@ const BillingQuotesModuleInner: React.FC<BillingQuotesModuleProps> = ({
                     className="w-full px-2.5 py-1.5 rounded border border-slate-300"
                   />
                 </div>
-                <label className="inline-flex items-center gap-2 font-semibold text-slate-700 mt-4">
-                  <input
-                    type="checkbox"
-                    checked={includeAnnexure}
-                    onChange={(e) => setIncludeAnnexure(e.target.checked)}
+                <div className="space-y-1.5">
+                  <label className="block font-semibold text-slate-700">Bill Footnote Preset</label>
+                  <EditableSearchSelect
+                    ariaLabel="Bill Footnote"
+                    value={billFootnote}
+                    onChange={setBillFootnote}
+                    options={BILL_FOOTNOTE_PRESETS}
+                    placeholder="Select or type footnote..."
                   />
-                  Include Invoice Annexure Page
-                </label>
+                </div>
+                <div className="space-y-1.5">
+                  <label className="block font-semibold text-slate-700">Additional Notes (Auto CNs)</label>
+                  <input
+                    type="text"
+                    value={additionalNotes}
+                    onChange={(e) => setAdditionalNotes(e.target.value)}
+                    placeholder="Linked Bilty/CNs appear here..."
+                    className="w-full px-2.5 py-1.5 rounded border border-slate-300"
+                  />
+                  <label className="inline-flex items-center gap-2 font-semibold text-slate-700 pt-1">
+                    <input
+                      type="checkbox"
+                      checked={includeAnnexure}
+                      onChange={(e) => setIncludeAnnexure(e.target.checked)}
+                    />
+                    Include Invoice Annexure Page
+                  </label>
+                </div>
               </div>
             </div>
+
+            {/* FoxPro Keyboard Bilty Selection Modal */}
+            {biltyModalOpen && (
+              <div className="fixed inset-0 z-50 flex items-center justify-center bg-slate-900/65 p-4">
+                <div className="w-full max-w-3xl bg-white rounded-xl border border-slate-300 shadow-2xl overflow-hidden flex flex-col max-h-[85vh]">
+                  <div className="bg-slate-900 text-white px-4 py-3 flex flex-wrap items-center justify-between gap-2">
+                    <div>
+                      <h4 className="text-sm font-extrabold">
+                        FoxPro Bilty Picker — {partyName ? partyName : 'All Parties'} ({modalUnbilledCns.length} Unbilled)
+                      </h4>
+                      <p className="text-[11px] text-amber-300">
+                        Keys: ↑ / ↓ Navigate · Press &apos;S&apos; or Click to Toggle Selection · Press &apos;Esc&apos; or &apos;Enter&apos; to Paste &amp; Finalize Bill
+                      </p>
+                    </div>
+                    <button
+                      type="button"
+                      onClick={() => setBiltyModalOpen(false)}
+                      className="px-2.5 py-1 rounded bg-slate-700 hover:bg-slate-600 text-xs font-bold cursor-pointer"
+                    >
+                      Close
+                    </button>
+                  </div>
+                  <div className="overflow-y-auto flex-1 divide-y divide-slate-100 text-xs">
+                    {modalUnbilledCns.length === 0 ? (
+                      <div className="p-8 text-center text-slate-500">
+                        All Consignment Notes are already marked billed.
+                      </div>
+                    ) : (
+                      modalUnbilledCns.map((cn, idx) => {
+                        const isSelected = selectedModalCnIds.includes(cn.id);
+                        const isCursor = idx === biltyCursorIdx;
+                        return (
+                          <div
+                            key={cn.id}
+                            onClick={() => {
+                              setBiltyCursorIdx(idx);
+                              setSelectedModalCnIds((prev) =>
+                                prev.includes(cn.id)
+                                  ? prev.filter((id) => id !== cn.id)
+                                  : [...prev, cn.id]
+                              );
+                            }}
+                            className={`px-4 py-2.5 flex items-center justify-between gap-3 cursor-pointer ${
+                              isSelected
+                                ? 'bg-emerald-50 border-l-4 border-emerald-600'
+                                : isCursor
+                                  ? 'bg-amber-50 border-l-4 border-amber-500'
+                                  : 'hover:bg-slate-50'
+                            }`}
+                          >
+                            <div className="flex items-center gap-3 min-w-0">
+                              <input
+                                type="checkbox"
+                                readOnly
+                                checked={isSelected}
+                                className="w-4 h-4 accent-emerald-600"
+                              />
+                              <div className="min-w-0">
+                                <div className="font-mono-num font-extrabold text-blue-900">
+                                  {cn.cnNo} · {formatDateDDMMYYYY(cn.cnDate)} · {cn.truckNo}
+                                </div>
+                                <div className="text-[11px] text-slate-600 truncate">
+                                  {cn.billingPartyName || cn.consignorName} ({cn.fromCity} → {cn.toCity})
+                                </div>
+                              </div>
+                            </div>
+                            <div className="text-right font-mono-num font-bold text-slate-900 shrink-0">
+                              ₹{formatINR(cn.totalFreight)}
+                            </div>
+                          </div>
+                        );
+                      })
+                    )}
+                  </div>
+                  <div className="px-4 py-3 bg-slate-50 border-t border-slate-200 flex items-center justify-between">
+                    <span className="text-xs font-bold text-slate-700">
+                      Selected: {selectedModalCnIds.length} Bilty/CN(s)
+                    </span>
+                    <button
+                      type="button"
+                      onClick={commitSelectedModalCns}
+                      className="px-4 py-2 rounded-lg bg-emerald-600 hover:bg-emerald-700 text-white text-xs font-extrabold cursor-pointer"
+                    >
+                      Paste {selectedModalCnIds.length} Bilty(s) &amp; Finalize [Esc]
+                    </button>
+                  </div>
+                </div>
+              </div>
+            )}
 
             <div className="px-4 py-3 bg-slate-50 border-t border-slate-200 flex flex-wrap items-center justify-between gap-2.5">
               <div className="flex items-center gap-2 text-xs">
                 <label className="font-bold text-slate-700">Print Copies:</label>
-                <select
-                  aria-label="Bill Copy Selector"
-                  value={copyCount}
-                  onChange={(e) => setCopyCount(Number(e.target.value) as BillCopyCount)}
-                  className="px-2.5 py-1.5 rounded border border-slate-300 bg-white font-bold text-blue-900"
-                >
-                  <option value={1}>1 Copy (Original)</option>
-                  <option value={2}>2 Copies (Original + Office)</option>
-                  <option value={3}>3 Copies (Original + Transporter + Office)</option>
-                  <option value={4}>4 Copies (All)</option>
-                </select>
+                <div className="w-56">
+                  <SearchableSelect
+                    ariaLabel="Bill Copy Selector"
+                    value={String(copyCount)}
+                    onChange={(val) => setCopyCount(Number(val) as BillCopyCount)}
+                    options={[
+                      { value: '1', label: '1 Copy (Original)' },
+                      { value: '2', label: '2 Copies (Original + Office)' },
+                      { value: '3', label: '3 Copies (Original + Transporter + Office)' },
+                      { value: '4', label: '4 Copies (All)' },
+                    ]}
+                    buttonClassName="font-bold text-blue-900"
+                  />
+                </div>
               </div>
 
               <div className="flex flex-wrap items-center gap-2.5">
@@ -2089,12 +2837,17 @@ const BillingQuotesModuleInner: React.FC<BillingQuotesModuleProps> = ({
                   Live A4 Preview
                 </button>
                 <button
+                  ref={saveInvBtnRef}
                   type="submit"
                   disabled={savingInv || readOnly}
                   className="inline-flex items-center gap-1.5 px-4 py-1.5 rounded-md bg-blue-700 hover:bg-blue-800 text-white text-xs font-bold cursor-pointer disabled:opacity-50"
                 >
                   <Save className="w-3.5 h-3.5" />
-                  {savingInv ? 'Saving...' : 'Save & Preview Invoice PDF'}
+                  {savingInv
+                    ? 'Saving...'
+                    : editingInvoiceId
+                      ? 'Update & Preview Invoice PDF'
+                      : 'Save [Y] & Preview Invoice PDF'}
                 </button>
               </div>
             </div>
@@ -2150,15 +2903,18 @@ const BillingQuotesModuleInner: React.FC<BillingQuotesModuleProps> = ({
             <div className="bg-gradient-to-r from-[#0D47A1] to-[#1976D2] text-white px-4 py-2.5 flex flex-wrap items-center justify-between gap-2">
               <span className="text-sm font-bold">Proforma Invoice / Rate of Quotation Generator</span>
               <div className="flex flex-wrap items-center gap-2">
-                <select
-                  aria-label="Quotation Division"
-                  value={qDivision}
-                  onChange={(e) => setQDivision(e.target.value === 'LOGISTICS' ? 'LOGISTICS' : 'FTL')}
-                  className="px-2 py-1 rounded bg-white text-[#0D47A1] text-xs font-extrabold cursor-pointer"
-                >
-                  <option value="FTL">FTL Division</option>
-                  <option value="LOGISTICS">LOGISTICS Division</option>
-                </select>
+                <div className="w-40">
+                  <SearchableSelect
+                    ariaLabel="Quotation Division"
+                    value={qDivision}
+                    onChange={(val) => setQDivision(val === 'LOGISTICS' ? 'LOGISTICS' : 'FTL')}
+                    options={[
+                      { value: 'FTL', label: 'FTL Division' },
+                      { value: 'LOGISTICS', label: 'LOGISTICS Division' },
+                    ]}
+                    buttonClassName="py-1 text-[#0D47A1] font-extrabold"
+                  />
+                </div>
                 <label className="inline-flex items-center gap-1.5 text-[11px] bg-white/10 px-2.5 py-1 rounded cursor-pointer">
                   <input
                     type="checkbox"
@@ -2324,39 +3080,27 @@ const BillingQuotesModuleInner: React.FC<BillingQuotesModuleProps> = ({
               </div>
               <div>
                 <label className="block font-semibold text-slate-700 mb-1">Destination Route *</label>
-                <input
-                  type="text"
-                  required
-                  list="q-dest-list"
+                <EditableSearchSelect
+                  ariaLabel="Quotation Destination Route"
                   value={qDest}
-                  onChange={(e) => {
-                    const nextDest = e.target.value;
+                  onChange={(nextDest) => {
                     setQDest(nextDest);
                     applyQuotationSmartAutoFill(qParty, nextDest);
                   }}
+                  options={QUICK_CORRIDOR_DESTINATIONS}
                   placeholder={PRIORITY_CORRIDOR_REGIONS.join(', ')}
-                  className="w-full px-2.5 py-1.5 rounded border border-slate-300"
+                  required
                 />
-                <datalist id="q-dest-list">
-                  {QUICK_CORRIDOR_DESTINATIONS.map((d) => (
-                    <option key={d} value={d} />
-                  ))}
-                </datalist>
               </div>
               <div>
                 <label className="block font-semibold text-slate-700 mb-1">Goods Type</label>
-                <input
-                  type="text"
-                  list="q-goods-list"
+                <EditableSearchSelect
+                  ariaLabel="Quotation Goods Type"
                   value={qGoodsType}
-                  onChange={(e) => setQGoodsType(e.target.value)}
-                  className="w-full px-2.5 py-1.5 rounded border border-slate-300"
+                  onChange={setQGoodsType}
+                  options={effectiveGoodsList}
+                  placeholder="Search Goods A-Z..."
                 />
-                <datalist id="q-goods-list">
-                  {effectiveGoodsList.map((g) => (
-                    <option key={g} value={g} />
-                  ))}
-                </datalist>
               </div>
               <div>
                 <label className="block font-semibold text-slate-700 mb-1">Vehicle Type *</label>
@@ -2371,15 +3115,15 @@ const BillingQuotesModuleInner: React.FC<BillingQuotesModuleProps> = ({
               <div>
                 <label className="block font-semibold text-slate-700 mb-1">Rate Mode &amp; Freight Amount (₹) *</label>
                 <div className="flex gap-1.5">
-                  <select
-                    aria-label="Quotation Rate Mode"
-                    value={qRateMode}
-                    onChange={(e) => setQRateMode(e.target.value as 'Fixed' | 'Per Ton')}
-                    className="px-2 py-1.5 rounded border border-slate-300 bg-white font-bold"
-                  >
-                    <option value="Fixed">Fixed</option>
-                    <option value="Per Ton">Per Ton</option>
-                  </select>
+                  <div className="w-32">
+                    <SearchableSelect
+                      ariaLabel="Quotation Rate Mode"
+                      value={qRateMode}
+                      onChange={(val) => setQRateMode(val as 'Fixed' | 'Per Ton')}
+                      options={['Fixed', 'Per Ton']}
+                      buttonClassName="font-bold"
+                    />
+                  </div>
                   <input
                     type="number"
                     required

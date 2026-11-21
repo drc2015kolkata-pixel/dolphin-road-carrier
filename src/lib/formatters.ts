@@ -1,7 +1,15 @@
+export function roundPaise(value: number | string | undefined | null): number {
+  const num = Number(value ?? 0);
+  if (!Number.isFinite(num)) return 0;
+  const rounded = Math.round((num + Number.EPSILON) * 100) / 100;
+  return Object.is(rounded, -0) ? 0 : rounded;
+}
+
 export function formatINR(value: number | undefined | null, decimals = 2): string {
   const num = Number(value ?? 0);
-  if (!Number.isFinite(num)) return '0.00';
-  return num.toLocaleString('en-IN', {
+  if (!Number.isFinite(num)) return decimals > 0 ? `0.${'0'.repeat(decimals)}` : '0';
+  const clean = Math.abs(num) < 0.00001 ? 0 : num;
+  return clean.toLocaleString('en-IN', {
     minimumFractionDigits: decimals,
     maximumFractionDigits: decimals,
   });
@@ -10,7 +18,8 @@ export function formatINR(value: number | undefined | null, decimals = 2): strin
 export function formatINRCompact(value: number | undefined | null): string {
   const num = Number(value ?? 0);
   if (!Number.isFinite(num)) return '0';
-  return num.toLocaleString('en-IN', {
+  const clean = Math.abs(num) < 0.00001 ? 0 : num;
+  return clean.toLocaleString('en-IN', {
     maximumFractionDigits: 0,
   });
 }

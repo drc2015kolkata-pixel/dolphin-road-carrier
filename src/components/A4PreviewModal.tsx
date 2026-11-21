@@ -120,10 +120,11 @@ export const A4PreviewModal: React.FC<A4PreviewModalProps> = ({
     }
   };
 
+  const companyReplyEmail = company?.email || 'drc.kolkata1@gmail.com';
   const shareText = [
     pdf.shareMeta?.summaryText || pdf.title,
     `Document File: ${pdf.fileName}`,
-    company?.companyName ? `Sent by: ${company.companyName} (${company.phones})` : '',
+    company?.companyName ? `Sent by: ${company.companyName} (${company.phones}) | Email: ${companyReplyEmail}` : '',
   ]
     .filter(Boolean)
     .join('\n');
@@ -146,9 +147,9 @@ export const A4PreviewModal: React.FC<A4PreviewModalProps> = ({
   const handleShareEmail = () => {
     triggerExternalShareLink(
       buildEmailShareHref({
-        email: shareEmail,
+        email: shareEmail || companyReplyEmail,
         subject: `${pdf.title} — ${company?.companyName || 'Dolphin Road Carriers'}`,
-        body: `${shareText}\n\nNote: Please find the attached PDF (${pdf.fileName}) downloaded from Dolphin Road Carriers ERP.`,
+        body: `${shareText}\n\nNote: Please find the attached PDF (${pdf.fileName}) downloaded from Dolphin Road Carriers ERP.\nReply To: ${companyReplyEmail}`,
       })
     );
   };

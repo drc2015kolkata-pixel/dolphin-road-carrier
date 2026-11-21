@@ -1,6 +1,7 @@
 import React, { useEffect, useRef, useState } from 'react';
-import { Camera, CheckCircle2, QrCode, RefreshCw, Upload, X, ScanLine } from 'lucide-react';
+import { Camera, CheckCircle2, QrCode, RefreshCw, RotateCw, Upload, X, ScanLine } from 'lucide-react';
 import { ParsedQrPayload, parseQrOrEwbPayload } from '../lib/ewayBillUtils';
+import { autoRotateAndCompressImage, rotateDataUrlDegrees } from '../lib/ocrEngine';
 
 interface CameraPodQrScannerModalProps {
   open: boolean;
@@ -168,27 +169,14 @@ export const CameraPodQrScannerModal: React.FC<CameraPodQrScannerModalProps> = (
 
   const handleImageFileSelected = async (file: File | undefined) => {
     if (!file) return;
-    const reader = new FileReader();
-    reader.onload = async () => {
-      const src = String(reader.result || '');
-      const img = new Image();
-      img.onload = async () => {
-        const maxW = 1200;
-        const scale = Math.min(1, maxW / (img.width || maxW));
-        const canvas = document.createElement('canvas');
-        canvas.width = Math.max(1, Math.round(img.width * scale));
-        canvas.height = Math.max(1, Math.round(img.height * scale));
-        const ctx = canvas.getContext('2d');
-        if (ctx) {
-          ctx.fillStyle = '#ffffff';
-          ctx.fillRect(0, 0, canvas.width, canvas.height);
-          ctx.drawImage(img, 0, 0, canvas.width, canvas.height);
-          const compressed = compressCanvasToPodDataUrl(canvas);
-          if (mode !== 'qr') {
-            setCapturedPreview(compressed);
-          }
-        }
-        if ((mode === 'qr' || mode === 'both') && 'BarcodeDetector' in window) {
+    try {
+      const normalized = await autoRotateAndCompressImage(file, 1200, 0.78);
+      if (mode !== 'qr') {
+        setCapturedPreview(normalized.dataUrl);
+      }
+      if ((mode === 'qr' || mode === 'both') && 'BarcodeDetector' in window) {
+        const img = new Image();
+        img.onload = async () => {
           try {
             const DetectorCtor = (window as unknown as { BarcodeDetector: new (opts?: { formats?: string[] }) => BarcodeDetectorLike }).BarcodeDetector;
             const detector = new DetectorCtor({ formats: ['qr_code', 'code_128'] });
@@ -199,11 +187,18 @@ export const CameraPodQrScannerModal: React.FC<CameraPodQrScannerModalProps> = (
           } catch {
             // ignore
           }
-        }
-      };
-      img.src = src;
-    };
-    reader.readAsDataURL(file);
+        };
+        img.src = normalized.dataUrl;
+      }
+    } catch {
+      // ignore invalid image read
+    }
+  };
+
+  const handleRotatePreview90 = async () => {
+    if (!capturedPreview) return;
+    const rotated = await rotateDataUrlDegrees(capturedPreview, 90, 0.8);
+    setCapturedPreview(rotated.dataUrl);
   };
 
   return (
@@ -272,17 +267,27 @@ export const CameraPodQrScannerModal: React.FC<CameraPodQrScannerModalProps> = (
                 className="w-full max-h-72 object-contain rounded-xl border border-slate-300 bg-slate-100"
               />
               <div className="flex flex-wrap items-center justify-between gap-2">
-                <button
-                  type="button"
-                  onClick={() => {
-                    setCapturedPreview('');
-                    void startCamera();
-                  }}
-                  className="inline-flex items-center gap-1.5 px-3 py-1.5 rounded-lg bg-slate-200 hover:bg-slate-300 text-slate-800 text-xs font-bold cursor-pointer"
-                >
-                  <RefreshCw className="w-3.5 h-3.5" />
-                  Retake Photo
-                </button>
+                <div className="flex flex-wrap items-center gap-2">
+                  <button
+                    type="button"
+                    onClick={() => {
+                      setCapturedPreview('');
+                      void startCamera();
+                    }}
+                    className="inline-flex items-center gap-1.5 px-3 py-1.5 rounded-lg bg-slate-200 hover:bg-slate-300 text-slate-800 text-xs font-bold cursor-pointer"
+                  >
+                    <RefreshCw className="w-3.5 h-3.5" />
+                    Retake Photo
+                  </button>
+                  <button
+                    type="button"
+                    onClick={() => void handleRotatePreview90()}
+                    className="inline-flex items-center gap-1.5 px-3 py-1.5 rounded-lg bg-blue-100 hover:bg-blue-200 text-blue-900 text-xs font-bold cursor-pointer"
+                  >
+                    <RotateCw className="w-3.5 h-3.5" />
+                    Rotate 90°
+                  </button>
+                </div>
                 {onCapturePodImage && (
                   <button
                     type="button"

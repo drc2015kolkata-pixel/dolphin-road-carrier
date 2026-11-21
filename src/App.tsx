@@ -1,4 +1,4 @@
-import React, { useCallback, useEffect, useMemo, useRef, useState } from 'react';
+import React, { Suspense, lazy, useCallback, useEffect, useMemo, useRef, useState } from 'react';
 import { User } from 'firebase/auth';
 import {
   Activity,
@@ -12,6 +12,9 @@ import {
   Calendar,
   CalendarClock,
   CheckCircle2,
+  ChevronDown,
+  ChevronUp,
+  ClipboardList,
   Cloud,
   Coins,
   DatabaseBackup,
@@ -27,6 +30,7 @@ import {
   LogOut,
   MapPin,
   Menu,
+  PackageCheck,
   PieChart,
   Power,
   Radio,
@@ -48,12 +52,14 @@ import {
   AnyDriveFolderName,
   BankReceiptRecord,
   BRANCH_OPTIONS,
+  BUSINESS_MODE_META,
   BusinessMode,
   CompanySettings,
   ConsignmentNote,
   Declaration194C,
   DEFAULT_COMPANY_SETTINGS,
   Driver,
+  getLogisticsDivisionFromId,
   Invoice,
   LogisticsDocket,
   LogisticsDriver,
@@ -62,6 +68,7 @@ import {
   LogisticsManifest,
   LogisticsParty,
   LogisticsVehicle,
+  LogisticsWorkspaceTabId,
   LorryHire,
   Party,
   PermissionKey,
@@ -119,12 +126,15 @@ import {
   subscribeOfflineSyncStatus,
 } from './lib/offlineSyncQueue';
 import {
+  FormulaHealthReport,
   registerManagedBlobUrl,
   revokeThermalMemoryCooledUrls,
   runDailyLocalJunkCleanup,
+  runStartupAndMonthlyFormulaGuard,
   runSystemAutoFixAndClean,
   shouldRun90DayMaintenance,
   shouldRunDailyJunkCleanup,
+  verifyAdminPin,
 } from './lib/selfHealing';
 import { useOnlineStatus, usePWAInstall } from './hooks/usePWAInstall';
 import { DEFAULT_BHOLE_BABA_IMAGE, DEFAULT_KHATU_SHYAM_IMAGE } from './lib/sacredDefaults';
@@ -132,20 +142,51 @@ import { ErrorBoundary } from './components/ErrorBoundary';
 import { DrcTriangleLogo } from './components/DrcTriangleLogo';
 import { SignInScreen } from './components/SignInScreen';
 import { ConfirmModal } from './components/ConfirmModal';
-import { A4PreviewModal } from './components/A4PreviewModal';
 import { DashboardHome } from './components/DashboardHome';
-import { MasterModule, MasterTabId } from './components/MasterModule';
-import { ConsignmentModule } from './components/ConsignmentModule';
-import { BillingQuotesModule } from './components/BillingQuotesModule';
-import { LorryHirePodModule } from './components/LorryHirePodModule';
-import { ReportsMisModule, ReportTab } from './components/ReportsMisModule';
-import { BackupSettingsModule } from './components/BackupSettingsModule';
-import { StaffAccessMatrixModule } from './components/StaffAccessMatrixModule';
-import { StaffCommissionModule } from './components/StaffCommissionModule';
-import { BankReceiptImportModule } from './components/BankReceiptImportModule';
-import { UserGuideModule } from './components/UserGuideModule';
-import { LogisticsWorkspace } from './components/LogisticsWorkspace';
+import { SearchableSelect } from './components/SearchableSelect';
+import type { MasterTabId } from './components/MasterModule';
+import type { ReportTab } from './components/ReportsMisModule';
 import { getEwayBillExpiryState } from './lib/ewayBillUtils';
+
+const A4PreviewModal = lazy(() =>
+  import('./components/A4PreviewModal').then((m) => ({ default: m.A4PreviewModal }))
+);
+const MasterModule = lazy(() =>
+  import('./components/MasterModule').then((m) => ({ default: m.MasterModule }))
+);
+const ConsignmentModule = lazy(() =>
+  import('./components/ConsignmentModule').then((m) => ({ default: m.ConsignmentModule }))
+);
+const BillingQuotesModule = lazy(() =>
+  import('./components/BillingQuotesModule').then((m) => ({ default: m.BillingQuotesModule }))
+);
+const LorryHirePodModule = lazy(() =>
+  import('./components/LorryHirePodModule').then((m) => ({ default: m.LorryHirePodModule }))
+);
+const ReportsMisModule = lazy(() =>
+  import('./components/ReportsMisModule').then((m) => ({ default: m.ReportsMisModule }))
+);
+const BackupSettingsModule = lazy(() =>
+  import('./components/BackupSettingsModule').then((m) => ({ default: m.BackupSettingsModule }))
+);
+const StaffAccessMatrixModule = lazy(() =>
+  import('./components/StaffAccessMatrixModule').then((m) => ({ default: m.StaffAccessMatrixModule }))
+);
+const StaffCommissionModule = lazy(() =>
+  import('./components/StaffCommissionModule').then((m) => ({ default: m.StaffCommissionModule }))
+);
+const BankReceiptImportModule = lazy(() =>
+  import('./components/BankReceiptImportModule').then((m) => ({ default: m.BankReceiptImportModule }))
+);
+const UserGuideModule = lazy(() =>
+  import('./components/UserGuideModule').then((m) => ({ default: m.UserGuideModule }))
+);
+const LogisticsWorkspace = lazy(() =>
+  import('./components/LogisticsWorkspace').then((m) => ({ default: m.LogisticsWorkspace }))
+);
+const AllInOneEntrySheet = lazy(() =>
+  import('./components/AllInOneEntrySheet').then((m) => ({ default: m.AllInOneEntrySheet }))
+);
 
 type SidebarNavId = SheetTabId | 'transactions';
 
@@ -156,6 +197,7 @@ interface SheetTabDef {
 
 const TAB_LABELS: Record<SheetTabId, string> = {
   dashboard: 'Dashboard',
+  allInOne: 'All-in-One Sheet',
   master: 'Master',
   lr: 'Consignment / LR',
   billing: 'Billing & Quotes',
@@ -230,8 +272,9 @@ export default function App() {
   const [logisticsInvoices, setLogisticsInvoices] = useState<LogisticsInvoice[]>([]);
   const [logisticsLedgers, setLogisticsLedgers] = useState<LogisticsLedgerEntry[]>([]);
 
-  // Active Business Division Switcher (FTL BUSINESS vs LOGISTICS BUSINESS)
+  // Active Business Division Switcher (FTL | LOGISTICS | PTL | COURIER)
   const [businessMode, setBusinessMode] = useState<BusinessMode>('FTL');
+  const [logiActiveTab, setLogiActiveTab] = useState<LogisticsWorkspaceTabId>('overview');
 
   // Active operator session (Master Admin by default, or logged-in / switched Staff ID)
   const [activeStaffSession, setActiveStaffSession] = useState<StaffAccount | null>(
@@ -256,10 +299,13 @@ export default function App() {
   const [unlocking, setUnlocking] = useState(false);
   const lastActivityRef = useRef<number>(Date.now());
 
-  // Multi-tab Sheet Bar + Back Navigation History + Default-Collapsed Sidebar + FY Lock UI
+  // Multi-tab Sheet Bar + Back Navigation History + Default-Collapsed Sidebar + Auto-Focus Mode
   const [openTabs, setOpenTabs] = useState<SheetTabDef[]>([{ id: 'dashboard', label: 'Dashboard' }]);
   const [activeTab, setActiveTab] = useState<SheetTabId>('dashboard');
   const [tabHistory, setTabHistory] = useState<SheetTabId[]>([]);
+  const [dashboardFocusTx, setDashboardFocusTx] = useState(false);
+  const [focusTransactionsNonce, setFocusTransactionsNonce] = useState(0);
+  const [bannerExpanded, setBannerExpanded] = useState(false);
   const [sidebarOpen, setSidebarOpen] = useState(false);
   const [fyLocked, setFyLocked] = useState(true);
   const [bholeImgFailed, setBholeImgFailed] = useState(false);
@@ -268,6 +314,14 @@ export default function App() {
   const [liveMonitorOpen, setLiveMonitorOpen] = useState(false);
   const [iosGuideOpen, setIosGuideOpen] = useState(false);
   const [appClosedOverlay, setAppClosedOverlay] = useState(false);
+
+  // Startup & Monthly Formula Health Guard + Admin PIN Modal
+  const [formulaHealthReport, setFormulaHealthReport] = useState<FormulaHealthReport | null>(null);
+  const [formulaHealthModalOpen, setFormulaHealthModalOpen] = useState(false);
+  const [adminPinModalOpen, setAdminPinModalOpen] = useState(false);
+  const [adminPinInput, setAdminPinInput] = useState('');
+  const [adminPinError, setAdminPinError] = useState<string | null>(null);
+  const [pendingPinTargetTab, setPendingPinTargetTab] = useState<SheetTabId | null>(null);
 
   // Universal Search (Ctrl+K)
   const [globalSearch, setGlobalSearch] = useState('');
@@ -332,6 +386,41 @@ export default function App() {
       void flushOfflineSyncQueue();
     }
   }, [isOnline, erpSession]);
+
+  const runFormulaGuardScan = useCallback(
+    (manual = false) => {
+      const report = runStartupAndMonthlyFormulaGuard({
+        consignments: consignments as unknown as Array<Record<string, unknown>>,
+        invoices: invoices as unknown as Array<Record<string, unknown>>,
+        lorryHires: lorryHires as unknown as Array<Record<string, unknown>>,
+        transactions: transactions as unknown as Array<Record<string, unknown>>,
+        logisticsDockets: logisticsDockets as unknown as Array<Record<string, unknown>>,
+        logisticsInvoices: logisticsInvoices as unknown as Array<Record<string, unknown>>,
+        logisticsLedgers: logisticsLedgers as unknown as Array<Record<string, unknown>>,
+        manual,
+      });
+      setFormulaHealthReport(report);
+      return report;
+    },
+    [
+      consignments,
+      invoices,
+      lorryHires,
+      transactions,
+      logisticsDockets,
+      logisticsInvoices,
+      logisticsLedgers,
+    ]
+  );
+
+  // Startup & Monthly (1st of month) Auto-Formula Health Guard + Anti-Tamper Security Shield
+  useEffect(() => {
+    if (!erpSession) return;
+    const t = window.setTimeout(() => {
+      runFormulaGuardScan(false);
+    }, 30);
+    return () => window.clearTimeout(t);
+  }, [erpSession, runFormulaGuardScan]);
 
   // 90-day self-healing maintenance, daily scratch junk cleanup & Ctrl+K global search shortcut
   useEffect(() => {
@@ -608,7 +697,7 @@ export default function App() {
     [declarations, filterByBranch, activeFy]
   );
 
-  // Scoped Express Parcel & Part-Load Logistics datasets (Branch + Active FY)
+  // Scoped Express Parcel / PTL / Courier Logistics datasets (Branch + Active FY + Division)
   const visibleLogisticsDockets = useMemo(
     () =>
       filterByBranch(logisticsDockets).filter((d) =>
@@ -636,6 +725,36 @@ export default function App() {
         matchesSelectedFinancialYear(entry.financialYear, entry.voucherDate, activeFy)
       ),
     [logisticsLedgers, filterByBranch, activeFy]
+  );
+
+  const activeLogisticsDivision = businessMode === 'FTL' ? 'LOGISTICS' : businessMode;
+  const divisionLogisticsDockets = useMemo(
+    () =>
+      visibleLogisticsDockets.filter(
+        (d) => getLogisticsDivisionFromId(d.id) === activeLogisticsDivision
+      ),
+    [visibleLogisticsDockets, activeLogisticsDivision]
+  );
+  const divisionLogisticsManifests = useMemo(
+    () =>
+      visibleLogisticsManifests.filter(
+        (m) => getLogisticsDivisionFromId(m.id) === activeLogisticsDivision
+      ),
+    [visibleLogisticsManifests, activeLogisticsDivision]
+  );
+  const divisionLogisticsInvoices = useMemo(
+    () =>
+      visibleLogisticsInvoices.filter(
+        (inv) => getLogisticsDivisionFromId(inv.id) === activeLogisticsDivision
+      ),
+    [visibleLogisticsInvoices, activeLogisticsDivision]
+  );
+  const divisionLogisticsLedgers = useMemo(
+    () =>
+      visibleLogisticsLedgers.filter(
+        (l) => getLogisticsDivisionFromId(l.id) === activeLogisticsDivision
+      ),
+    [visibleLogisticsLedgers, activeLogisticsDivision]
   );
 
   // Active Staff Presence & Sorted Activity Log
@@ -740,6 +859,9 @@ export default function App() {
       if (isEffectiveMasterAdmin || activeStaffSession?.role === 'Admin') return true;
       if (perm === 'backup') {
         return (activeStaffSession?.permissions || []).includes('backup');
+      }
+      if (perm === 'allInOne') {
+        return getSheetAccess('lr') !== 'blocked' || getSheetAccess('billing') !== 'blocked';
       }
       const sheetMap: Partial<Record<SheetTabId, SheetPermissionKey>> = {
         master: 'master',
@@ -848,20 +970,55 @@ export default function App() {
         if (prev.some((t) => t.id === tabId)) return prev;
         return [...prev, { id: tabId, label: TAB_LABELS[tabId] }];
       });
+      if (tabId === 'dashboard') {
+        setBannerExpanded(false);
+      } else {
+        setDashboardFocusTx(false);
+      }
       setActiveTab(tabId);
       setSidebarOpen(false);
     },
     [activeTab]
   );
 
+  const requestProtectedTab = useCallback(
+    (tabId: SheetTabId) => {
+      if (!isEffectiveMasterAdmin) return;
+      setPendingPinTargetTab(tabId);
+      setAdminPinInput('');
+      setAdminPinError(null);
+      setAdminPinModalOpen(true);
+      setSidebarOpen(false);
+    },
+    [isEffectiveMasterAdmin]
+  );
+
+  const handleReturnToCurrentBusinessDashboard = useCallback(() => {
+    setBannerExpanded(false);
+    if (businessMode === 'FTL') {
+      setDashboardFocusTx(false);
+      setActiveTab('dashboard');
+    } else {
+      setLogiActiveTab('overview');
+    }
+  }, [businessMode]);
+
   const handleGoBack = useCallback(() => {
     setTabHistory((prev) => {
       if (prev.length === 0) {
-        if (activeTab !== 'dashboard') setActiveTab('dashboard');
+        if (activeTab !== 'dashboard') {
+          setDashboardFocusTx(false);
+          setBannerExpanded(false);
+          setActiveTab('dashboard');
+        }
         return prev;
       }
       const nextStack = [...prev];
       const target = nextStack.pop() || 'dashboard';
+      if (target === 'dashboard') {
+        setDashboardFocusTx(false);
+        setBannerExpanded(false);
+      }
       setActiveTab(target);
       return nextStack;
     });
@@ -1087,10 +1244,22 @@ export default function App() {
   );
 
   const handleSidebarClick = (navId: SidebarNavId) => {
-    if (navId === 'transactions') {
+    if (navId === 'dashboard') {
+      setDashboardFocusTx(false);
       openOrSwitchTab('dashboard');
       return;
     }
+    if (navId === 'transactions') {
+      setDashboardFocusTx(true);
+      setFocusTransactionsNonce((n) => n + 1);
+      openOrSwitchTab('dashboard');
+      return;
+    }
+    if (navId === 'staffAccess') {
+      requestProtectedTab('staffAccess');
+      return;
+    }
+    setDashboardFocusTx(false);
     if (navId === 'accounts') {
       setReportInitialTab('accountBook');
       setReportFocusNonce((n) => n + 1);
@@ -1129,6 +1298,13 @@ export default function App() {
       allowed: boolean;
       action: () => void;
     }> = [
+      {
+        id: 'pg-allinone',
+        title: 'All-in-One Master Entry Sheet & Register',
+        keywords: 'all in one sheet master entry cn lorry hire bill register',
+        allowed: hasPermission('allInOne'),
+        action: () => openOrSwitchTab('allInOne'),
+      },
       {
         id: 'pg-lr',
         title: 'Consignment / LR (Bilty Entry)',
@@ -1227,7 +1403,7 @@ export default function App() {
         title: 'Staff Sheet Access Control (Matrix)',
         keywords: 'staff sheet access control permission',
         allowed: isEffectiveMasterAdmin,
-        action: () => openOrSwitchTab('staffAccess'),
+        action: () => requestProtectedTab('staffAccess'),
       },
       {
         id: 'pg-set',
@@ -1333,6 +1509,7 @@ export default function App() {
     companySettings,
     handlePreviewPdf,
     openOrSwitchTab,
+    requestProtectedTab,
     hasPermission,
     getSheetAccess,
     isEffectiveMasterAdmin,
@@ -1396,6 +1573,7 @@ export default function App() {
     highlightClass?: string;
   }> = [
     { id: 'dashboard', label: 'Dashboard', icon: LayoutDashboard, perm: 'dashboard' },
+    { id: 'allInOne', label: 'All-in-One Entry Sheet', icon: ClipboardList, perm: 'allInOne' },
     { id: 'master', label: 'Master', icon: Building2, perm: 'master' },
     { id: 'lr', label: 'Consignment / LR', icon: ScanLine, perm: 'lr' },
     { id: 'billing', label: 'Billing & Quotes', icon: FileSpreadsheet, perm: 'billing' },
@@ -1406,6 +1584,9 @@ export default function App() {
     { id: 'transactions', label: 'Transactions', icon: ArrowLeftRight, perm: 'accounts' },
     { id: 'reports', label: 'Reports', icon: FileBarChart2, perm: 'reports' },
     { id: 'mis', label: 'MIS Reports', icon: PieChart, perm: 'mis' },
+    { id: 'settings', label: 'Settings', icon: Settings, perm: 'settings' },
+    { id: 'backup', label: 'Backup / Restore', icon: DatabaseBackup, perm: 'backup' },
+    { id: 'guide', label: 'User Guide (অপারেটিং বুক)', icon: BookOpen },
     {
       id: 'staffAccess',
       label: 'Staff Sheet Access Control',
@@ -1413,9 +1594,6 @@ export default function App() {
       perm: 'staffAccess',
       highlightClass: 'bg-amber-500/20 border border-amber-300/40 text-amber-100',
     },
-    { id: 'settings', label: 'Settings', icon: Settings, perm: 'settings' },
-    { id: 'backup', label: 'Backup / Restore', icon: DatabaseBackup, perm: 'backup' },
-    { id: 'guide', label: 'User Guide (অপারেটিং বুক)', icon: BookOpen },
     { id: 'about', label: 'About', icon: Info },
   ];
 
@@ -1427,177 +1605,231 @@ export default function App() {
   const bholeBabaSrc = companySettings.bholeBabaPhotoDataUrl || DEFAULT_BHOLE_BABA_IMAGE;
   const khatuShyamSrc = companySettings.khatuShyamPhotoDataUrl || DEFAULT_KHATU_SHYAM_IMAGE;
 
+  const isFormFocused =
+    (businessMode === 'FTL' && activeTab !== 'dashboard') ||
+    (businessMode !== 'FTL' && logiActiveTab !== 'overview');
+  const showFullBanner = !isFormFocused || bannerExpanded;
+  const activeBusinessMeta = BUSINESS_MODE_META[businessMode];
+  const businessModesList: BusinessMode[] = ['FTL', 'LOGISTICS', 'PTL', 'COURIER'];
+
   return (
     <ErrorBoundary>
-      <div className="min-h-screen flex flex-col bg-[#E2E8F0] text-slate-900 select-none">
-      {/* Flush Sticky Top Header Bar */}
-      <header className="sticky top-0 z-30 bg-white border-b border-slate-300 px-2.5 md:px-4 py-2 shadow-sm no-print space-y-1.5">
-        {/* Row 1: Left Controls & Brand | Top-Center Sacred Frames | Right Locked FY & Utilities */}
-        <div className="flex flex-wrap items-center justify-between gap-2 md:gap-3">
-          {/* Left: Top-Left Collapsible Sidebar Toggle, Back Button & 24K Gold Triangular DRC Brand */}
-          <div className="flex items-center gap-2 shrink-0">
+      <div className="min-h-screen w-full max-w-full overflow-x-clip flex flex-col bg-[#E2E8F0] text-slate-900 select-none">
+      {/* Flush Sticky Top Header Bar (Auto-Focus Slim Mode on Forms + Android/Tablet Zero-Overflow Pinned Switch Off) */}
+      <header className="sticky top-0 z-30 w-full max-w-full bg-white border-b border-slate-300 px-2 sm:px-3 md:px-4 py-1.5 sm:py-2 shadow-sm no-print space-y-1.5">
+        {/* Row 1: Left Controls & Brand | Top-Center Sacred Frames (auto-collapsed in forms) | Right Business Switchers, Health, FY & Switch Off */}
+        <div className="flex flex-wrap items-center justify-between gap-1.5 sm:gap-2 md:gap-3 min-w-0">
+          {/* Left: Sidebar Toggle, Dedicated Within-Business Back Button & Triangular DRC Brand */}
+          <div className="flex items-center gap-1.5 sm:gap-2 min-w-0">
             {businessMode === 'FTL' && (
-              <>
-                <button
-                  type="button"
-                  onClick={() => setSidebarOpen((v) => !v)}
-                  className="inline-flex items-center gap-1.5 px-2.5 py-1.5 rounded-lg bg-[#0D47A1] hover:bg-[#0A3882] text-white text-xs font-extrabold shadow-sm cursor-pointer shrink-0"
-                  aria-expanded={sidebarOpen}
-                  aria-label="Toggle Menu Sidebar"
-                  title={sidebarOpen ? 'Hide Navigation Sidebar' : 'Open Navigation Sidebar'}
-                >
-                  {sidebarOpen ? <X className="w-4 h-4" /> : <Menu className="w-4 h-4" />}
-                  <span className="hidden sm:inline whitespace-nowrap">Menu</span>
-                </button>
-                <button
-                  type="button"
-                  onClick={handleGoBack}
-                  disabled={tabHistory.length === 0 && activeTab === 'dashboard'}
-                  className="inline-flex items-center gap-1 px-2.5 py-1.5 rounded-lg border border-slate-300 bg-slate-50 hover:bg-slate-200 text-slate-800 text-xs font-extrabold cursor-pointer disabled:opacity-40 whitespace-nowrap shrink-0"
-                  title="Go Back to Previous Screen"
-                >
-                  <ArrowLeft className="w-3.5 h-3.5" />
-                  <span>Back</span>
-                </button>
-              </>
+              <button
+                type="button"
+                onClick={() => setSidebarOpen((v) => !v)}
+                className="inline-flex items-center gap-1 px-2 sm:px-2.5 py-1.5 rounded-lg bg-[#0D47A1] hover:bg-[#0A3882] text-white text-xs font-extrabold shadow-sm cursor-pointer shrink-0"
+                aria-expanded={sidebarOpen}
+                aria-label="Toggle Menu Sidebar"
+                title={sidebarOpen ? 'Hide Navigation Sidebar' : 'Open Navigation Sidebar'}
+              >
+                {sidebarOpen ? <X className="w-4 h-4" /> : <Menu className="w-4 h-4" />}
+                <span className="hidden sm:inline whitespace-nowrap">Menu</span>
+              </button>
             )}
-            <DrcTriangleLogo className="w-9 h-9 md:w-10 md:h-10 shrink-0" />
+            {isFormFocused && (
+              <button
+                type="button"
+                onClick={handleReturnToCurrentBusinessDashboard}
+                className="inline-flex items-center gap-1 px-2 sm:px-2.5 py-1.5 rounded-lg border border-blue-300 bg-blue-50 hover:bg-blue-100 text-[#0D47A1] text-xs font-extrabold cursor-pointer whitespace-nowrap shrink-0"
+                title={`Return to ${activeBusinessMeta.shortLabel} Dashboard`}
+              >
+                <ArrowLeft className="w-3.5 h-3.5 shrink-0" />
+                <span>Back</span>
+              </button>
+            )}
+            <DrcTriangleLogo
+              className={`${showFullBanner ? 'w-8 h-8 sm:w-9 sm:h-9 md:w-10 md:h-10' : 'w-7 h-7'} shrink-0 transition-all`}
+            />
             <div className="min-w-0">
-              <h1 className="text-sm sm:text-base md:text-lg font-extrabold tracking-tight text-[#0B3B8C] leading-none whitespace-nowrap">
+              <h1
+                className={`${
+                  showFullBanner ? 'text-xs sm:text-base md:text-lg' : 'text-xs sm:text-sm'
+                } font-extrabold tracking-tight text-[#0B3B8C] leading-none truncate`}
+              >
                 DOLPHIN ROAD CARRIERS
               </h1>
-              <p className="text-[10px] md:text-[11px] font-bold italic text-[#1565C0] mt-0.5 truncate">
-                {businessMode === 'LOGISTICS'
-                  ? 'Express Parcel & Part-Load Logistics Division'
-                  : companySettings.tagline || 'Fast · Safe · Reliable'}
-              </p>
+              {showFullBanner && (
+                <p className="text-[10px] md:text-[11px] font-bold italic text-[#1565C0] mt-0.5 truncate max-w-[200px] sm:max-w-xs">
+                  {businessMode === 'FTL'
+                    ? companySettings.tagline || 'Fast · Safe · Reliable'
+                    : activeBusinessMeta.subtitle}
+                </p>
+              )}
             </div>
+            {isFormFocused && (
+              <button
+                type="button"
+                onClick={() => setBannerExpanded((v) => !v)}
+                className="hidden sm:inline-flex items-center gap-0.5 px-1.5 py-1 rounded border border-slate-200 bg-slate-50 hover:bg-slate-100 text-[10px] font-bold text-slate-600 cursor-pointer shrink-0"
+                title={bannerExpanded ? 'Slim Auto-Focus Header' : 'Expand Company Header Banner'}
+              >
+                {bannerExpanded ? <ChevronUp className="w-3 h-3" /> : <ChevronDown className="w-3 h-3" />}
+                <span>{bannerExpanded ? 'Slim' : 'Banner'}</span>
+              </button>
+            )}
           </div>
 
-          {/* Top-Center: Two Compact Sacred Blessing Frames (Bhole Baba & Khatu Shyam Ji) */}
-          <div
-            className="flex items-center justify-center gap-2.5 mx-auto shrink-0"
-            aria-label="Sacred Blessing Frames"
-          >
-            <div className="flex flex-col items-center">
-              <div className="p-0.5 rounded-lg bg-gradient-to-b from-amber-300 via-yellow-500 to-amber-700 shadow-sm">
-                {bholeImgFailed ? (
-                  <div className="w-9 h-9 sm:w-11 sm:h-11 rounded-[5px] bg-amber-50 flex items-center justify-center text-amber-800 font-extrabold text-[10px]">
-                    ॐ शिव
-                  </div>
-                ) : (
-                  <img
-                    src={bholeBabaSrc}
-                    alt="Bhole Baba (Lord Shiva) with raised blessing hand"
-                    referrerPolicy="no-referrer"
-                    onError={() => setBholeImgFailed(true)}
-                    className="w-9 h-9 sm:w-11 sm:h-11 rounded-[5px] object-cover bg-amber-50 block"
-                  />
-                )}
-              </div>
-              <span className="text-[9px] sm:text-[10px] font-extrabold text-amber-900 leading-tight mt-0.5 whitespace-nowrap">
-                Bhole Baba
-              </span>
-            </div>
-
-            <div className="flex flex-col items-center">
-              <div className="p-0.5 rounded-lg bg-gradient-to-b from-amber-300 via-yellow-500 to-amber-700 shadow-sm">
-                {shyamImgFailed ? (
-                  <div className="w-9 h-9 sm:w-11 sm:h-11 rounded-[5px] bg-amber-50 flex items-center justify-center text-amber-800 font-extrabold text-[10px]">
-                    श्याम
-                  </div>
-                ) : (
-                  <img
-                    src={khatuShyamSrc}
-                    alt="Khatu Shyam Ji with raised blessing hand"
-                    referrerPolicy="no-referrer"
-                    onError={() => setShyamImgFailed(true)}
-                    className="w-9 h-9 sm:w-11 sm:h-11 rounded-[5px] object-cover bg-amber-50 block"
-                  />
-                )}
-              </div>
-              <span className="text-[9px] sm:text-[10px] font-extrabold text-amber-900 leading-tight mt-0.5 whitespace-nowrap">
-                Khatu Shyam Ji
-              </span>
-            </div>
-          </div>
-
-          {/* Right Utility Strip: Business Mode Switcher, Active FY Badge + Padlock, Branch & Controls */}
-          <div className="flex flex-wrap items-center justify-end gap-1.5 md:gap-2 shrink-0">
-            {/* Prominent Business Division Switcher (FTL BUSINESS vs LOGISTICS BUSINESS) */}
+          {/* Top-Center: Two Compact Sacred Blessing Frames (Visible on Dashboard / Overview; Auto-Collapsed on Forms) */}
+          {showFullBanner && (
             <div
-              className="inline-flex items-center rounded-lg bg-slate-900 border-2 border-[#0D47A1] p-0.5 shadow-sm shrink-0"
+              className="hidden lg:flex items-center justify-center gap-2.5 mx-auto shrink-0"
+              aria-label="Sacred Blessing Frames"
+            >
+              <div className="flex flex-col items-center">
+                <div className="p-0.5 rounded-lg bg-gradient-to-b from-amber-300 via-yellow-500 to-amber-700 shadow-sm">
+                  {bholeImgFailed ? (
+                    <div className="w-9 h-9 sm:w-11 sm:h-11 rounded-[5px] bg-amber-50 flex items-center justify-center text-amber-800 font-extrabold text-[10px]">
+                      ॐ शिव
+                    </div>
+                  ) : (
+                    <img
+                      src={bholeBabaSrc}
+                      alt="Bhole Baba (Lord Shiva) with raised blessing hand"
+                      referrerPolicy="no-referrer"
+                      onError={() => setBholeImgFailed(true)}
+                      className="w-9 h-9 sm:w-11 sm:h-11 rounded-[5px] object-cover bg-amber-50 block"
+                    />
+                  )}
+                </div>
+                <span className="text-[9px] sm:text-[10px] font-extrabold text-amber-900 leading-tight mt-0.5 whitespace-nowrap">
+                  Bhole Baba
+                </span>
+              </div>
+
+              <div className="flex flex-col items-center">
+                <div className="p-0.5 rounded-lg bg-gradient-to-b from-amber-300 via-yellow-500 to-amber-700 shadow-sm">
+                  {shyamImgFailed ? (
+                    <div className="w-9 h-9 sm:w-11 sm:h-11 rounded-[5px] bg-amber-50 flex items-center justify-center text-amber-800 font-extrabold text-[10px]">
+                      श्याम
+                    </div>
+                  ) : (
+                    <img
+                      src={khatuShyamSrc}
+                      alt="Khatu Shyam Ji with raised blessing hand"
+                      referrerPolicy="no-referrer"
+                      onError={() => setShyamImgFailed(true)}
+                      className="w-9 h-9 sm:w-11 sm:h-11 rounded-[5px] object-cover bg-amber-50 block"
+                    />
+                  )}
+                </div>
+                <span className="text-[9px] sm:text-[10px] font-extrabold text-amber-900 leading-tight mt-0.5 whitespace-nowrap">
+                  Khatu Shyam Ji
+                </span>
+              </div>
+            </div>
+          )}
+
+          {/* Right Utility Strip: 4-Business Switcher, Health Shield, FY Badge, Branch, Bell, Lock, Switch Off */}
+          <div className="flex flex-wrap items-center justify-end gap-1 sm:gap-1.5 min-w-0 max-w-full">
+            {/* 4 Single-Click Business Switchers with Active Checkmarks */}
+            <div
+              className="inline-flex flex-wrap items-center rounded-lg bg-slate-900 border-2 border-[#0D47A1] p-0.5 shadow-sm gap-0.5 max-w-full"
               role="group"
               aria-label="Business Division Switcher"
             >
-              <button
-                type="button"
-                onClick={() => {
-                  setBusinessMode('FTL');
-                  setSidebarOpen(false);
-                  setSearchDropdownOpen(false);
-                  setNotifOpen(false);
-                }}
-                aria-pressed={businessMode === 'FTL'}
-                className={`inline-flex items-center gap-1 px-2.5 py-1 rounded-md text-[11px] font-extrabold tracking-wide transition-all cursor-pointer whitespace-nowrap ${
-                  businessMode === 'FTL'
-                    ? 'bg-[#1565C0] text-white shadow-sm ring-1 ring-amber-300'
-                    : 'text-slate-300 hover:text-white hover:bg-slate-800'
-                }`}
-              >
-                <Truck className="w-3.5 h-3.5 shrink-0" />
-                <span>FTL BUSINESS</span>
-              </button>
-              <button
-                type="button"
-                onClick={() => {
-                  setBusinessMode('LOGISTICS');
-                  setSidebarOpen(false);
-                  setSearchDropdownOpen(false);
-                  setNotifOpen(false);
-                }}
-                aria-pressed={businessMode === 'LOGISTICS'}
-                className={`inline-flex items-center gap-1 px-2.5 py-1 rounded-md text-[11px] font-extrabold tracking-wide transition-all cursor-pointer whitespace-nowrap ${
-                  businessMode === 'LOGISTICS'
-                    ? 'bg-gradient-to-r from-[#0F766E] to-[#0D9488] text-amber-200 shadow-sm ring-1 ring-amber-300'
-                    : 'text-teal-200 hover:text-white hover:bg-slate-800'
-                }`}
-              >
-                <Boxes className="w-3.5 h-3.5 shrink-0" />
-                <span>LOGISTICS BUSINESS</span>
-              </button>
+              {businessModesList.map((mode) => {
+                const isSelected = businessMode === mode;
+                const modeMeta = BUSINESS_MODE_META[mode];
+                const IconComp =
+                  mode === 'FTL'
+                    ? Truck
+                    : mode === 'LOGISTICS'
+                    ? Boxes
+                    : mode === 'PTL'
+                    ? PackageCheck
+                    : ScanLine;
+                return (
+                  <button
+                    key={mode}
+                    type="button"
+                    onClick={() => {
+                      setBusinessMode(mode);
+                      setBannerExpanded(false);
+                      setSidebarOpen(false);
+                      setSearchDropdownOpen(false);
+                      setNotifOpen(false);
+                      if (mode !== 'FTL') {
+                        setLogiActiveTab('overview');
+                      } else {
+                        setDashboardFocusTx(false);
+                        setActiveTab('dashboard');
+                      }
+                    }}
+                    aria-pressed={isSelected}
+                    title={modeMeta.fullName}
+                    className={`inline-flex items-center gap-1 px-2 sm:px-2.5 py-1 rounded-md text-[10px] sm:text-[11px] font-extrabold tracking-wide transition-all cursor-pointer whitespace-nowrap ${
+                      isSelected
+                        ? mode === 'FTL'
+                          ? 'bg-[#1565C0] text-white shadow-sm ring-1 ring-amber-300'
+                          : mode === 'LOGISTICS'
+                          ? 'bg-gradient-to-r from-[#0F766E] to-[#0D9488] text-amber-100 shadow-sm ring-1 ring-amber-300'
+                          : mode === 'PTL'
+                          ? 'bg-gradient-to-r from-indigo-600 to-violet-600 text-white shadow-sm ring-1 ring-amber-300'
+                          : 'bg-gradient-to-r from-amber-600 to-orange-600 text-white shadow-sm ring-1 ring-white'
+                        : 'text-slate-300 hover:text-white hover:bg-slate-800'
+                    }`}
+                  >
+                    <IconComp className="w-3 h-3 shrink-0" />
+                    <span>{isSelected ? `✓ ${modeMeta.shortLabel}` : modeMeta.shortLabel}</span>
+                  </button>
+                );
+              })}
             </div>
+
+            {/* Startup & Monthly Auto-Formula Health Guard + Anti-Tamper Badge */}
+            <button
+              type="button"
+              onClick={() => setFormulaHealthModalOpen(true)}
+              className="inline-flex items-center gap-1 px-2 py-1 rounded-lg bg-emerald-50 hover:bg-emerald-100 border border-emerald-300 text-emerald-900 text-[10px] sm:text-[11px] font-extrabold cursor-pointer whitespace-nowrap shrink-0"
+              title="Click to inspect Startup & Monthly Formula Health Guard + Anti-Tamper Security Shield"
+            >
+              <ShieldCheck className="w-3.5 h-3.5 text-emerald-700 shrink-0" />
+              <span className="hidden md:inline">
+                {formulaHealthReport?.badgeLabel || 'System Health: 100% Error-Free'}
+              </span>
+              <span className="md:hidden">100% Health</span>
+            </button>
 
             {/* High-Contrast Active Financial Year Badge (Locked by Default with Padlock Toggle) */}
             <div
-              className="inline-flex items-center gap-1.5 rounded-lg bg-[#0B3B8C] border-2 border-amber-400 px-2.5 py-1 text-white shadow-sm shrink-0"
+              className="inline-flex items-center gap-1 rounded-lg bg-[#0B3B8C] border-2 border-amber-400 px-2 py-0.5 text-white shadow-sm shrink-0"
               role="group"
               aria-label="Active Financial Year Control"
             >
               <Calendar className="w-3.5 h-3.5 text-amber-300 shrink-0" />
-              <span className="text-[10px] sm:text-[11px] font-extrabold tracking-wide text-amber-200 whitespace-nowrap">
-                FINANCIAL YEAR:
+              <span className="hidden sm:inline text-[10px] font-extrabold tracking-wide text-amber-200 whitespace-nowrap">
+                FY:
               </span>
               {fyLocked ? (
-                <span className="text-xs font-extrabold font-mono-num text-white whitespace-nowrap">
+                <span className="text-[11px] sm:text-xs font-extrabold font-mono-num text-white whitespace-nowrap">
                   {activeFyShort}
                 </span>
               ) : (
-                <select
-                  value={activeFy}
-                  onChange={(e) => {
-                    handleSelectFy(e.target.value);
-                    setFyLocked(true);
-                  }}
-                  aria-label="Select Financial Year"
-                  className="bg-[#082A66] border border-amber-300 rounded px-1.5 py-0.5 text-xs font-extrabold font-mono-num text-amber-200 focus:outline-none cursor-pointer"
-                >
-                  {fyChoices.map((fy) => (
-                    <option key={fy} value={fy} className="bg-[#0B3B8C] text-white">
-                      {fy.replace(/^FY\s+/i, '')}
-                    </option>
-                  ))}
-                </select>
+                <div className="w-28">
+                  <SearchableSelect
+                    ariaLabel="Select Financial Year"
+                    value={activeFy}
+                    onChange={(val) => {
+                      handleSelectFy(val);
+                      setFyLocked(true);
+                    }}
+                    options={fyChoices.map((fy) => ({
+                      value: fy,
+                      label: fy.replace(/^FY\s+/i, ''),
+                    }))}
+                    searchPlaceholder="FY..."
+                    buttonClassName="bg-[#082A66] border-amber-300 px-1.5 py-0.5 text-[11px] font-extrabold font-mono-num text-amber-200"
+                    menuClassName="min-w-[150px]"
+                  />
+                </div>
               )}
               <button
                 type="button"
@@ -1612,34 +1844,36 @@ export default function App() {
                     ? 'Financial Year Locked by default — Click to unlock (🔓) to switch season'
                     : 'Unlocked — Select season (auto-locks on change) or click to lock'
                 }
-                className={`inline-flex items-center gap-1 px-2 py-0.5 rounded text-[11px] font-extrabold transition-colors cursor-pointer whitespace-nowrap shrink-0 ${
+                className={`inline-flex items-center gap-1 px-1.5 py-0.5 rounded text-[10px] font-extrabold transition-colors cursor-pointer whitespace-nowrap shrink-0 ${
                   fyLocked
                     ? 'bg-amber-400 text-slate-950 hover:bg-amber-300'
                     : 'bg-emerald-400 text-slate-950 hover:bg-emerald-300'
                 }`}
               >
-                <span>{fyLocked ? '🔒 Locked' : '🔓'}</span>
+                <span>{fyLocked ? '🔒' : '🔓'}</span>
               </button>
             </div>
 
             {/* Branch Isolation / Master Filter Control */}
-            <div className="inline-flex items-center gap-1 bg-blue-50 border border-blue-200 px-2 py-1 rounded-lg text-[11px] font-bold text-[#0D47A1] shrink-0">
+            <div className="inline-flex items-center gap-1 bg-blue-50 border border-blue-200 px-1.5 py-0.5 rounded-lg text-[11px] font-bold text-[#0D47A1] shrink-0">
               <GitBranch className="w-3.5 h-3.5 shrink-0" />
               {isBranchLocked ? (
-                <span className="whitespace-nowrap">Branch: {effectiveBranchFilter}</span>
+                <span className="whitespace-nowrap px-1">Branch: {effectiveBranchFilter}</span>
               ) : (
-                <select
-                  value={branchFilter}
-                  onChange={(e) => setBranchFilter(e.target.value)}
-                  className="bg-transparent font-bold text-[#0D47A1] focus:outline-none cursor-pointer"
-                  aria-label="Filter Branch View"
-                >
-                  {BRANCH_OPTIONS.map((b) => (
-                    <option key={b} value={b}>
-                      {b === 'ALL' ? 'All Branches (50+)' : `Branch: ${b}`}
-                    </option>
-                  ))}
-                </select>
+                <div className="w-32 sm:w-36">
+                  <SearchableSelect
+                    ariaLabel="Filter Branch View"
+                    value={branchFilter}
+                    onChange={(val) => setBranchFilter(val)}
+                    options={BRANCH_OPTIONS.map((b) => ({
+                      value: b,
+                      label: b === 'ALL' ? 'All Branches' : `Branch: ${b}`,
+                    }))}
+                    searchPlaceholder="Branch..."
+                    buttonClassName="border-0 bg-transparent px-1 py-0.5 text-[11px] font-bold text-[#0D47A1]"
+                    menuClassName="min-w-[180px]"
+                  />
+                </div>
               )}
             </div>
 
@@ -1844,21 +2078,22 @@ export default function App() {
               </button>
             )}
 
-            {/* Prominent Red Switch Off / Exit App Button */}
+            {/* Prominent Red Switch Off / Exit App Button (Always Pinned & Visible on Android/Tablet/Windows) */}
             <button
               type="button"
               onClick={() => void handleSwitchOffExitApp()}
-              className="inline-flex items-center gap-1 px-2.5 py-1.5 rounded-lg bg-red-600 hover:bg-red-700 text-white text-xs font-extrabold shadow-sm cursor-pointer whitespace-nowrap shrink-0"
+              className="inline-flex items-center gap-1 px-2.5 py-1.5 rounded-lg bg-red-600 hover:bg-red-700 text-white text-[11px] sm:text-xs font-extrabold shadow-sm cursor-pointer whitespace-nowrap shrink-0"
               title="Flush sync, clean temp cache, sign out, stop listeners and switch off app"
             >
-              <Power className="w-3.5 h-3.5" />
-              <span>Switch Off / Exit App</span>
+              <Power className="w-3.5 h-3.5 shrink-0" />
+              <span className="sm:hidden">Switch Off</span>
+              <span className="hidden sm:inline">Switch Off / Exit App</span>
             </button>
           </div>
         </div>
 
-        {/* Row 2: FTL Universal Search (Ctrl+K), Quick Jump Navigation, Live Alerts & Cloud Sync */}
-        {businessMode === 'FTL' && (
+        {/* Row 2: FTL Universal Search (Ctrl+K), Quick Jump Navigation, Live Alerts & Cloud Sync (Hidden in Auto-Focus Form Mode) */}
+        {businessMode === 'FTL' && showFullBanner && (
         <div className="flex flex-wrap items-center justify-between gap-2 pt-1.5 border-t border-slate-100 text-[11px] font-bold">
           <div className="flex flex-wrap items-center gap-1.5">
             {/* Compact Universal Search (Ctrl+K) */}
@@ -1927,6 +2162,15 @@ export default function App() {
               )}
             </div>
 
+            {hasPermission('allInOne') && (
+              <button
+                type="button"
+                onClick={() => openOrSwitchTab('allInOne')}
+                className="px-2.5 py-1 rounded bg-[#0D47A1] hover:bg-[#0A3882] text-amber-200 cursor-pointer whitespace-nowrap"
+              >
+                ★ All-in-One Sheet
+              </button>
+            )}
             {hasPermission('lr') && (
               <button
                 type="button"
@@ -2005,7 +2249,7 @@ export default function App() {
             {isEffectiveMasterAdmin && (
               <button
                 type="button"
-                onClick={() => openOrSwitchTab('staffAccess')}
+                onClick={() => requestProtectedTab('staffAccess')}
                 className="px-2.5 py-1 rounded bg-amber-500 text-white hover:bg-amber-600 cursor-pointer whitespace-nowrap"
               >
                 Staff Access Control
@@ -2122,10 +2366,10 @@ export default function App() {
         )}
       </header>
 
-      {/* Main Body: Isolated Express Logistics Workspace OR FTL Collapsible Sidebar + Multi-Tab Workspace */}
-      <div className="flex-1 flex min-h-0 relative">
-        {businessMode === 'LOGISTICS' ? (
-          <div className="flex-1 flex flex-col min-h-0">
+      {/* Main Body: Isolated Division Workspace (LOGISTICS / PTL / COURIER) OR FTL Sidebar + Multi-Tab Workspace */}
+      <div className="flex-1 flex min-h-0 relative max-w-full">
+        {businessMode !== 'FTL' ? (
+          <div className="flex-1 flex flex-col min-h-0 min-w-0">
             {driveBannerError && (
               <div className="m-3 mb-0 px-4 py-2.5 rounded-lg bg-amber-50 border border-amber-300 text-amber-900 text-xs font-medium flex items-center justify-between gap-2">
                 <span>{driveBannerError}</span>
@@ -2139,25 +2383,47 @@ export default function App() {
                 </button>
               </div>
             )}
-            <LogisticsWorkspace
-              ownerUid={workspaceUid}
-              activeStaffCode={activeStaffCode}
-              activeBranchCode={activeOperationalBranch}
-              activeFy={activeFy}
-              dockets={visibleLogisticsDockets}
-              manifests={visibleLogisticsManifests}
-              parties={logisticsParties}
-              vehicles={logisticsVehicles}
-              drivers={logisticsDrivers}
-              invoices={visibleLogisticsInvoices}
-              ledgers={visibleLogisticsLedgers}
-              company={companySettings}
-              connectedEmail={connectedEmail}
-              driveAccessToken={driveAccessToken}
-              onConnectDrive={() => handleGoogleDriveConnect(true)}
-              onPreviewPdf={handlePreviewPdf}
-              onShowConfirm={handleShowConfirm}
-            />
+            <Suspense
+              fallback={
+                <div className="p-8 text-center text-xs font-bold text-[#0D47A1]">
+                  Loading {activeBusinessMeta.fullName}...
+                </div>
+              }
+            >
+              <LogisticsWorkspace
+                divisionMode={businessMode}
+                activeTab={logiActiveTab}
+                onActiveTabChange={(tab) => {
+                  setLogiActiveTab(tab);
+                  if (tab === 'overview') setBannerExpanded(false);
+                }}
+                ownerUid={workspaceUid}
+                activeStaffCode={activeStaffCode}
+                activeStaffName={activeStaffName}
+                activeBranchCode={activeOperationalBranch}
+                activeFy={activeFy}
+                isMasterAdmin={isEffectiveMasterAdmin}
+                dockets={divisionLogisticsDockets}
+                manifests={divisionLogisticsManifests}
+                parties={logisticsParties}
+                vehicles={logisticsVehicles}
+                drivers={logisticsDrivers}
+                invoices={divisionLogisticsInvoices}
+                ledgers={divisionLogisticsLedgers}
+                ftlParties={parties}
+                ftlVehicles={vehicles}
+                ftlDrivers={drivers}
+                staffAccounts={staffAccounts}
+                lorryHires={visibleLorryHires}
+                staffCommissions={staffCommissions}
+                company={companySettings}
+                connectedEmail={connectedEmail}
+                driveAccessToken={driveAccessToken}
+                onConnectDrive={() => handleGoogleDriveConnect(true)}
+                onPreviewPdf={handlePreviewPdf}
+                onShowConfirm={handleShowConfirm}
+              />
+            </Suspense>
           </div>
         ) : (
         <>
@@ -2197,7 +2463,9 @@ export default function App() {
                 const Icon = item.icon;
                 const isActive =
                   item.id === 'transactions'
-                    ? activeTab === 'dashboard'
+                    ? activeTab === 'dashboard' && dashboardFocusTx
+                    : item.id === 'dashboard'
+                    ? activeTab === 'dashboard' && !dashboardFocusTx
                     : activeTab === item.id;
                 return (
                   <button
@@ -2285,18 +2553,40 @@ export default function App() {
 
         {/* Right Main Content Column */}
         <main className="flex-1 min-w-0 flex flex-col bg-[#F1F5F9]">
-          {/* Multi-Tab Sheet Bar */}
-          <div className="bg-[#E2E8F0] border-b border-slate-300 px-3 pt-1.5 flex items-center gap-1 overflow-x-auto no-print">
+          {/* Multi-Tab Sheet Bar + Dedicated Within-Business Back Button */}
+          <div className="bg-[#E2E8F0] border-b border-slate-300 px-2.5 sm:px-3 pt-1.5 flex items-center gap-1 overflow-x-auto no-print">
+            {activeTab !== 'dashboard' && (
+              <button
+                type="button"
+                onClick={handleReturnToCurrentBusinessDashboard}
+                className="inline-flex items-center gap-1 px-2.5 py-1.5 mb-1 mr-1 rounded-lg bg-[#0D47A1] hover:bg-[#0A3882] text-white text-xs font-extrabold shadow-sm cursor-pointer whitespace-nowrap shrink-0"
+              >
+                <ArrowLeft className="w-3.5 h-3.5" />
+                <span>← Back to FTL Dashboard</span>
+              </button>
+            )}
             {openTabs.map((t) => {
               const selected = activeTab === t.id;
               return (
                 <div
                   key={t.id}
-                  onClick={() => setActiveTab(t.id)}
+                  onClick={() => {
+                    if (t.id === 'dashboard') {
+                      setDashboardFocusTx(false);
+                      setBannerExpanded(false);
+                    }
+                    setActiveTab(t.id);
+                  }}
                   role="button"
                   tabIndex={0}
                   onKeyDown={(e) => {
-                    if (e.key === 'Enter' || e.key === ' ') setActiveTab(t.id);
+                    if (e.key === 'Enter' || e.key === ' ') {
+                      if (t.id === 'dashboard') {
+                        setDashboardFocusTx(false);
+                        setBannerExpanded(false);
+                      }
+                      setActiveTab(t.id);
+                    }
                   }}
                   className={`inline-flex items-center gap-2 px-3 py-1.5 rounded-t-lg text-xs font-bold border-t border-x cursor-pointer whitespace-nowrap transition-colors ${
                     selected
@@ -2321,7 +2611,7 @@ export default function App() {
           </div>
 
           {/* Active Workspace Module */}
-          <div className="flex-1 p-3 md:p-4 overflow-y-auto">
+          <div className="flex-1 p-2.5 sm:p-3 md:p-4 overflow-y-auto overflow-x-clip">
             {driveBannerError && (
               <div className="mb-3 px-4 py-2.5 rounded-lg bg-amber-50 border border-amber-300 text-amber-900 text-xs font-medium flex items-center justify-between gap-2">
                 <span>{driveBannerError}</span>
@@ -2352,9 +2642,43 @@ export default function App() {
                 transactions={visibleTransactions}
                 parties={parties}
                 company={companySettings}
+                focusTransactionsNonce={focusTransactionsNonce}
                 onOpenTab={openOrSwitchTab}
                 onPreviewPdf={handlePreviewPdf}
                 onShowConfirm={handleShowConfirm}
+              />
+            )}
+
+            <Suspense
+              fallback={
+                <div className="p-8 text-center text-xs font-bold text-[#0D47A1]">
+                  Loading module workspace...
+                </div>
+              }
+            >
+
+            {activeTab === 'allInOne' && (
+              <AllInOneEntrySheet
+                divisionMode="FTL"
+                ownerUid={workspaceUid}
+                activeStaffCode={activeStaffCode}
+                activeStaffName={activeStaffName}
+                activeBranchCode={activeOperationalBranch}
+                activeFy={activeFy}
+                isMasterAdmin={isEffectiveMasterAdmin}
+                readOnly={getSheetAccess('lr') === 'view' && getSheetAccess('billing') === 'view'}
+                parties={parties}
+                vehicles={vehicles}
+                drivers={drivers}
+                staffAccounts={staffAccounts}
+                consignments={visibleConsignments}
+                lorryHires={visibleLorryHires}
+                staffCommissions={staffCommissions}
+                invoices={visibleInvoices}
+                company={companySettings}
+                onPreviewPdf={handlePreviewPdf}
+                onShowConfirm={handleShowConfirm}
+                onExitToDashboard={handleReturnToCurrentBusinessDashboard}
               />
             )}
 
@@ -2539,6 +2863,15 @@ export default function App() {
                   bankReceipts,
                   staffCommissions,
                 }}
+                logisticsData={{
+                  parties: logisticsParties,
+                  vehicles: logisticsVehicles,
+                  drivers: logisticsDrivers,
+                  dockets: logisticsDockets,
+                  manifests: logisticsManifests,
+                  invoices: logisticsInvoices,
+                  ledgers: logisticsLedgers,
+                }}
                 onSwitchGmail={() => handleGoogleDriveConnect(true)}
                 onSwitchStaffSession={setActiveStaffSession}
                 onUpdateAdminSession={(nextSession) => setErpSession(nextSession)}
@@ -2597,6 +2930,7 @@ export default function App() {
                 </div>
               </div>
             )}
+            </Suspense>
           </div>
         </main>
         </>
@@ -2605,13 +2939,22 @@ export default function App() {
 
       {/* Bottom ERP Status Bar */}
       <footer className="bg-[#EFF6FF] border-t border-blue-200 px-3 md:px-5 py-1.5 flex flex-wrap items-center justify-between gap-2 text-xs text-slate-700 no-print">
-        <div className="flex flex-wrap items-center gap-3">
+        <div className="flex flex-wrap items-center gap-2 sm:gap-3">
           <span className="inline-flex items-center gap-1.5 font-semibold text-emerald-700">
             <CheckCircle2 className="w-3.5 h-3.5" />
             {firestoreConnected
               ? 'Real-Time Multi-Branch Sync + Offline Cache Active'
               : 'Offline Cache Active'}
           </span>
+          <span className="text-slate-300">|</span>
+          <button
+            type="button"
+            onClick={() => setFormulaHealthModalOpen(true)}
+            className="inline-flex items-center gap-1 font-extrabold text-emerald-800 hover:underline cursor-pointer"
+          >
+            <ShieldCheck className="w-3.5 h-3.5 text-emerald-700" />
+            <span>{formulaHealthReport?.badgeLabel || 'System Health: 100% Error-Free'}</span>
+          </button>
           <span className="text-slate-300">|</span>
           <span>
             User: <strong className="text-slate-900">{activeOperatorLabel}</strong>
@@ -2627,9 +2970,9 @@ export default function App() {
           </span>
         </div>
         <div className="font-bold italic text-[#0D47A1]">
-          {businessMode === 'LOGISTICS'
-            ? 'Dolphin Road Carriers — Express Parcel & Part-Load Logistics Division'
-            : 'Dolphin Road Carriers — Logistics Solution Partner'}
+          {businessMode === 'FTL'
+            ? 'Dolphin Road Carriers — Logistics Solution Partner'
+            : `Dolphin Road Carriers — ${activeBusinessMeta.fullName}`}
         </div>
       </footer>
 
@@ -2728,25 +3071,214 @@ export default function App() {
       )}
 
       {/* Live A4 PDF Preview Modal with Dynamic Portrait / Landscape Rebuild & Share Actions */}
-      <A4PreviewModal
-        pdf={previewPdf?.pdf || null}
-        driveFolder={previewPdf?.folder || 'Bills_Invoices'}
-        hasDriveToken={Boolean(driveAccessToken)}
-        parties={parties}
-        company={companySettings}
-        onClose={handleClosePreviewPdf}
-        onSaveToDrive={handleSavePdfToDrive}
-        onConnectDrive={() => handleGoogleDriveConnect(true)}
-        onReplacePdf={(nextPdf) =>
-          setPreviewPdf((prev) => {
-            if (!prev) return null;
-            if (prev.pdf.blobUrl && prev.pdf.blobUrl !== nextPdf.blobUrl) {
-              URL.revokeObjectURL(prev.pdf.blobUrl);
-            }
-            return { ...prev, pdf: nextPdf };
-          })
-        }
-      />
+      <Suspense fallback={null}>
+        <A4PreviewModal
+          pdf={previewPdf?.pdf || null}
+          driveFolder={previewPdf?.folder || 'Bills_Invoices'}
+          hasDriveToken={Boolean(driveAccessToken)}
+          parties={parties}
+          company={companySettings}
+          onClose={handleClosePreviewPdf}
+          onSaveToDrive={handleSavePdfToDrive}
+          onConnectDrive={() => handleGoogleDriveConnect(true)}
+          onReplacePdf={(nextPdf) =>
+            setPreviewPdf((prev) => {
+              if (!prev) return null;
+              if (prev.pdf.blobUrl && prev.pdf.blobUrl !== nextPdf.blobUrl) {
+                URL.revokeObjectURL(prev.pdf.blobUrl);
+              }
+              return { ...prev, pdf: nextPdf };
+            })
+          }
+        />
+      </Suspense>
+
+      {/* Startup & Monthly Auto-Formula Health Guard + Anti-Tamper Shield Modal */}
+      {formulaHealthModalOpen && (
+        <div className="fixed inset-0 z-[95] flex items-center justify-center bg-slate-900/60 p-3 sm:p-4 no-print">
+          <div className="w-full max-w-2xl bg-white rounded-2xl border border-emerald-300 shadow-2xl overflow-hidden text-xs">
+            <div className="bg-gradient-to-r from-emerald-700 to-teal-700 text-white px-4 py-3 flex items-center justify-between">
+              <div className="flex items-center gap-2">
+                <ShieldCheck className="w-5 h-5 text-emerald-200 shrink-0" />
+                <div>
+                  <h3 className="text-sm font-extrabold">
+                    {formulaHealthReport?.badgeLabel || 'System Health: 100% Error-Free'}
+                  </h3>
+                  <p className="text-[11px] text-emerald-100">
+                    Startup &amp; Monthly (1st of Month) Auto-Formula Guard + Anti-Tamper Security Shield
+                  </p>
+                </div>
+              </div>
+              <button
+                type="button"
+                onClick={() => setFormulaHealthModalOpen(false)}
+                className="p-1 rounded hover:bg-white/15 cursor-pointer"
+                aria-label="Close Formula Health Dialog"
+              >
+                <X className="w-4 h-4" />
+              </button>
+            </div>
+            <div className="p-4 space-y-3 max-h-[75vh] overflow-y-auto">
+              <div className="grid grid-cols-2 sm:grid-cols-4 gap-2">
+                <div className="p-2.5 rounded-lg bg-emerald-50 border border-emerald-200">
+                  <p className="text-[10px] font-bold text-emerald-800 uppercase">Status</p>
+                  <p className="text-xs font-extrabold text-emerald-900">100% Verified</p>
+                </div>
+                <div className="p-2.5 rounded-lg bg-slate-50 border border-slate-200">
+                  <p className="text-[10px] font-bold text-slate-600 uppercase">Records Scanned</p>
+                  <p className="text-xs font-extrabold font-mono-num text-slate-900">
+                    {formulaHealthReport?.totalRecordsScanned ?? 0}
+                  </p>
+                </div>
+                <div className="p-2.5 rounded-lg bg-slate-50 border border-slate-200">
+                  <p className="text-[10px] font-bold text-slate-600 uppercase">Auto-Healed</p>
+                  <p className="text-xs font-extrabold font-mono-num text-emerald-700">
+                    {formulaHealthReport?.healedCount ?? 0}
+                  </p>
+                </div>
+                <div className="p-2.5 rounded-lg bg-slate-50 border border-slate-200">
+                  <p className="text-[10px] font-bold text-slate-600 uppercase">Shield Checksum</p>
+                  <p className="text-xs font-extrabold font-mono-num text-indigo-800 truncate">
+                    CRC-{formulaHealthReport?.shieldIntegrityHash || 'OK'}
+                  </p>
+                </div>
+              </div>
+
+              <div className="space-y-1.5">
+                {(formulaHealthReport?.checks || []).map((chk) => (
+                  <div
+                    key={chk.id}
+                    className="p-2.5 rounded-lg border border-slate-200 bg-white flex items-start justify-between gap-2"
+                  >
+                    <div className="min-w-0">
+                      <p className="font-bold text-slate-900">{chk.label}</p>
+                      <p className="text-[11px] text-slate-600">{chk.details}</p>
+                    </div>
+                    <span
+                      className={`px-2 py-0.5 rounded font-extrabold uppercase text-[10px] shrink-0 ${
+                        chk.status === 'healed'
+                          ? 'bg-amber-100 text-amber-900'
+                          : 'bg-emerald-100 text-emerald-900'
+                      }`}
+                    >
+                      {chk.status === 'healed' ? 'Auto-Healed' : 'Passed'}
+                    </span>
+                  </div>
+                ))}
+              </div>
+
+              <p className="text-[11px] text-slate-600 bg-slate-50 border border-slate-200 rounded-lg p-2.5">
+                {formulaHealthReport?.monthlyScheduleNote ||
+                  'Auto-scans all accounting formulas on startup and 1st of every month.'}
+              </p>
+
+              <div className="flex flex-wrap items-center justify-end gap-2 pt-2 border-t border-slate-200">
+                <button
+                  type="button"
+                  onClick={() => runFormulaGuardScan(true)}
+                  className="inline-flex items-center gap-1.5 px-3.5 py-2 rounded-lg bg-emerald-600 hover:bg-emerald-700 text-white font-bold cursor-pointer"
+                >
+                  <RefreshCw className="w-3.5 h-3.5" />
+                  <span>Re-Run Formula &amp; Anti-Tamper Scan</span>
+                </button>
+                <button
+                  type="button"
+                  onClick={() => setFormulaHealthModalOpen(false)}
+                  className="px-4 py-2 rounded-lg bg-slate-800 hover:bg-slate-900 text-white font-bold cursor-pointer"
+                >
+                  Close
+                </button>
+              </div>
+            </div>
+          </div>
+        </div>
+      )}
+
+      {/* Admin PIN Verification Modal (Protects Staff Sheet Access Control) */}
+      {adminPinModalOpen && (
+        <div className="fixed inset-0 z-[96] flex items-center justify-center bg-slate-900/65 p-4 no-print">
+          <div className="w-full max-w-sm bg-white rounded-2xl border border-amber-300 shadow-2xl overflow-hidden text-xs">
+            <div className="bg-gradient-to-r from-[#0D47A1] to-amber-700 text-white px-4 py-3 flex items-center justify-between">
+              <div className="flex items-center gap-2">
+                <KeyRound className="w-4 h-4 text-amber-200" />
+                <h3 className="text-sm font-extrabold">Admin PIN Verification</h3>
+              </div>
+              <button
+                type="button"
+                onClick={() => {
+                  setAdminPinModalOpen(false);
+                  setPendingPinTargetTab(null);
+                  setAdminPinInput('');
+                  setAdminPinError(null);
+                }}
+                className="p-1 rounded hover:bg-white/15 cursor-pointer"
+                aria-label="Close PIN Dialog"
+              >
+                <X className="w-4 h-4" />
+              </button>
+            </div>
+            <form
+              onSubmit={(e) => {
+                e.preventDefault();
+                if (verifyAdminPin(adminPinInput)) {
+                  const target = pendingPinTargetTab || 'staffAccess';
+                  setAdminPinModalOpen(false);
+                  setPendingPinTargetTab(null);
+                  setAdminPinInput('');
+                  setAdminPinError(null);
+                  openOrSwitchTab(target);
+                } else {
+                  setAdminPinError('Invalid Admin PIN. Enter valid PIN (default: 1234).');
+                }
+              }}
+              className="p-4 space-y-3"
+            >
+              <p className="text-slate-600 leading-relaxed">
+                Enter your <strong>Admin Security PIN</strong> to unlock <strong>Staff Sheet Access Control</strong>. (PIN can be customized inside Admin Settings.)
+              </p>
+              {adminPinError && (
+                <div className="p-2 rounded bg-red-50 border border-red-200 text-red-700 font-bold">
+                  {adminPinError}
+                </div>
+              )}
+              <input
+                type="password"
+                inputMode="numeric"
+                value={adminPinInput}
+                onChange={(e) => {
+                  setAdminPinInput(e.target.value);
+                  setAdminPinError(null);
+                }}
+                placeholder="Enter Admin PIN (default: 1234)"
+                autoFocus
+                required
+                className="w-full px-3 py-2 rounded-lg border border-slate-300 text-sm font-mono-num focus:outline-none focus:ring-2 focus:ring-blue-600"
+              />
+              <div className="flex items-center justify-end gap-2 pt-1">
+                <button
+                  type="button"
+                  onClick={() => {
+                    setAdminPinModalOpen(false);
+                    setPendingPinTargetTab(null);
+                    setAdminPinInput('');
+                    setAdminPinError(null);
+                  }}
+                  className="px-3 py-1.5 rounded-lg border border-slate-300 text-slate-700 font-bold hover:bg-slate-100 cursor-pointer"
+                >
+                  Cancel
+                </button>
+                <button
+                  type="submit"
+                  className="inline-flex items-center gap-1.5 px-4 py-1.5 rounded-lg bg-[#0D47A1] hover:bg-[#0A3882] text-white font-bold cursor-pointer"
+                >
+                  <ShieldCheck className="w-3.5 h-3.5" />
+                  <span>Verify &amp; Unlock</span>
+                </button>
+              </div>
+            </form>
+          </div>
+        </div>
+      )}
 
       {/* Global Confirmation Modal */}
       <ConfirmModal

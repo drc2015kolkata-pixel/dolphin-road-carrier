@@ -26,7 +26,10 @@ import {
   Driver,
   DriveFolderName,
   ExtraEwayBill,
+  ExtraInsuranceItem,
   ExtraTaxInvoice,
+  MultiGoodsItem,
+  MultiWeightRow,
   Party,
   Vehicle,
 } from '../types/erp';
@@ -42,11 +45,17 @@ import {
 import { scanPhysicalLR } from '../lib/ocrEngine';
 import {
   addDropdownItem,
+  ALL_INDIA_BRANCH_OPTIONS,
+  COMMON_REMARK_PRESETS,
+  DEFAULT_PACKAGE_MODES,
   deleteDropdownItem,
+  DELIVERY_MODE_CODES,
   editDropdownItem,
   getEffectiveCreditDayPresets,
   getEffectiveDistrictsForState,
   getEffectiveDropdownList,
+  GST_PAID_BY_CODES,
+  RISK_TYPE_CODES,
   upsertDistrictItem,
 } from '../lib/dropdownMasterStore';
 import {
@@ -59,9 +68,11 @@ import { GeneratedPdfResult, generateLR3CopyPDF } from '../lib/pdfEngine';
 import { useDebouncedValue } from '../hooks/useDebounce';
 import { PaginatedDataTable, TableColumn } from './PaginatedDataTable';
 import { EditableSearchSelect, YesNoSelect } from './EditableSearchSelect';
+import { SearchableSelect } from './SearchableSelect';
 import { downloadNicPartBJson, getEwayBillExpiryState, ParsedQrPayload } from '../lib/ewayBillUtils';
 import { filterBillingCustomerParties } from '../lib/partySeparation';
 import { CameraPodQrScannerModal } from './CameraPodQrScannerModal';
+import { playAlertBeep, playVerifiedBeep } from '../lib/audioFeedback';
 import {
   EntityQuickPreviewCard,
   formatDriverDetailsLine,
@@ -115,6 +126,7 @@ const ConsignmentModuleInner: React.FC<ConsignmentModuleProps> = ({
 }) => {
   const fileInputRef = useRef<HTMLInputElement | null>(null);
   const cameraInputRef = useRef<HTMLInputElement | null>(null);
+  const totalFreightInputRef = useRef<HTMLInputElement | null>(null);
   const liveVideoRef = useRef<HTMLVideoElement | null>(null);
   const liveStreamRef = useRef<MediaStream | null>(null);
   const [liveCameraOpen, setLiveCameraOpen] = useState(false);
@@ -133,6 +145,13 @@ const ConsignmentModuleInner: React.FC<ConsignmentModuleProps> = ({
   const [editingId, setEditingId] = useState<string | null>(null);
   const [editingBilled, setEditingBilled] = useState(false);
   const [division, setDivision] = useState<'FTL' | 'LOGISTICS'>('FTL');
+  const [billedAtBranch, setBilledAtBranch] = useState<string>(() => {
+    if (activeBranchCode && activeBranchCode !== 'ALL') {
+      const matched = (company.branches || []).find((b) => b.branchCode === activeBranchCode);
+      if (matched) return matched.branchName;
+    }
+    return 'Kolkata';
+  });
   const [autoAtomicCn, setAutoAtomicCn] = useState(true);
   const [cnNo, setCnNo] = useState(`${branchPrefix}-${147 + consignments.length}/${fyShort}`);
   const [cnDate, setCnDate] = useState(todayISO());
@@ -155,21 +174,28 @@ const ConsignmentModuleInner: React.FC<ConsignmentModuleProps> = ({
   const [consigneeAddress, setConsigneeAddress] = useState('');
   const [consigneeGstin, setConsigneeGstin] = useState('');
   const [packages, setPackages] = useState('');
-  const [packageMode, setPackageMode] = useState('Bags / Sacks');
+  const [packageMode, setPackageMode] = useState('NOS');
   const [particulars, setParticulars] = useState('');
+  const [multiGoodsItems, setMultiGoodsItems] = useState<MultiGoodsItem[]>([]);
+  const [hasMultiWeight, setHasMultiWeight] = useState(false);
+  const [multiWeights, setMultiWeights] = useState<MultiWeightRow[]>([]);
   const [rateMode, setRateMode] = useState('Fixed Lorry Freight (Lump Sum)');
   const [ratePerUnit, setRatePerUnit] = useState('');
   const [nettWeight, setNettWeight] = useState('0');
   const [grossWeight, setGrossWeight] = useState('0');
+  const [chargedWeight, setChargedWeight] = useState('0');
   const [loadingCharge, setLoadingCharge] = useState('0');
   const [unloadingCharge, setUnloadingCharge] = useState('0');
   const [returnLorryCharge, setReturnLorryCharge] = useState('0');
   const [sttCharge, setSttCharge] = useState('0');
+  const [otherCharge, setOtherCharge] = useState('0');
   const [totalFreight, setTotalFreight] = useState('0');
+  const [highlightFreightWarning, setHighlightFreightWarning] = useState(false);
   const [paidAmount, setPaidAmount] = useState('0');
   const [toPayAmount, setToPayAmount] = useState('0');
 
-  // Yes/No Toggles for Tax Invoice, Multi E-Way Bill & Multi Vehicle
+  // Yes/No Toggles for Vehicle Input, Tax Invoice, Multi E-Way Bill, Multi Vehicle & Insurance
+  const [hasVehicleNo, setHasVehicleNo] = useState(true);
   const [hasTaxInvoice, setHasTaxInvoice] = useState(true);
   const [hasMultiEwayBill, setHasMultiEwayBill] = useState(false);
   const [hasMultiVehicle, setHasMultiVehicle] = useState(false);
@@ -200,16 +226,32 @@ const ConsignmentModuleInner: React.FC<ConsignmentModuleProps> = ({
   const [chassisNo, setChassisNo] = useState('');
   const [ownerName, setOwnerName] = useState('');
   const [selectedOwnerId, setSelectedOwnerId] = useState('');
+  const [brokerName, setBrokerName] = useState('');
+  const [selectedBrokerId, setSelectedBrokerId] = useState('');
   const [driverName, setDriverName] = useState('');
   const [selectedDriverId, setSelectedDriverId] = useState('');
   const [driverDlNo, setDriverDlNo] = useState('');
+  const [driverDlExpiry, setDriverDlExpiry] = useState('');
+  const [driverMobile, setDriverMobile] = useState('');
+
+  // Short Codes & Insurance
+  const [deliveryModeCode, setDeliveryModeCode] = useState<'P' | 'G' | 'D'>('P');
+  const [gstPaidByCode, setGstPaidByCode] = useState<'R' | 'E' | 'T'>('E');
   const [gstPaidBy, setGstPaidBy] = useState('Consignee');
-  const [insuranceStatus] = useState('The Customer has not insured the consignment');
+  const [riskTakenBy, setRiskTakenBy] = useState<'O' | 'C' | 'I'>('O');
+  const [billToPartyFlag, setBillToPartyFlag] = useState(false);
+  const [insurancePolicyNo, setInsurancePolicyNo] = useState('');
+  const [insurancePolicyDate, setInsurancePolicyDate] = useState('');
+  const [insuranceAmount, setInsuranceAmount] = useState('0');
+  const [hasMultiInsurance, setHasMultiInsurance] = useState(false);
+  const [extraInsurances, setExtraInsurances] = useState<ExtraInsuranceItem[]>([]);
+  const [insuranceStatus, setInsuranceStatus] = useState('The Customer has not insured the consignment');
   const [remarks, setRemarks] = useState('');
   const [scannedLrDataUrl, setScannedLrDataUrl] = useState('');
 
   const [ocrStatus, setOcrStatus] = useState<string | null>(null);
   const [ocrError, setOcrError] = useState<string | null>(null);
+  const [ocrMissingFields, setOcrMissingFields] = useState<string[]>([]);
   const [ocrFyMismatch, setOcrFyMismatch] = useState<{
     detectedFy: string;
     detectedDate: string;
@@ -219,8 +261,21 @@ const ConsignmentModuleInner: React.FC<ConsignmentModuleProps> = ({
   const debouncedSearch = useDebouncedValue(search, 200);
 
   // Live Dropdown Master Lists (Firestore synced)
-  const goodsOptions = useMemo(() => getEffectiveDropdownList(company, 'goodsTypes'), [company]);
-  const packageModeOptions = useMemo(() => getEffectiveDropdownList(company, 'packageModes'), [company]);
+  const branchDropdownOptions = useMemo(() => {
+    const companyBranches = (company.branches || []).map((b) => b.branchName).filter(Boolean);
+    return Array.from(new Set([...ALL_INDIA_BRANCH_OPTIONS, ...companyBranches])).sort((a, b) =>
+      a.localeCompare(b)
+    );
+  }, [company.branches]);
+  const goodsOptions = useMemo(() => {
+    const base = getEffectiveDropdownList(company, 'goodsTypes');
+    return base.includes('MULTI') ? base : [...base, 'MULTI'];
+  }, [company]);
+  const packageModeOptions = useMemo(() => {
+    const base = getEffectiveDropdownList(company, 'packageModes');
+    const merged = Array.from(new Set([...DEFAULT_PACKAGE_MODES, ...base]));
+    return merged;
+  }, [company]);
   const rateModeOptions = useMemo(() => getEffectiveDropdownList(company, 'rateModes'), [company]);
   const deliveryPlaceOptions = useMemo(() => getEffectiveDropdownList(company, 'deliveryPlaces'), [company]);
   const stateOptions = useMemo(() => getEffectiveDropdownList(company, 'states'), [company]);
@@ -236,6 +291,13 @@ const ConsignmentModuleInner: React.FC<ConsignmentModuleProps> = ({
   const billingCustomerParties = useMemo(
     () => filterBillingCustomerParties({ parties, drivers, consignments }),
     [parties, drivers, consignments]
+  );
+  const brokerMasterParties = useMemo(
+    () =>
+      [...parties]
+        .filter((p) => p.partyType === 'Broker')
+        .sort((a, b) => a.name.localeCompare(b.name)),
+    [parties]
   );
   const ownerAndBrokerParties = useMemo(
     () =>
@@ -286,7 +348,9 @@ const ConsignmentModuleInner: React.FC<ConsignmentModuleProps> = ({
       if (!file) return;
       setOcrError(null);
       setOcrFyMismatch(null);
-      setOcrStatus('Scanning document in background worker (OCR + AI extraction)...');
+      setOcrMissingFields([]);
+      setHighlightFreightWarning(false);
+      setOcrStatus('Auto-rotating & scanning document (OCR + AI Vision)...');
       try {
         const { result, compressedDataUrl } = await scanPhysicalLR(file, (msg) =>
           setOcrStatus(msg)
@@ -312,36 +376,97 @@ const ConsignmentModuleInner: React.FC<ConsignmentModuleProps> = ({
         if (result.consigneeAddress) setConsigneeAddress(result.consigneeAddress);
         if (result.consigneeGstin) setConsigneeGstin(result.consigneeGstin);
         if (result.packages) setPackages(result.packages);
+        if (result.packageMode) setPackageMode(result.packageMode);
         if (result.particulars) setParticulars(result.particulars);
+        if (result.goodsRemarks) setRemarks(result.goodsRemarks);
         if (result.nettWeight) setNettWeight(String(result.nettWeight));
         if (result.grossWeight) setGrossWeight(String(result.grossWeight));
-        if (result.totalFreight) {
+        if (result.chargedWeight) setChargedWeight(String(result.chargedWeight));
+        if (result.rateType) setRateMode(result.rateType);
+        if (result.fixedOrWeightRate) setRatePerUnit(String(result.fixedOrWeightRate));
+        if (result.gstPaidByCode) {
+          setGstPaidByCode(result.gstPaidByCode);
+          setGstPaidBy(
+            result.gstPaidByCode === 'R'
+              ? 'Consignor'
+              : result.gstPaidByCode === 'T'
+                ? 'Transporter'
+                : 'Consignee'
+          );
+        }
+        if (typeof result.stockTransfer === 'boolean') {
+          setStockTransfer(result.stockTransfer);
+        }
+        if (result.totalFreight && Number(result.totalFreight) > 0) {
           setTotalFreight(String(result.totalFreight));
           setToPayAmount(String(result.totalFreight));
+          setHighlightFreightWarning(false);
+        } else if (result.highlightTotalFreight) {
+          setHighlightFreightWarning(true);
+          playAlertBeep();
+          setTimeout(() => {
+            totalFreightInputRef.current?.focus();
+            totalFreightInputRef.current?.select();
+          }, 120);
         }
-        if (result.truckNo) setTruckNo(result.truckNo);
+        const extractedTruck = (result.vehicleNo || result.truckNo || '').trim().toUpperCase();
+        if (extractedTruck) {
+          setHasVehicleNo(true);
+          handleSelectVehicle(extractedTruck);
+        }
         if (result.fromCity) setFromCity(result.fromCity);
         if (result.toCity) setToCity(result.toCity);
         if (result.ewayBillNo) setEwayBillNo(result.ewayBillNo);
         if (result.ewayBillDate) setEwayBillDate(result.ewayBillDate);
+        if (result.ewayBillValidUpto) setEwayBillValidUpto(result.ewayBillValidUpto);
+        if (result.extraEwayBills && result.extraEwayBills.length > 0) {
+          setHasMultiEwayBill(true);
+          setExtraEwayBills(
+            result.extraEwayBills.map((e) => ({
+              no: e.no || '',
+              date: e.date || result.ewayBillDate || todayISO(),
+              ...(e.validUpto ? { validUpto: e.validUpto } : {}),
+            }))
+          );
+        }
         if (result.taxInvNo) {
           setHasTaxInvoice(true);
           setTaxInvNo(result.taxInvNo);
         }
         if (result.taxInvDate) setTaxInvDate(result.taxInvDate);
+        if (result.extraTaxInvoices && result.extraTaxInvoices.length > 0) {
+          setHasTaxInvoice(true);
+          setExtraTaxInvoices(
+            result.extraTaxInvoices.map((inv) => ({
+              no: inv.no || '',
+              date: inv.date || result.taxInvDate || todayISO(),
+              value: inv.amount || 0,
+            }))
+          );
+        }
         if (result.valueOfGoods) setValueOfGoods(String(result.valueOfGoods));
         if (result.ownerName) setOwnerName(result.ownerName);
         if (result.driverName) setDriverName(result.driverName);
         if (result.driverDlNo) setDriverDlNo(result.driverDlNo);
+        if (result.missingOrUnclearFields && result.missingOrUnclearFields.length > 0) {
+          setOcrMissingFields(result.missingOrUnclearFields);
+        }
         setOcrStatus(
-          result.confidenceNote ||
+          `${result.appliedRotationDeg ? `[Auto-rotated ${result.appliedRotationDeg}°] ` : ''}${
+            result.isCrossBorder
+              ? `Cross-Border (${result.destinationCountry}) Detected — `
+              : ''
+          }${
+            result.confidenceNote ||
             'Scanned values auto-filled below — every field remains 100% editable before saving.'
+          }`
         );
       } catch (err) {
         setOcrError(err instanceof Error ? err.message : 'Document scan failed');
         setOcrStatus(null);
       }
     },
+    // eslint-disable-next-line react-hooks/exhaustive-deps
     [activeFy]
   );
 
@@ -595,8 +720,17 @@ const ConsignmentModuleInner: React.FC<ConsignmentModuleProps> = ({
       .filter((c) => c.truckNo?.toUpperCase() === upper)
       .sort((a, b) => (b.cnDate || '').localeCompare(a.cnDate || ''))[0];
     if (lastTrip) {
-      if (!driverName.trim() && lastTrip.driverName) setDriverName(lastTrip.driverName);
-      if (!driverDlNo.trim() && lastTrip.driverDlNo) setDriverDlNo(lastTrip.driverDlNo);
+      if (lastTrip.driverName) {
+        const drvNameLower = (lastTrip.driverName || '').trim().toLowerCase();
+        const drvMatch = drivers.find(
+          (d) => d.name.trim().toLowerCase() === drvNameLower
+        );
+        setDriverName(lastTrip.driverName);
+        setDriverDlNo(lastTrip.driverDlNo || drvMatch?.dlNo || '');
+        setDriverDlExpiry(lastTrip.driverDlExpiry || drvMatch?.dlExpiry || '');
+        setDriverMobile(lastTrip.driverMobile || drvMatch?.phone || '');
+        setSelectedDriverId(drvMatch?.id || '');
+      }
     }
   };
 
@@ -612,9 +746,16 @@ const ConsignmentModuleInner: React.FC<ConsignmentModuleProps> = ({
     const lastTrip = [...consignments]
       .filter((c) => c.truckNo?.toUpperCase() === upper.trim())
       .sort((a, b) => (b.cnDate || '').localeCompare(a.cnDate || ''))[0];
-    if (lastTrip) {
-      if (!driverName.trim() && lastTrip.driverName) setDriverName(lastTrip.driverName);
-      if (!driverDlNo.trim() && lastTrip.driverDlNo) setDriverDlNo(lastTrip.driverDlNo);
+    if (lastTrip && lastTrip.driverName) {
+      const drvNameLower = (lastTrip.driverName || '').trim().toLowerCase();
+      const drvMatch = drivers.find(
+        (d) => d.name.trim().toLowerCase() === drvNameLower
+      );
+      setDriverName(lastTrip.driverName);
+      setDriverDlNo(lastTrip.driverDlNo || drvMatch?.dlNo || '');
+      setDriverDlExpiry(lastTrip.driverDlExpiry || drvMatch?.dlExpiry || '');
+      setDriverMobile(lastTrip.driverMobile || drvMatch?.phone || '');
+      setSelectedDriverId(drvMatch?.id || '');
     }
   };
 
@@ -622,6 +763,8 @@ const ConsignmentModuleInner: React.FC<ConsignmentModuleProps> = ({
     setDriverName(found.name);
     setSelectedDriverId(found.id);
     setDriverDlNo(found.dlNo || '');
+    setDriverDlExpiry(found.dlExpiry || '');
+    setDriverMobile(found.phone || '');
   };
 
   const handleSelectDriver = (name: string) => {
@@ -660,6 +803,35 @@ const ConsignmentModuleInner: React.FC<ConsignmentModuleProps> = ({
     );
   };
 
+  const recomputeTotalFreight = (
+    nextRateMode: string,
+    nextRateStr: string,
+    nextNettWtStr: string,
+    nextChargedWtStr: string,
+    nextOtherStr: string,
+    nextLoadingStr: string,
+    nextUnloadingStr: string,
+    nextReturnStr: string,
+    nextSttStr: string,
+    nextPaidStr: string
+  ) => {
+    const rateNum = Number(nextRateStr) || 0;
+    const wt = Number(nextChargedWtStr) || Number(nextNettWtStr) || Number(grossWeight) || 0;
+    const extras =
+      (Number(nextOtherStr) || 0) +
+      (Number(nextLoadingStr) || 0) +
+      (Number(nextUnloadingStr) || 0) +
+      (Number(nextReturnStr) || 0) +
+      (Number(nextSttStr) || 0);
+    if (rateNum > 0) {
+      const base = /ton|mt|kg/i.test(nextRateMode) && wt > 0 ? rateNum * wt : rateNum;
+      const calc = Math.round((base + extras) * 100) / 100;
+      setTotalFreight(String(calc));
+      setToPayAmount(String(Math.max(0, calc - (Number(nextPaidStr) || 0))));
+      setHighlightFreightWarning(false);
+    }
+  };
+
   const resetForm = () => {
     setEditingId(null);
     setEditingBilled(false);
@@ -683,19 +855,26 @@ const ConsignmentModuleInner: React.FC<ConsignmentModuleProps> = ({
     setConsigneeAddress('');
     setConsigneeGstin('');
     setPackages('');
-    setPackageMode('Bags / Sacks');
+    setPackageMode('NOS');
     setParticulars('');
+    setMultiGoodsItems([]);
+    setHasMultiWeight(false);
+    setMultiWeights([]);
     setRateMode('Fixed Lorry Freight (Lump Sum)');
     setRatePerUnit('');
     setNettWeight('0');
     setGrossWeight('0');
+    setChargedWeight('0');
     setLoadingCharge('0');
     setUnloadingCharge('0');
     setReturnLorryCharge('0');
     setSttCharge('0');
+    setOtherCharge('0');
     setTotalFreight('0');
+    setHighlightFreightWarning(false);
     setPaidAmount('0');
     setToPayAmount('0');
+    setHasVehicleNo(true);
     setHasTaxInvoice(true);
     setHasMultiEwayBill(false);
     setHasMultiVehicle(false);
@@ -721,12 +900,27 @@ const ConsignmentModuleInner: React.FC<ConsignmentModuleProps> = ({
     setChassisNo('');
     setOwnerName('');
     setSelectedOwnerId('');
+    setBrokerName('');
+    setSelectedBrokerId('');
     setDriverName('');
     setSelectedDriverId('');
     setDriverDlNo('');
+    setDriverDlExpiry('');
+    setDriverMobile('');
+    setDeliveryModeCode('P');
+    setGstPaidByCode('E');
     setGstPaidBy('Consignee');
+    setRiskTakenBy('O');
+    setBillToPartyFlag(false);
+    setInsurancePolicyNo('');
+    setInsurancePolicyDate('');
+    setInsuranceAmount('0');
+    setHasMultiInsurance(false);
+    setExtraInsurances([]);
+    setInsuranceStatus('The Customer has not insured the consignment');
     setRemarks('');
     setScannedLrDataUrl('');
+    setOcrMissingFields([]);
     setOcrFyMismatch(null);
   };
 
@@ -735,6 +929,7 @@ const ConsignmentModuleInner: React.FC<ConsignmentModuleProps> = ({
     setEditingId(cn.id);
     setEditingBilled(Boolean(cn.billed));
     setDivision(cn.division === 'LOGISTICS' ? 'LOGISTICS' : 'FTL');
+    if (cn.billedAtBranch) setBilledAtBranch(cn.billedAtBranch);
     setAutoAtomicCn(false);
     setCnNo(cn.cnNo);
     setCnDate(cn.cnDate || todayISO());
@@ -761,19 +956,25 @@ const ConsignmentModuleInner: React.FC<ConsignmentModuleProps> = ({
     setConsigneeAddress(cn.consigneeAddress || '');
     setConsigneeGstin(cn.consigneeGstin || '');
     setPackages(cn.packages || '');
-    setPackageMode(cn.packageMode || 'Bags / Sacks');
+    setPackageMode(cn.packageMode || 'NOS');
     setParticulars(cn.particulars || '');
+    setMultiGoodsItems(cn.multiGoodsItems || []);
+    setHasMultiWeight(Boolean(cn.multiWeights && cn.multiWeights.length > 0));
+    setMultiWeights(cn.multiWeights || []);
     setRateMode(cn.rateMode || 'Fixed Lorry Freight (Lump Sum)');
     setRatePerUnit(cn.ratePerUnit ? String(cn.ratePerUnit) : '');
     setNettWeight(String(cn.nettWeight ?? 0));
     setGrossWeight(String(cn.grossWeight ?? 0));
+    setChargedWeight(String(cn.chargedWeight ?? cn.nettWeight ?? 0));
     setLoadingCharge(String(cn.loadingCharge ?? 0));
     setUnloadingCharge(String(cn.unloadingCharge ?? 0));
     setReturnLorryCharge(String(cn.returnLorryCharge ?? 0));
     setSttCharge(String(cn.sttCharge ?? 0));
+    setOtherCharge(String(cn.otherCharge ?? 0));
     setTotalFreight(String(cn.totalFreight ?? 0));
     setPaidAmount(String(cn.paidAmount ?? 0));
     setToPayAmount(String(cn.toPayAmount ?? 0));
+    setHasVehicleNo(cn.hasVehicleNo !== false && Boolean(cn.truckNo));
     setHasTaxInvoice(cn.hasTaxInvoice !== false);
     setHasMultiEwayBill(Boolean(cn.hasMultiEwayBill || (cn.extraEwayBills && cn.extraEwayBills.length > 0)));
     setHasMultiVehicle(Boolean(cn.hasMultiVehicle || (cn.extraVehicles && cn.extraVehicles.length > 0)));
@@ -797,10 +998,30 @@ const ConsignmentModuleInner: React.FC<ConsignmentModuleProps> = ({
     setEngineNo(cn.engineNo || '');
     setChassisNo(cn.chassisNo || '');
     setOwnerName(cn.ownerName || '');
+    setBrokerName(cn.brokerName || '');
     setDriverName(cn.driverName || '');
     setDriverDlNo(cn.driverDlNo || '');
+    setDriverDlExpiry(cn.driverDlExpiry || '');
+    setDriverMobile(cn.driverMobile || '');
+    setDeliveryModeCode(((cn.deliveryModeCode || 'P') as 'P' | 'G' | 'D'));
     const rawGst = String(cn.gstPaidBy || 'Consignee').trim();
     setGstPaidBy(rawGst.startsWith('Consignee') ? 'Consignee' : rawGst);
+    setGstPaidByCode(
+      ((cn.gstPaidByCode ||
+        (rawGst.toLowerCase().includes('consignor')
+          ? 'R'
+          : rawGst.toLowerCase().includes('transporter')
+            ? 'T'
+            : 'E')) as 'E' | 'R' | 'T')
+    );
+    setRiskTakenBy(((cn.riskTakenBy || 'O') as 'O' | 'C' | 'I'));
+    setBillToPartyFlag(Boolean(cn.billToPartyFlag));
+    setInsurancePolicyNo(cn.insurancePolicyNo || '');
+    setInsurancePolicyDate(cn.insurancePolicyDate || '');
+    setInsuranceAmount(String(cn.insuranceAmount ?? 0));
+    setHasMultiInsurance(Boolean(cn.extraInsurances && cn.extraInsurances.length > 0));
+    setExtraInsurances(cn.extraInsurances || []);
+    setInsuranceStatus(cn.insuranceStatus || 'The Customer has not insured the consignment');
     setRemarks(cn.remarks || '');
     setScannedLrDataUrl(cn.scannedLrDataUrl || '');
     window.scrollTo({ top: 0, behavior: 'smooth' });
@@ -828,9 +1049,11 @@ const ConsignmentModuleInner: React.FC<ConsignmentModuleProps> = ({
     cnDate,
     financialYear: normalizeFyLabel(activeFy),
     division,
+    billedAtBranch: billedAtBranch.trim().slice(0, 80),
     deliveryOffice: deliveryOffice.trim().slice(0, 200),
     stockTransfer,
     billingPartyName: billingPartyName.trim().slice(0, 180),
+    billToPartyFlag,
     creditDays: resolvedCreditDays,
     consignorName: consignorName.trim().slice(0, 180),
     consignorAddress: consignorAddress.trim().slice(0, 350),
@@ -840,21 +1063,58 @@ const ConsignmentModuleInner: React.FC<ConsignmentModuleProps> = ({
     consigneeGstin: consigneeGstin.trim().slice(0, 24),
     packages: packages.trim().slice(0, 40),
     packageMode: packageMode.trim().slice(0, 60),
-    particulars: particulars.trim().slice(0, 400),
+    particulars:
+      packageMode === 'MULTI' && multiGoodsItems.length > 0 && !particulars.trim()
+        ? multiGoodsItems
+            .map((g) => `${g.packages || 1} ${g.packageMode || ''} ${g.description}`.trim())
+            .filter(Boolean)
+            .join('; ')
+            .slice(0, 400)
+        : particulars.trim().slice(0, 400),
+    ...(multiGoodsItems.length > 0
+      ? {
+          multiGoodsItems: multiGoodsItems
+            .filter((g) => g.description.trim() || Number(g.packages) > 0)
+            .slice(0, 50)
+            .map((g) => ({
+              description: g.description.trim().slice(0, 140),
+              packages: Number(g.packages) || 0,
+              packageMode: (g.packageMode || 'NOS').trim().slice(0, 40),
+              weightKg: Number(g.weightKg) || 0,
+              ...(g.hsnCode ? { hsnCode: g.hsnCode.trim().slice(0, 20) } : {}),
+            })),
+        }
+      : {}),
+    ...(hasMultiWeight && multiWeights.length > 0
+      ? {
+          multiWeights: multiWeights
+            .filter((w) => Number(w.actualWeightKg) > 0 || Number(w.chargedWeightKg) > 0)
+            .slice(0, 50)
+            .map((w) => ({
+              label: (w.label || 'Lot').trim().slice(0, 80),
+              actualWeightKg: Number(w.actualWeightKg) || 0,
+              grossWeightKg: Number(w.grossWeightKg) || 0,
+              chargedWeightKg: Number(w.chargedWeightKg) || 0,
+            })),
+        }
+      : {}),
     rateMode: rateMode.trim().slice(0, 80),
     ratePerUnit: Number(ratePerUnit) || 0,
     nettWeight: Number(nettWeight) || 0,
     grossWeight: Number(grossWeight) || 0,
+    chargedWeight: Number(chargedWeight) || Number(nettWeight) || 0,
     loadingCharge: Number(loadingCharge) || 0,
     unloadingCharge: Number(unloadingCharge) || 0,
     returnLorryCharge: Number(returnLorryCharge) || 0,
     sttCharge: Number(sttCharge) || 0,
+    otherCharge: Number(otherCharge) || 0,
     totalFreight: Number(totalFreight) || 0,
     paidAmount: Number(paidAmount) || 0,
     toPayAmount: Number(toPayAmount) || 0,
+    hasVehicleNo,
     hasTaxInvoice,
     hasMultiEwayBill,
-    hasMultiVehicle,
+    hasMultiVehicle: hasVehicleNo && hasMultiVehicle,
     taxInvNo: hasTaxInvoice ? taxInvNo.trim().slice(0, 80) : '',
     taxInvDate: hasTaxInvoice ? taxInvDate.trim().slice(0, 20) : '',
     ewayBillNo: ewayBillNo.trim().slice(0, 60),
@@ -874,24 +1134,48 @@ const ConsignmentModuleInner: React.FC<ConsignmentModuleProps> = ({
             ...(x.validUpto ? { validUpto: x.validUpto.trim() } : {}),
           }))
       : [],
-    extraVehicles: hasMultiVehicle
-      ? extraVehicles.map((v) => v.trim().toUpperCase()).filter(Boolean)
-      : [],
+    extraVehicles:
+      hasVehicleNo && hasMultiVehicle
+        ? extraVehicles.map((v) => v.trim().toUpperCase()).filter(Boolean)
+        : [],
     valueOfGoods: Number(valueOfGoods) || 0,
-    truckNo: truckNo.trim().toUpperCase().slice(0, 30),
+    truckNo: hasVehicleNo ? truckNo.trim().toUpperCase().slice(0, 30) : '',
     fromState: fromState.trim().slice(0, 80),
     fromDistrict: fromDistrict.trim().slice(0, 80),
     fromCity: (fromCity || fromDistrict).trim().slice(0, 120),
     toState: toState.trim().slice(0, 80),
     toDistrict: toDistrict.trim().slice(0, 80),
     toCity: (toCity || toDistrict).trim().slice(0, 120),
-    engineNo: engineNo.trim().slice(0, 40),
-    chassisNo: chassisNo.trim().slice(0, 40),
-    ownerName: ownerName.trim().slice(0, 140),
-    driverName: driverName.trim().slice(0, 140),
-    driverDlNo: driverDlNo.trim().slice(0, 40),
+    engineNo: hasVehicleNo ? engineNo.trim().slice(0, 40) : '',
+    chassisNo: hasVehicleNo ? chassisNo.trim().slice(0, 40) : '',
+    ownerName: hasVehicleNo ? ownerName.trim().slice(0, 140) : '',
+    brokerName: brokerName.trim().slice(0, 140),
+    driverName: hasVehicleNo ? driverName.trim().slice(0, 140) : '',
+    driverDlNo: hasVehicleNo ? driverDlNo.trim().slice(0, 40) : '',
+    driverDlExpiry: hasVehicleNo ? driverDlExpiry.trim().slice(0, 24) : '',
+    driverMobile: hasVehicleNo ? driverMobile.trim().slice(0, 24) : '',
+    deliveryModeCode,
+    gstPaidByCode,
     gstPaidBy: gstPaidBy.slice(0, 40),
-    insuranceStatus: insuranceStatus.slice(0, 80),
+    riskTakenBy,
+    insurancePolicyNo: insurancePolicyNo.trim().slice(0, 60),
+    insurancePolicyDate: insurancePolicyDate.trim().slice(0, 24),
+    insuranceAmount: Number(insuranceAmount) || 0,
+    ...(hasMultiInsurance && extraInsurances.length > 0
+      ? {
+          extraInsurances: extraInsurances
+            .filter((ins) => ins.policyNo.trim() || Number(ins.amount) > 0)
+            .slice(0, 50)
+            .map((ins) => ({
+              policyNo: ins.policyNo.trim().slice(0, 60),
+              policyDate: (ins.policyDate || '').trim().slice(0, 24),
+              amount: Number(ins.amount) || 0,
+            })),
+        }
+      : {}),
+    insuranceStatus: insurancePolicyNo.trim()
+      ? `Insured (Policy: ${insurancePolicyNo.trim()})`
+      : insuranceStatus.slice(0, 80),
     remarks: remarks.trim().slice(0, 1200),
     scannedLrDataUrl: scannedLrDataUrl || '',
     billed: editingBilled,
@@ -904,8 +1188,17 @@ const ConsignmentModuleInner: React.FC<ConsignmentModuleProps> = ({
   const handleSave = async (e: React.FormEvent, andSendToBilling = false) => {
     e.preventDefault();
     if (!validateMandatoryFields()) return;
-    if ((!autoAtomicCn && !cnNo.trim()) || !consignorName.trim() || !consigneeName.trim() || !truckNo.trim()) {
-      setValidationError('Please fill mandatory C/N, Consignor, Consignee, and Primary Truck fields.');
+    if (
+      (!autoAtomicCn && !cnNo.trim()) ||
+      !consignorName.trim() ||
+      !consigneeName.trim() ||
+      (hasVehicleNo && !truckNo.trim())
+    ) {
+      setValidationError(
+        hasVehicleNo
+          ? 'Please fill mandatory C/N, Consignor, Consignee, and Primary Truck fields (or toggle Input Vehicle No? to No).'
+          : 'Please fill mandatory C/N, Consignor, and Consignee fields.'
+      );
       return;
     }
     setSaving(true);
@@ -925,12 +1218,13 @@ const ConsignmentModuleInner: React.FC<ConsignmentModuleProps> = ({
       const id = editingId || makeSafeDocId('cn');
       const payload = buildPayload(finalCnNo);
       await upsertDocument('consignments', id, payload, !editingId);
+      playVerifiedBeep();
 
       await logBranchActivity({
         action: editingId ? 'Updated LR / CN' : 'Created LR / CN',
         module: 'Consignment',
         docRefCode: finalCnNo,
-        summary: `${consignorName.trim()} → ${(toCity || toDistrict).trim()} (Bill To: ${billingPartyName.trim()} · ${resolvedCreditDays}d) · ₹${formatINR(Number(totalFreight) || 0)}`,
+        summary: `${consignorName.trim()} → ${(toCity || toDistrict).trim()} (Billed At: ${billedAtBranch} | Bill To: ${billingPartyName.trim()} · ${resolvedCreditDays}d) · ₹${formatINR(Number(totalFreight) || 0)}`,
         staffCode: activeStaffCode,
         staffName: activeStaffName,
         branchCode: activeBranchCode,
@@ -1188,6 +1482,22 @@ const ConsignmentModuleInner: React.FC<ConsignmentModuleProps> = ({
             </p>
           )}
           {ocrError && <p className="text-xs text-red-600 font-semibold mt-1.5">{ocrError}</p>}
+          {ocrMissingFields.length > 0 && (
+            <div className="mt-2 p-2.5 rounded-lg bg-red-50 border border-red-300 text-xs text-red-900 flex flex-wrap items-center justify-between gap-2">
+              <span className="font-bold flex items-center gap-1.5">
+                <AlertTriangle className="w-4 h-4 text-red-600 shrink-0" />
+                OCR Alert — Verify or Enter Unreadable/Missing Fields:{' '}
+                <span className="underline">{ocrMissingFields.join(', ')}</span>
+              </span>
+              <button
+                type="button"
+                onClick={() => setOcrMissingFields([])}
+                className="px-2 py-0.5 rounded bg-white border border-red-300 text-[10px] font-bold cursor-pointer"
+              >
+                Dismiss
+              </button>
+            </div>
+          )}
           {ocrFyMismatch && (
             <div className="mt-2 p-2.5 rounded-lg bg-amber-50 border border-amber-300 flex flex-wrap items-center justify-between gap-2 text-xs text-amber-950">
               <span className="inline-flex items-center gap-1.5 font-semibold">
@@ -1259,15 +1569,18 @@ const ConsignmentModuleInner: React.FC<ConsignmentModuleProps> = ({
               : `New Consignment Note (Branch: ${activeBranchCode} · ${activeFy})`}
           </span>
           <div className="flex flex-wrap items-center gap-2.5">
-            <select
-              aria-label="Division Selector"
-              value={division}
-              onChange={(e) => setDivision(e.target.value === 'LOGISTICS' ? 'LOGISTICS' : 'FTL')}
-              className="px-2 py-1 rounded bg-white text-[#0D47A1] text-xs font-extrabold cursor-pointer"
-            >
-              <option value="FTL">FTL Division</option>
-              <option value="LOGISTICS">LOGISTICS Division</option>
-            </select>
+            <div className="w-40">
+              <SearchableSelect
+                ariaLabel="Division Selector"
+                value={division}
+                onChange={(val) => setDivision(val === 'LOGISTICS' ? 'LOGISTICS' : 'FTL')}
+                options={[
+                  { value: 'FTL', label: 'FTL Division' },
+                  { value: 'LOGISTICS', label: 'LOGISTICS Division' },
+                ]}
+                buttonClassName="py-1 text-[#0D47A1] font-extrabold"
+              />
+            </div>
             {!editingId && (
               <label className="inline-flex items-center gap-1.5 text-xs font-semibold text-blue-100 cursor-pointer">
                 <input
@@ -1413,25 +1726,26 @@ const ConsignmentModuleInner: React.FC<ConsignmentModuleProps> = ({
               Mandatory Payment Credit Days *
             </label>
             <div className="flex items-center gap-1.5">
-              <select
-                aria-label="Mandatory Payment Credit Days"
+              <SearchableSelect
+                ariaLabel="Mandatory Payment Credit Days"
                 value={creditDaysOption}
-                onChange={(e) => {
-                  setCreditDaysOption(e.target.value);
-                  if (e.target.value) setValidationError(null);
+                onChange={(val) => {
+                  setCreditDaysOption(val);
+                  if (val) setValidationError(null);
                 }}
-                className={`flex-1 px-2.5 py-1.5 rounded border bg-white font-bold text-xs focus:outline-none focus:ring-2 focus:ring-blue-500 ${
+                options={[
+                  { value: '', label: '-- Select Credit Days --' },
+                  ...creditDayPresets.map((days) => ({
+                    value: String(days),
+                    label: `${days} Days Credit`,
+                  })),
+                  { value: 'custom', label: 'Custom Days...' },
+                ]}
+                className="flex-1 min-w-0"
+                buttonClassName={`font-bold ${
                   !resolvedCreditDays ? 'border-amber-400 text-amber-900' : 'border-emerald-400 text-emerald-900'
                 }`}
-              >
-                <option value="">-- Select Credit Days --</option>
-                {creditDayPresets.map((days) => (
-                  <option key={days} value={String(days)}>
-                    {days} Days Credit
-                  </option>
-                ))}
-                <option value="custom">Custom Days...</option>
-              </select>
+              />
               {creditDaysOption === 'custom' && (
                 <input
                   type="number"
@@ -1450,7 +1764,19 @@ const ConsignmentModuleInner: React.FC<ConsignmentModuleProps> = ({
           </div>
         </div>
 
-        <div className="p-4 grid grid-cols-1 md:grid-cols-3 gap-3.5 text-xs">
+        <div className="p-4 grid grid-cols-1 md:grid-cols-4 gap-3.5 text-xs">
+          <div>
+            <label className="block font-semibold text-slate-700 mb-1">
+              Billed At (Branch Link) *
+            </label>
+            <EditableSearchSelect
+              ariaLabel="Billed At Branch"
+              value={billedAtBranch}
+              onChange={setBilledAtBranch}
+              options={branchDropdownOptions}
+              placeholder="Kolkata / Varanasi / Jharkhand..."
+            />
+          </div>
           <div>
             <label className="block font-semibold text-slate-700 mb-1">
               C/N Number {autoAtomicCn && !editingId ? '(Auto Assigned on Save)' : '*'}
@@ -1497,6 +1823,8 @@ const ConsignmentModuleInner: React.FC<ConsignmentModuleProps> = ({
               onDeleteOption={(val) => deleteDropdownItem(ownerUid, company, 'deliveryPlaces', val)}
             />
           </div>
+        </div>
+        <div className="px-4 pb-4 grid grid-cols-1 md:grid-cols-3 gap-3.5 text-xs">
 
           <div>
             <label className="block font-semibold text-slate-700 mb-1">Consignor Name *</label>
@@ -1720,58 +2048,277 @@ const ConsignmentModuleInner: React.FC<ConsignmentModuleProps> = ({
             </div>
           </div>
 
-          {/* Vehicles Row with Multi Vehicle (Yes/No) Toggle Right Beside Truck Field */}
-          <div>
-            <div className="flex items-center justify-between gap-2 mb-1">
-              <label className="font-semibold text-slate-700">Primary Truck No *</label>
-              <div className="inline-flex items-center gap-1">
-                <span className="text-[10px] font-bold text-slate-600">Multi Vehicle:</span>
-                <YesNoSelect
-                  ariaLabel="Multi Vehicle (Yes/No)"
-                  value={hasMultiVehicle}
-                  onChange={(next) => {
-                    setHasMultiVehicle(next);
-                    if (next && extraVehicles.length === 0) {
-                      setExtraVehicles(['']);
-                    }
-                  }}
-                />
+          {/* Vehicles Toggle + Single/Multi-Lorry & Driver Auto-Fill */}
+          <div className="md:col-span-3 p-3 rounded-lg bg-slate-50 border border-slate-200 space-y-2.5">
+            <div className="flex flex-wrap items-center justify-between gap-2">
+              <div className="flex flex-wrap items-center gap-3">
+                <div className="inline-flex items-center gap-1.5">
+                  <span className="font-bold text-slate-800">Input Vehicle No.?</span>
+                  <YesNoSelect
+                    ariaLabel="Input Vehicle No Yes or No"
+                    value={hasVehicleNo}
+                    onChange={(next) => setHasVehicleNo(next)}
+                  />
+                </div>
+                {hasVehicleNo && (
+                  <div className="inline-flex items-center gap-1.5">
+                    <span className="font-bold text-slate-700">Multi-Lorry:</span>
+                    <YesNoSelect
+                      ariaLabel="Multi Lorry Yes or No"
+                      value={hasMultiVehicle}
+                      onChange={(next) => {
+                        setHasMultiVehicle(next);
+                        if (next && extraVehicles.length === 0) {
+                          setExtraVehicles(['']);
+                        }
+                      }}
+                    />
+                  </div>
+                )}
+                <div className="inline-flex items-center gap-1.5">
+                  <span className="font-bold text-slate-700">Bill-To Party Flag [P]:</span>
+                  <YesNoSelect
+                    ariaLabel="Bill To Party Flag P"
+                    value={billToPartyFlag}
+                    onChange={setBillToPartyFlag}
+                  />
+                </div>
               </div>
+              {!hasVehicleNo && (
+                <span className="text-[11px] font-bold text-emerald-700">
+                  Vehicle fields hidden — ready for instant save without Truck No.
+                </span>
+              )}
             </div>
-            <RichEntityPicker<Vehicle>
-              ariaLabel="Primary Truck No"
-              value={truckNo}
-              selectedId={selectedVehicleId}
-              onChangeText={(val) => handleSelectVehicle(val)}
-              onSelectEntity={(v) => handleSelectVehicleEntity(v)}
-              items={vehicles}
-              getId={(v) => v.id}
-              getValue={(v) => v.truckNo}
-              getSearchText={(v) =>
-                `${v.truckNo} ${v.ownerName || ''} ${v.vehicleType || ''} ${v.ownerPhone || ''}`
-              }
-              renderTitle={(v) => v.truckNo}
-              renderBadge={(v) => v.vehicleType || 'Truck'}
-              renderDetails={(v) => formatVehicleDetailsLine(v)}
-              placeholder="WB51B0800 — Search Truck, Owner or Capacity..."
-              required
-              uppercase
-              inputClassName="font-mono-num"
-              quickPreview={(() => {
-                const clean = truckNo.trim().toUpperCase();
-                if (!clean) return null;
-                const resolved =
-                  (selectedVehicleId
-                    ? vehicles.find((v) => v.id === selectedVehicleId)
-                    : undefined) ||
-                  vehicles.find((v) => v.truckNo.trim().toUpperCase() === clean);
-                return <EntityQuickPreviewCard kind="vehicle" vehicle={resolved} />;
-              })()}
+
+            {hasVehicleNo && (
+              <div className="grid grid-cols-1 md:grid-cols-3 gap-3">
+                <div>
+                  <label className="block font-semibold text-slate-700 mb-1">Primary Truck No *</label>
+                  <RichEntityPicker<Vehicle>
+                    ariaLabel="Primary Truck No"
+                    value={truckNo}
+                    selectedId={selectedVehicleId}
+                    onChangeText={(val) => handleSelectVehicle(val)}
+                    onSelectEntity={(v) => handleSelectVehicleEntity(v)}
+                    items={vehicles}
+                    getId={(v) => v.id}
+                    getValue={(v) => v.truckNo}
+                    getSearchText={(v) =>
+                      `${v.truckNo} ${v.ownerName || ''} ${v.vehicleMake || ''} ${v.bodyType || ''} ${v.vehicleType || ''} ${v.ownerPhone || ''}`
+                    }
+                    renderTitle={(v) => v.truckNo}
+                    renderBadge={(v) => v.vehicleMake || v.bodyType || v.vehicleType || 'Truck'}
+                    renderDetails={(v) => formatVehicleDetailsLine(v)}
+                    placeholder="WB51B0800 — Search Truck, Owner, Make or Body..."
+                    required={hasVehicleNo}
+                    uppercase
+                    inputClassName="font-mono-num"
+                    quickPreview={(() => {
+                      const clean = truckNo.trim().toUpperCase();
+                      if (!clean) return null;
+                      const resolved =
+                        (selectedVehicleId
+                          ? vehicles.find((v) => v.id === selectedVehicleId)
+                          : undefined) ||
+                        vehicles.find((v) => v.truckNo.trim().toUpperCase() === clean);
+                      return <EntityQuickPreviewCard kind="vehicle" vehicle={resolved} />;
+                    })()}
+                  />
+                </div>
+
+                <div>
+                  <label className="block font-semibold text-slate-700 mb-1">
+                    Owner Name <span className="text-[10px] text-slate-500">(Vehicle Owner)</span>
+                  </label>
+                  <RichEntityPicker<Party>
+                    ariaLabel="Owner Name"
+                    value={ownerName}
+                    selectedId={selectedOwnerId}
+                    onChangeText={(val) => {
+                      setOwnerName(val);
+                      const clean = val.trim().toLowerCase();
+                      const matches = ownerAndBrokerParties.filter(
+                        (p) => p.name.trim().toLowerCase() === clean
+                      );
+                      setSelectedOwnerId(matches.length === 1 ? matches[0].id : '');
+                    }}
+                    onSelectEntity={(p) => {
+                      setOwnerName(p.name);
+                      setSelectedOwnerId(p.id);
+                    }}
+                    items={ownerAndBrokerParties}
+                    getId={(p) => p.id}
+                    getValue={(p) => p.name}
+                    getSearchText={(p) =>
+                      `${p.name} ${p.pan || ''} ${p.phone || ''} ${p.address || ''} ${p.partyType}`
+                    }
+                    renderTitle={(p) => p.name}
+                    renderBadge={(p) => p.partyType}
+                    renderDetails={(p) => formatPartyDetailsLine(p)}
+                    placeholder="Search Lorry Owner..."
+                    quickPreview={(() => {
+                      const clean = ownerName.trim().toLowerCase();
+                      if (!clean) return null;
+                      const matches = ownerAndBrokerParties.filter(
+                        (p) => p.name.trim().toLowerCase() === clean
+                      );
+                      const resolved =
+                        (selectedOwnerId
+                          ? ownerAndBrokerParties.find((p) => p.id === selectedOwnerId)
+                          : undefined) ||
+                        (matches.length === 1 ? matches[0] : matches[0]);
+                      return (
+                        <EntityQuickPreviewCard
+                          kind="owner"
+                          party={resolved}
+                          duplicateCount={matches.length}
+                          ambiguousSelected={matches.length > 1 && !selectedOwnerId}
+                          compact
+                        />
+                      );
+                    })()}
+                  />
+                </div>
+
+                <div>
+                  <label className="block font-semibold text-slate-700 mb-1">
+                    Driver Name <span className="text-[10px] text-emerald-700">(Auto-Fills DL &amp; Mobile)</span>
+                  </label>
+                  <RichEntityPicker<Driver>
+                    ariaLabel="Driver Name"
+                    value={driverName}
+                    selectedId={selectedDriverId}
+                    onChangeText={(val) => handleSelectDriver(val)}
+                    onSelectEntity={(d) => handleSelectDriverEntity(d)}
+                    items={drivers}
+                    getId={(d) => d.id}
+                    getValue={(d) => d.name}
+                    getSearchText={(d) => `${d.name} ${d.dlNo || ''} ${d.phone || ''}`}
+                    renderTitle={(d) => d.name}
+                    renderDetails={(d) => formatDriverDetailsLine(d)}
+                    placeholder="Search Driver by Name, D/L No or Mobile..."
+                    quickPreview={(() => {
+                      const clean = driverName.trim().toLowerCase();
+                      if (!clean) return null;
+                      const matches = drivers.filter((d) => d.name.trim().toLowerCase() === clean);
+                      const resolved =
+                        (selectedDriverId
+                          ? drivers.find((d) => d.id === selectedDriverId)
+                          : undefined) ||
+                        (matches.length === 1 ? matches[0] : matches[0]);
+                      return (
+                        <EntityQuickPreviewCard
+                          kind="driver"
+                          driver={resolved}
+                          duplicateCount={matches.length}
+                          compact
+                        />
+                      );
+                    })()}
+                  />
+                </div>
+
+                <div>
+                  <label className="block font-semibold text-slate-700 mb-1">Driver D/L No</label>
+                  <input
+                    type="text"
+                    value={driverDlNo}
+                    onChange={(e) => setDriverDlNo(e.target.value.toUpperCase())}
+                    className="w-full px-2.5 py-1.5 rounded border border-slate-300 bg-white font-mono-num uppercase"
+                  />
+                </div>
+                <div>
+                  <label className="block font-semibold text-slate-700 mb-1">Driver D/L Validity</label>
+                  <input
+                    type="date"
+                    value={driverDlExpiry}
+                    onChange={(e) => setDriverDlExpiry(e.target.value)}
+                    className="w-full px-2.5 py-1.5 rounded border border-slate-300 bg-white font-mono-num"
+                  />
+                </div>
+                <div>
+                  <label className="block font-semibold text-slate-700 mb-1">Driver Mobile</label>
+                  <input
+                    type="text"
+                    value={driverMobile}
+                    onChange={(e) => setDriverMobile(e.target.value)}
+                    placeholder="10-digit Mobile"
+                    className="w-full px-2.5 py-1.5 rounded border border-slate-300 bg-white font-mono-num"
+                  />
+                </div>
+              </div>
+            )}
+          </div>
+
+          {/* Searchable Broker Master + Short-Code Selectors [P/G/D], [R/E/T], [O/C/I] */}
+          <div>
+            <label className="block font-semibold text-slate-700 mb-1">Broker (A-Z Broker Master)</label>
+            <RichEntityPicker<Party>
+              ariaLabel="Broker Name"
+              value={brokerName}
+              selectedId={selectedBrokerId}
+              onChangeText={(val) => {
+                setBrokerName(val);
+                const matches = brokerMasterParties.filter(
+                  (p) => p.name.trim().toLowerCase() === val.trim().toLowerCase()
+                );
+                setSelectedBrokerId(matches.length === 1 ? matches[0].id : '');
+              }}
+              onSelectEntity={(b) => {
+                setBrokerName(b.name);
+                setSelectedBrokerId(b.id);
+              }}
+              items={brokerMasterParties}
+              getId={(b) => b.id}
+              getValue={(b) => b.name}
+              getSearchText={(b) => `${b.name} ${b.pan || ''} ${b.phone || ''} ${b.address || ''}`}
+              renderTitle={(b) => b.name}
+              renderBadge={(b) => b.pan || 'Broker'}
+              renderDetails={(b) => formatPartyDetailsLine(b)}
+              placeholder="Search Broker by Name, PAN or Mobile..."
             />
           </div>
 
           <div>
-            <label className="block font-semibold text-slate-700 mb-1">No. of Packages &amp; Mode</label>
+            <label className="block font-semibold text-slate-700 mb-1">
+              Mode of Delivery [P / G / D] &amp; Risk [O / C / I]
+            </label>
+            <div className="grid grid-cols-2 gap-1.5">
+              <SearchableSelect
+                ariaLabel="Mode of Delivery P G D"
+                value={deliveryModeCode}
+                onChange={(val) => setDeliveryModeCode((val || 'P') as 'P' | 'G' | 'D')}
+                options={DELIVERY_MODE_CODES.map((c) => ({ value: c.code, label: c.label }))}
+              />
+              <SearchableSelect
+                ariaLabel="Risk Taken By O C I"
+                value={riskTakenBy}
+                onChange={(val) => setRiskTakenBy((val || 'O') as 'O' | 'C' | 'I')}
+                options={RISK_TYPE_CODES.map((c) => ({ value: c.code, label: c.label }))}
+              />
+            </div>
+          </div>
+
+          <div>
+            <label className="block font-semibold text-slate-700 mb-1">GST Paid By [R / E / T]</label>
+            <SearchableSelect
+              ariaLabel="GST Paid By R E T"
+              value={gstPaidByCode}
+              onChange={(val) => {
+                const code = (val || 'E') as 'R' | 'E' | 'T';
+                setGstPaidByCode(code);
+                setGstPaidBy(code === 'R' ? 'Consignor' : code === 'T' ? 'Transporter' : 'Consignee');
+              }}
+              options={GST_PAID_BY_CODES.map((c) => ({ value: c.code, label: c.label }))}
+            />
+          </div>
+
+          {/* Package Count & Mode (Supports MULTI) */}
+          <div>
+            <label className="block font-semibold text-slate-700 mb-1">
+              No. of Packages &amp; Packing Mode
+            </label>
             <div className="grid grid-cols-2 gap-1.5">
               <input
                 type="text"
@@ -1783,9 +2330,14 @@ const ConsignmentModuleInner: React.FC<ConsignmentModuleProps> = ({
               <EditableSearchSelect
                 ariaLabel="Package Mode"
                 value={packageMode}
-                onChange={setPackageMode}
+                onChange={(val) => {
+                  setPackageMode(val);
+                  if (val === 'MULTI' && multiGoodsItems.length === 0) {
+                    setMultiGoodsItems([{ description: particulars || '', packages: Number(packages) || 1, packageMode: 'BOXES', weightKg: 0 }]);
+                  }
+                }}
                 options={packageModeOptions}
-                placeholder="Package Mode"
+                placeholder="NOS / BOXES / MULTI..."
                 onAddOption={(val) => addDropdownItem(ownerUid, company, 'packageModes', val)}
                 onEditOption={(oldV, newV) => editDropdownItem(ownerUid, company, 'packageModes', oldV, newV)}
                 onDeleteOption={(val) => deleteDropdownItem(ownerUid, company, 'packageModes', val)}
@@ -1795,20 +2347,249 @@ const ConsignmentModuleInner: React.FC<ConsignmentModuleProps> = ({
 
           <div>
             <label className="block font-semibold text-slate-700 mb-1">
-              Non-Liquid Goods / Particulars (All-India)
+              Goods Description / Particulars (All-India or MULTI)
             </label>
             <EditableSearchSelect
               ariaLabel="Non-Liquid Goods Description"
               value={particulars}
-              onChange={setParticulars}
+              onChange={(val) => {
+                setParticulars(val);
+                if (val === 'MULTI') {
+                  setPackageMode('MULTI');
+                  if (multiGoodsItems.length === 0) {
+                    setMultiGoodsItems([{ description: '', packages: 1, packageMode: 'BOXES', weightKg: 0 }]);
+                  }
+                }
+              }}
               options={goodsOptions}
-              placeholder="Search Tea, Steel, Pipes, Machinery..."
+              placeholder="Search Tea, Steel, Pipes, Machinery or MULTI..."
               onAddOption={(val) => addDropdownItem(ownerUid, company, 'goodsTypes', val)}
               onEditOption={(oldV, newV) => editDropdownItem(ownerUid, company, 'goodsTypes', oldV, newV)}
               onDeleteOption={(val) => deleteDropdownItem(ownerUid, company, 'goodsTypes', val)}
             />
           </div>
 
+          <div>
+            <label className="block font-semibold text-slate-700 mb-1">
+              Weights — Actual / Gross / Charged (MT or Kg)
+            </label>
+            <div className="grid grid-cols-3 gap-1">
+              <input
+                type="number"
+                step="0.001"
+                value={nettWeight}
+                onChange={(e) => {
+                  const nextWt = e.target.value;
+                  setNettWeight(nextWt);
+                  if (!chargedWeight || chargedWeight === '0') setChargedWeight(nextWt);
+                  recomputeTotalFreight(rateMode, ratePerUnit, nextWt, chargedWeight || nextWt, otherCharge, loadingCharge, unloadingCharge, returnLorryCharge, sttCharge, paidAmount);
+                }}
+                placeholder="Actual"
+                title="Actual / Nett Weight"
+                className="w-full px-2 py-1.5 rounded border border-slate-300 font-mono-num"
+              />
+              <input
+                type="number"
+                step="0.001"
+                value={grossWeight}
+                onChange={(e) => setGrossWeight(e.target.value)}
+                placeholder="Gross"
+                title="Gross Weight"
+                className="w-full px-2 py-1.5 rounded border border-slate-300 font-mono-num"
+              />
+              <input
+                type="number"
+                step="0.001"
+                value={chargedWeight}
+                onChange={(e) => {
+                  const cw = e.target.value;
+                  setChargedWeight(cw);
+                  recomputeTotalFreight(rateMode, ratePerUnit, nettWeight, cw, otherCharge, loadingCharge, unloadingCharge, returnLorryCharge, sttCharge, paidAmount);
+                }}
+                placeholder="Charged"
+                title="Charged Weight"
+                className="w-full px-2 py-1.5 rounded border border-blue-300 bg-blue-50/40 font-mono-num font-semibold"
+              />
+            </div>
+          </div>
+
+          {/* Dynamic Multi-Goods Table (when Package Mode / Goods = MULTI) */}
+          {(packageMode === 'MULTI' || particulars === 'MULTI' || multiGoodsItems.length > 0) && (
+            <div className="md:col-span-3 p-3 rounded-lg bg-indigo-50/60 border border-indigo-200 space-y-2">
+              <div className="flex flex-wrap items-center justify-between gap-2">
+                <span className="font-bold text-indigo-950">
+                  Multi-Goods / Mixed Consignment Schedule ({multiGoodsItems.length} rows — up to 50 items)
+                </span>
+                <button
+                  type="button"
+                  onClick={() =>
+                    setMultiGoodsItems((prev) =>
+                      prev.length < 50
+                        ? [...prev, { description: '', packages: 1, packageMode: 'BOXES', weightKg: 0 }]
+                        : prev
+                    )
+                  }
+                  className="inline-flex items-center gap-1 px-2.5 py-1 rounded bg-indigo-700 hover:bg-indigo-800 text-white text-[11px] font-bold cursor-pointer"
+                >
+                  <Plus className="w-3 h-3" /> Add Item Row
+                </button>
+              </div>
+              <div className="space-y-1.5 max-h-60 overflow-y-auto">
+                {multiGoodsItems.map((item, idx) => (
+                  <div key={idx} className="grid grid-cols-1 sm:grid-cols-12 gap-1.5 bg-white p-1.5 rounded border border-indigo-100">
+                    <input
+                      type="number"
+                      value={item.packages}
+                      onChange={(e) =>
+                        setMultiGoodsItems((prev) =>
+                          prev.map((r, i) => (i === idx ? { ...r, packages: Number(e.target.value) || 0 } : r))
+                        )
+                      }
+                      placeholder="Pkgs"
+                      className="sm:col-span-2 px-2 py-1 rounded border border-slate-300 font-mono-num"
+                    />
+                    <input
+                      type="text"
+                      value={item.packageMode}
+                      onChange={(e) =>
+                        setMultiGoodsItems((prev) =>
+                          prev.map((r, i) => (i === idx ? { ...r, packageMode: e.target.value.toUpperCase() } : r))
+                        )
+                      }
+                      placeholder="Mode (BOX/BAG)"
+                      className="sm:col-span-2 px-2 py-1 rounded border border-slate-300 uppercase"
+                    />
+                    <input
+                      type="text"
+                      value={item.description}
+                      onChange={(e) =>
+                        setMultiGoodsItems((prev) =>
+                          prev.map((r, i) => (i === idx ? { ...r, description: e.target.value } : r))
+                        )
+                      }
+                      placeholder={`Item #${idx + 1} Description`}
+                      className="sm:col-span-5 px-2 py-1 rounded border border-slate-300"
+                    />
+                    <input
+                      type="number"
+                      step="0.01"
+                      value={item.weightKg}
+                      onChange={(e) =>
+                        setMultiGoodsItems((prev) =>
+                          prev.map((r, i) => (i === idx ? { ...r, weightKg: Number(e.target.value) || 0 } : r))
+                        )
+                      }
+                      placeholder="Wt (Kg)"
+                      className="sm:col-span-2 px-2 py-1 rounded border border-slate-300 font-mono-num"
+                    />
+                    <button
+                      type="button"
+                      onClick={() => setMultiGoodsItems((prev) => prev.filter((_, i) => i !== idx))}
+                      className="sm:col-span-1 text-red-600 font-bold cursor-pointer"
+                    >
+                      ×
+                    </button>
+                  </div>
+                ))}
+              </div>
+            </div>
+          )}
+
+          {/* Dynamic Multi-Weight Split Form (Mixed 1kg - 5,000kg) */}
+          <div className="md:col-span-3 flex flex-wrap items-center justify-between gap-2 px-3 py-2 rounded-lg bg-slate-50 border border-slate-200">
+            <div className="inline-flex items-center gap-2">
+              <span className="font-bold text-slate-800">Multi-Weight Schedule (Mixed 1 kg – 5,000 kg):</span>
+              <YesNoSelect
+                ariaLabel="Multi Weight Yes or No"
+                value={hasMultiWeight}
+                onChange={(next) => {
+                  setHasMultiWeight(next);
+                  if (next && multiWeights.length === 0) {
+                    setMultiWeights([{ label: 'Lot 1', actualWeightKg: 0, grossWeightKg: 0, chargedWeightKg: 0 }]);
+                  }
+                }}
+              />
+            </div>
+            {hasMultiWeight && (
+              <button
+                type="button"
+                onClick={() =>
+                  setMultiWeights((prev) => [
+                    ...prev,
+                    { label: `Lot ${prev.length + 1}`, actualWeightKg: 0, grossWeightKg: 0, chargedWeightKg: 0 },
+                  ])
+                }
+                className="inline-flex items-center gap-1 px-2.5 py-1 rounded bg-white border border-slate-300 hover:bg-blue-50 text-blue-800 text-[11px] font-bold cursor-pointer"
+              >
+                <Plus className="w-3 h-3" /> Add Weight Split
+              </button>
+            )}
+          </div>
+          {hasMultiWeight && multiWeights.length > 0 && (
+            <div className="md:col-span-3 grid grid-cols-1 sm:grid-cols-2 md:grid-cols-3 gap-2">
+              {multiWeights.map((mw, idx) => (
+                <div key={idx} className="p-2 rounded border border-slate-300 bg-white space-y-1">
+                  <div className="flex items-center justify-between gap-1">
+                    <input
+                      type="text"
+                      value={mw.label}
+                      onChange={(e) =>
+                        setMultiWeights((prev) =>
+                          prev.map((x, i) => (i === idx ? { ...x, label: e.target.value } : x))
+                        )
+                      }
+                      placeholder="Lot / Size Label"
+                      className="flex-1 text-xs font-semibold border-b border-slate-200 focus:outline-none"
+                    />
+                    <button
+                      type="button"
+                      onClick={() => setMultiWeights((prev) => prev.filter((_, i) => i !== idx))}
+                      className="text-red-600 text-xs font-bold cursor-pointer"
+                    >
+                      ×
+                    </button>
+                  </div>
+                  <div className="grid grid-cols-3 gap-1 text-[11px]">
+                    <input
+                      type="number"
+                      value={mw.actualWeightKg}
+                      onChange={(e) =>
+                        setMultiWeights((prev) =>
+                          prev.map((x, i) => (i === idx ? { ...x, actualWeightKg: Number(e.target.value) || 0 } : x))
+                        )
+                      }
+                      placeholder="Act Kg"
+                      className="px-1.5 py-1 rounded border border-slate-200 font-mono-num"
+                    />
+                    <input
+                      type="number"
+                      value={mw.grossWeightKg}
+                      onChange={(e) =>
+                        setMultiWeights((prev) =>
+                          prev.map((x, i) => (i === idx ? { ...x, grossWeightKg: Number(e.target.value) || 0 } : x))
+                        )
+                      }
+                      placeholder="Grs Kg"
+                      className="px-1.5 py-1 rounded border border-slate-200 font-mono-num"
+                    />
+                    <input
+                      type="number"
+                      value={mw.chargedWeightKg}
+                      onChange={(e) =>
+                        setMultiWeights((prev) =>
+                          prev.map((x, i) => (i === idx ? { ...x, chargedWeightKg: Number(e.target.value) || 0 } : x))
+                        )
+                      }
+                      placeholder="Chg Kg"
+                      className="px-1.5 py-1 rounded border border-blue-200 font-mono-num font-bold"
+                    />
+                  </div>
+                </div>
+              ))}
+            </div>
+          )}
+
+          {/* Rate Mode + Others Charge + Total Freight */}
           <div>
             <label className="block font-semibold text-slate-700 mb-1">Rate Mode &amp; Rate (₹)</label>
             <div className="grid grid-cols-3 gap-1.5">
@@ -1818,16 +2599,10 @@ const ConsignmentModuleInner: React.FC<ConsignmentModuleProps> = ({
                   value={rateMode}
                   onChange={(nextMode) => {
                     setRateMode(nextMode);
-                    const rateNum = Number(ratePerUnit);
-                    const wt = Number(nettWeight) || Number(grossWeight) || 0;
-                    if (Number.isFinite(rateNum) && rateNum > 0 && /ton|mt/i.test(nextMode) && wt > 0) {
-                      const calc = Math.round(rateNum * wt * 100) / 100;
-                      setTotalFreight(String(calc));
-                      setToPayAmount(String(Math.max(0, calc - (Number(paidAmount) || 0))));
-                    }
+                    recomputeTotalFreight(nextMode, ratePerUnit, nettWeight, chargedWeight, otherCharge, loadingCharge, unloadingCharge, returnLorryCharge, sttCharge, paidAmount);
                   }}
                   options={rateModeOptions}
-                  placeholder="Fixed / Per MT"
+                  placeholder="Fixed / Per MT / Per Kg"
                   onAddOption={(val) => addDropdownItem(ownerUid, company, 'rateModes', val)}
                   onEditOption={(oldV, newV) => editDropdownItem(ownerUid, company, 'rateModes', oldV, newV)}
                   onDeleteOption={(val) => deleteDropdownItem(ownerUid, company, 'rateModes', val)}
@@ -1840,13 +2615,7 @@ const ConsignmentModuleInner: React.FC<ConsignmentModuleProps> = ({
                 onChange={(e) => {
                   const r = e.target.value;
                   setRatePerUnit(r);
-                  const rateNum = Number(r);
-                  const wt = Number(nettWeight) || Number(grossWeight) || 0;
-                  if (Number.isFinite(rateNum) && rateNum > 0 && /ton|mt/i.test(rateMode) && wt > 0) {
-                    const calc = Math.round(rateNum * wt * 100) / 100;
-                    setTotalFreight(String(calc));
-                    setToPayAmount(String(Math.max(0, calc - (Number(paidAmount) || 0))));
-                  }
+                  recomputeTotalFreight(rateMode, r, nettWeight, chargedWeight, otherCharge, loadingCharge, unloadingCharge, returnLorryCharge, sttCharge, paidAmount);
                 }}
                 placeholder="Rate ₹"
                 className="w-full px-2 py-1.5 rounded border border-slate-300 font-mono-num"
@@ -1855,55 +2624,52 @@ const ConsignmentModuleInner: React.FC<ConsignmentModuleProps> = ({
           </div>
 
           <div>
-            <label className="block font-semibold text-slate-700 mb-1">Nett / Gross Weight (MT)</label>
-            <div className="grid grid-cols-2 gap-1.5">
-              <input
-                type="number"
-                step="0.001"
-                value={nettWeight}
-                onChange={(e) => {
-                  const nextWt = e.target.value;
-                  setNettWeight(nextWt);
-                  const rateNum = Number(ratePerUnit);
-                  const wtNum = Number(nextWt);
-                  if (Number.isFinite(rateNum) && rateNum > 0 && /ton|mt/i.test(rateMode) && wtNum > 0) {
-                    const calc = Math.round(rateNum * wtNum * 100) / 100;
-                    setTotalFreight(String(calc));
-                    setToPayAmount(String(Math.max(0, calc - (Number(paidAmount) || 0))));
-                  }
-                }}
-                placeholder="Nett MT"
-                className="w-full px-2.5 py-1.5 rounded border border-slate-300 font-mono-num"
-              />
-              <input
-                type="number"
-                step="0.001"
-                value={grossWeight}
-                onChange={(e) => setGrossWeight(e.target.value)}
-                placeholder="Gross MT"
-                className="w-full px-2.5 py-1.5 rounded border border-slate-300 font-mono-num"
-              />
-            </div>
+            <label className="block font-semibold text-slate-700 mb-1">Others Charge (₹) (+ Auto Total)</label>
+            <input
+              type="number"
+              step="0.01"
+              value={otherCharge}
+              onChange={(e) => {
+                const oth = e.target.value;
+                setOtherCharge(oth);
+                recomputeTotalFreight(rateMode, ratePerUnit, nettWeight, chargedWeight, oth, loadingCharge, unloadingCharge, returnLorryCharge, sttCharge, paidAmount);
+              }}
+              placeholder="0.00"
+              className="w-full px-2.5 py-1.5 rounded border border-slate-300 font-mono-num"
+            />
           </div>
 
           <div>
-            <label className="block font-semibold text-slate-700 mb-1">Total Freight (₹) *</label>
+            <label className="block font-semibold text-slate-700 mb-1">
+              Total Freight Cost (₹) *
+              {highlightFreightWarning && (
+                <span className="ml-1.5 px-1.5 py-0.5 rounded bg-red-600 text-white text-[10px] font-extrabold">
+                  Domestic Blank — Enter Freight!
+                </span>
+              )}
+            </label>
             <input
+              ref={totalFreightInputRef}
               type="number"
               step="0.01"
               required
               value={totalFreight}
               onChange={(e) => {
                 setTotalFreight(e.target.value);
+                setHighlightFreightWarning(false);
                 const f = Number(e.target.value) || 0;
                 const p = Number(paidAmount) || 0;
                 setToPayAmount(String(Math.max(0, f - p)));
               }}
-              className="w-full px-2.5 py-1.5 rounded border border-slate-300 font-mono-num font-bold text-blue-800"
+              className={`w-full px-2.5 py-1.5 rounded font-mono-num font-bold transition-all ${
+                highlightFreightWarning
+                  ? 'border-2 border-red-600 bg-yellow-100 ring-2 ring-red-400 text-red-900'
+                  : 'border border-slate-300 text-blue-800'
+              }`}
             />
           </div>
 
-          {/* Attached Tax Invoice (Yes/No) + Multi E-Way Bill (Yes/No) + Value of Goods */}
+          {/* Attached Tax Invoice (Yes/No) + Multi E-Way Bill (Yes/No) */}
           <div>
             <div className="flex items-center justify-between gap-2 mb-1">
               <label className="font-semibold text-slate-700">Attached Tax Inv. / Challan</label>
@@ -1920,20 +2686,29 @@ const ConsignmentModuleInner: React.FC<ConsignmentModuleProps> = ({
                 }}
               />
             </div>
-            <input
-              type="text"
-              disabled={!hasTaxInvoice}
-              value={hasTaxInvoice ? taxInvNo : 'NO TAX INVOICE ATTACHED'}
-              onChange={(e) => setTaxInvNo(e.target.value)}
-              placeholder="Tax Invoice / Challan No"
-              className="w-full px-2.5 py-1.5 rounded border border-slate-300 font-mono-num disabled:bg-slate-100 disabled:text-slate-500"
-            />
+            <div className="grid grid-cols-2 gap-1.5">
+              <input
+                type="text"
+                disabled={!hasTaxInvoice}
+                value={hasTaxInvoice ? taxInvNo : 'NO TAX INV'}
+                onChange={(e) => setTaxInvNo(e.target.value)}
+                placeholder="Tax Invoice No"
+                className="w-full px-2.5 py-1.5 rounded border border-slate-300 font-mono-num disabled:bg-slate-100 disabled:text-slate-500"
+              />
+              <input
+                type="date"
+                disabled={!hasTaxInvoice}
+                value={taxInvDate}
+                onChange={(e) => setTaxInvDate(e.target.value)}
+                className="w-full px-2 py-1.5 rounded border border-slate-300 font-mono-num disabled:bg-slate-100"
+              />
+            </div>
           </div>
 
           <div className="md:col-span-2 p-2.5 rounded-lg bg-slate-50 border border-slate-200 space-y-2">
             <div className="flex flex-wrap items-center justify-between gap-2">
               <div className="flex items-center gap-2">
-                <label className="font-bold text-slate-800">E-Way Bill Tracker</label>
+                <label className="font-bold text-slate-800">E-Way Bill Master Link ({autoAtomicCn && !editingId ? 'Auto CN' : cnNo})</label>
                 {ewayBillValidUpto && (() => {
                   const st = getEwayBillExpiryState(ewayBillValidUpto);
                   return (
@@ -1977,7 +2752,7 @@ const ConsignmentModuleInner: React.FC<ConsignmentModuleProps> = ({
                   <span>NIC Portal</span>
                   <ExternalLink className="w-2.5 h-2.5" />
                 </a>
-                <span className="text-[10px] font-bold text-slate-600 ml-1">Multi EWB:</span>
+                <span className="text-[10px] font-bold text-slate-600 ml-1">Multi EWB (1-10+):</span>
                 <YesNoSelect
                   ariaLabel="Multi E-Way Bill (Yes/No)"
                   value={hasMultiEwayBill}
@@ -1995,7 +2770,7 @@ const ConsignmentModuleInner: React.FC<ConsignmentModuleProps> = ({
                 type="text"
                 value={ewayBillNo}
                 onChange={(e) => setEwayBillNo(e.target.value)}
-                placeholder="12-Digit E-Way Bill No"
+                placeholder="Primary 12-Digit EWB No"
                 className="w-full px-2.5 py-1.5 rounded border border-slate-300 bg-white font-mono-num"
               />
               <input
@@ -2020,6 +2795,7 @@ const ConsignmentModuleInner: React.FC<ConsignmentModuleProps> = ({
             )}
           </div>
 
+          {/* Insurance Details (Single + Multi) & Value of Goods */}
           <div>
             <label className="block font-semibold text-slate-700 mb-1">Value of Goods (₹)</label>
             <input
@@ -2031,114 +2807,108 @@ const ConsignmentModuleInner: React.FC<ConsignmentModuleProps> = ({
             />
           </div>
 
-          <div>
-            <label className="block font-semibold text-slate-700 mb-1">Owner Name</label>
-            <RichEntityPicker<Party>
-              ariaLabel="Owner Name"
-              value={ownerName}
-              selectedId={selectedOwnerId}
-              onChangeText={(val) => {
-                setOwnerName(val);
-                const clean = val.trim().toLowerCase();
-                const matches = ownerAndBrokerParties.filter(
-                  (p) => p.name.trim().toLowerCase() === clean
-                );
-                setSelectedOwnerId(matches.length === 1 ? matches[0].id : '');
-              }}
-              onSelectEntity={(p) => {
-                setOwnerName(p.name);
-                setSelectedOwnerId(p.id);
-              }}
-              items={ownerAndBrokerParties}
-              getId={(p) => p.id}
-              getValue={(p) => p.name}
-              getSearchText={(p) =>
-                `${p.name} ${p.pan || ''} ${p.phone || ''} ${p.address || ''} ${p.partyType}`
-              }
-              renderTitle={(p) => p.name}
-              renderBadge={(p) => p.partyType}
-              renderDetails={(p) => formatPartyDetailsLine(p)}
-              placeholder="Search Lorry Owner / Broker by Name, PAN, Mobile or City..."
-              quickPreview={(() => {
-                const clean = ownerName.trim().toLowerCase();
-                if (!clean) return null;
-                const matches = ownerAndBrokerParties.filter(
-                  (p) => p.name.trim().toLowerCase() === clean
-                );
-                const resolved =
-                  (selectedOwnerId
-                    ? ownerAndBrokerParties.find((p) => p.id === selectedOwnerId)
-                    : undefined) ||
-                  (matches.length === 1 ? matches[0] : matches[0]);
-                return (
-                  <EntityQuickPreviewCard
-                    kind="owner"
-                    party={resolved}
-                    duplicateCount={matches.length}
-                    ambiguousSelected={matches.length > 1 && !selectedOwnerId}
-                    compact
-                  />
-                );
-              })()}
-            />
-          </div>
-          <div>
-            <label className="block font-semibold text-slate-700 mb-1">Driver Name</label>
-            <RichEntityPicker<Driver>
-              ariaLabel="Driver Name"
-              value={driverName}
-              selectedId={selectedDriverId}
-              onChangeText={(val) => handleSelectDriver(val)}
-              onSelectEntity={(d) => handleSelectDriverEntity(d)}
-              items={drivers}
-              getId={(d) => d.id}
-              getValue={(d) => d.name}
-              getSearchText={(d) => `${d.name} ${d.dlNo || ''} ${d.phone || ''}`}
-              renderTitle={(d) => d.name}
-              renderDetails={(d) => formatDriverDetailsLine(d)}
-              placeholder="Search Driver by Name, D/L No or Mobile..."
-              quickPreview={(() => {
-                const clean = driverName.trim().toLowerCase();
-                if (!clean) return null;
-                const matches = drivers.filter((d) => d.name.trim().toLowerCase() === clean);
-                const resolved =
-                  (selectedDriverId
-                    ? drivers.find((d) => d.id === selectedDriverId)
-                    : undefined) ||
-                  (matches.length === 1 ? matches[0] : matches[0]);
-                return (
-                  <EntityQuickPreviewCard
-                    kind="driver"
-                    driver={resolved}
-                    duplicateCount={matches.length}
-                    compact
-                  />
-                );
-              })()}
-            />
-          </div>
-          <div>
-            <label className="block font-semibold text-slate-700 mb-1">Driver D/L No</label>
-            <input
-              type="text"
-              value={driverDlNo}
-              onChange={(e) => setDriverDlNo(e.target.value)}
-              className="w-full px-2.5 py-1.5 rounded border border-slate-300 font-mono-num"
-            />
-          </div>
-          <div>
-            <label className="block font-semibold text-slate-700 mb-1">GST Paid By</label>
-            <select
-              aria-label="GST Paid By"
-              value={gstPaidBy}
-              onChange={(e) => setGstPaidBy(e.target.value)}
-              className="w-full px-2.5 py-1.5 rounded border border-slate-300 bg-white font-semibold"
-            >
-              <option value="Consignee">Consignee</option>
-              <option value="Consignor">Consignor</option>
-              <option value="Transporter">Transporter</option>
-              <option value="Others">Others</option>
-            </select>
+          <div className="md:col-span-2 p-2.5 rounded-lg bg-slate-50 border border-slate-200 space-y-2">
+            <div className="flex flex-wrap items-center justify-between gap-2">
+              <span className="font-bold text-slate-800">Insurance Details (Policy No / Date / Amount)</span>
+              <div className="inline-flex items-center gap-2">
+                <span className="text-[10px] font-bold text-slate-600">Multi Insurance:</span>
+                <YesNoSelect
+                  ariaLabel="Multi Insurance Yes or No"
+                  value={hasMultiInsurance}
+                  onChange={(next) => {
+                    setHasMultiInsurance(next);
+                    if (next && extraInsurances.length === 0) {
+                      setExtraInsurances([{ policyNo: '', policyDate: todayISO(), amount: 0 }]);
+                    }
+                  }}
+                />
+                {hasMultiInsurance && (
+                  <button
+                    type="button"
+                    onClick={() =>
+                      setExtraInsurances((prev) => [
+                        ...prev,
+                        { policyNo: '', policyDate: todayISO(), amount: 0 },
+                      ])
+                    }
+                    className="inline-flex items-center gap-1 px-2 py-0.5 rounded bg-white border border-slate-300 text-blue-800 text-[10px] font-bold cursor-pointer"
+                  >
+                    <Plus className="w-3 h-3" /> Add Policy
+                  </button>
+                )}
+              </div>
+            </div>
+            <div className="grid grid-cols-1 sm:grid-cols-3 gap-2">
+              <input
+                type="text"
+                value={insurancePolicyNo}
+                onChange={(e) => setInsurancePolicyNo(e.target.value)}
+                placeholder="Policy No (if insured)"
+                className="w-full px-2.5 py-1.5 rounded border border-slate-300 bg-white font-mono-num"
+              />
+              <input
+                type="date"
+                value={insurancePolicyDate}
+                onChange={(e) => setInsurancePolicyDate(e.target.value)}
+                className="w-full px-2.5 py-1.5 rounded border border-slate-300 bg-white font-mono-num"
+              />
+              <input
+                type="number"
+                step="0.01"
+                value={insuranceAmount}
+                onChange={(e) => setInsuranceAmount(e.target.value)}
+                placeholder="Insured Value ₹"
+                className="w-full px-2.5 py-1.5 rounded border border-slate-300 bg-white font-mono-num"
+              />
+            </div>
+            {hasMultiInsurance && extraInsurances.length > 0 && (
+              <div className="space-y-1">
+                {extraInsurances.map((ins, idx) => (
+                  <div key={idx} className="grid grid-cols-1 sm:grid-cols-10 gap-1.5 bg-white p-1.5 rounded border border-slate-200">
+                    <input
+                      type="text"
+                      value={ins.policyNo}
+                      onChange={(e) =>
+                        setExtraInsurances((prev) =>
+                          prev.map((x, i) => (i === idx ? { ...x, policyNo: e.target.value } : x))
+                        )
+                      }
+                      placeholder={`Policy #${idx + 2}`}
+                      className="sm:col-span-4 px-2 py-1 rounded border border-slate-200 font-mono-num"
+                    />
+                    <input
+                      type="date"
+                      value={ins.policyDate || ''}
+                      onChange={(e) =>
+                        setExtraInsurances((prev) =>
+                          prev.map((x, i) => (i === idx ? { ...x, policyDate: e.target.value } : x))
+                        )
+                      }
+                      className="sm:col-span-3 px-2 py-1 rounded border border-slate-200 font-mono-num"
+                    />
+                    <input
+                      type="number"
+                      step="0.01"
+                      value={ins.amount}
+                      onChange={(e) =>
+                        setExtraInsurances((prev) =>
+                          prev.map((x, i) => (i === idx ? { ...x, amount: Number(e.target.value) || 0 } : x))
+                        )
+                      }
+                      placeholder="Amount ₹"
+                      className="sm:col-span-2 px-2 py-1 rounded border border-slate-200 font-mono-num"
+                    />
+                    <button
+                      type="button"
+                      onClick={() => setExtraInsurances((prev) => prev.filter((_, i) => i !== idx))}
+                      className="sm:col-span-1 text-red-600 font-bold cursor-pointer"
+                    >
+                      ×
+                    </button>
+                  </div>
+                ))}
+              </div>
+            )}
           </div>
 
           {/* Conditional Multi-Vehicle, Extra Tax Invoices & Multi-EWB Rows */}
@@ -2300,16 +3070,31 @@ const ConsignmentModuleInner: React.FC<ConsignmentModuleProps> = ({
             </div>
           )}
 
-          {/* Extra-Large Wide Remarks Box */}
-          <div className="md:col-span-3">
-            <label className="block font-bold text-slate-800 mb-1">
-              Large Remarks / Delivery &amp; Freight Instructions (Prints Inside Wide LR Remarks Box)
-            </label>
+          {/* Extra-Large Wide Remarks Box + A-to-Z Preset Picker */}
+          <div className="md:col-span-3 space-y-1.5">
+            <div className="flex flex-wrap items-center justify-between gap-2">
+              <label className="font-bold text-slate-800">
+                Remarks / Material &amp; Size Details &amp; Delivery Instructions (Prints Inside Wide LR Box)
+              </label>
+              <div className="w-64 max-w-full">
+                <SearchableSelect
+                  ariaLabel="Quick Remarks Preset"
+                  value=""
+                  onChange={(preset) => {
+                    if (!preset) return;
+                    setRemarks((prev) => (prev.trim() ? `${prev.trim()} | ${preset}` : preset));
+                  }}
+                  placeholder="+ Insert Remark Preset (A-Z)..."
+                  searchPlaceholder="Search remarks A-Z..."
+                  options={COMMON_REMARK_PRESETS}
+                />
+              </div>
+            </div>
             <textarea
               rows={3}
               value={remarks}
               onChange={(e) => setRemarks(e.target.value)}
-              placeholder="Enter detailed route instructions, delivery endorsements, detention terms, door delivery notes, or special cargo instructions..."
+              placeholder="Enter detailed material size/dimensions, route instructions, delivery endorsements, detention terms, or special cargo notes..."
               className="w-full px-3 py-2 rounded-lg border border-slate-300 bg-white text-slate-900 text-xs leading-relaxed focus:outline-none focus:ring-2 focus:ring-blue-600"
             />
           </div>

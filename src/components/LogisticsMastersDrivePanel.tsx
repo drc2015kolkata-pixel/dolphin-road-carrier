@@ -15,6 +15,8 @@ import {
 } from 'lucide-react';
 import {
   BRANCH_OPTIONS,
+  BUSINESS_MODE_META,
+  LogisticsDivisionCode,
   LogisticsDocket,
   LogisticsDriver,
   LogisticsInvoice,
@@ -31,8 +33,16 @@ import {
   listLogisticsDriveBackupFiles,
   uploadLogisticsMasterBackupToDrive,
 } from '../lib/driveBackup';
+import { SearchableSelect } from './SearchableSelect';
+import { EditableSearchSelect } from './EditableSearchSelect';
+import {
+  VEHICLE_BODY_TYPE_OPTIONS,
+  VEHICLE_COLOR_OPTIONS,
+  VEHICLE_MAKE_OPTIONS,
+} from '../lib/dropdownMasterStore';
 
 interface LogisticsMastersDrivePanelProps {
+  divisionMode?: LogisticsDivisionCode;
   subView: 'masters' | 'backup';
   ownerUid: string;
   activeBranchCode: string;
@@ -56,6 +66,7 @@ interface LogisticsMastersDrivePanelProps {
 }
 
 export const LogisticsMastersDrivePanel: React.FC<LogisticsMastersDrivePanelProps> = ({
+  divisionMode = 'LOGISTICS',
   subView,
   ownerUid,
   activeBranchCode,
@@ -72,6 +83,7 @@ export const LogisticsMastersDrivePanel: React.FC<LogisticsMastersDrivePanelProp
   onShowConfirm,
 }) => {
   const branch = activeBranchCode && activeBranchCode !== 'ALL' ? activeBranchCode : 'KOL-HQ';
+  const divisionMeta = BUSINESS_MODE_META[divisionMode];
   const [masterTab, setMasterTab] = useState<'parties' | 'vehicles' | 'drivers'>('parties');
 
   // Party form
@@ -84,6 +96,9 @@ export const LogisticsMastersDrivePanel: React.FC<LogisticsMastersDrivePanelProp
 
   // Vehicle form
   const [vTruckNo, setVTruckNo] = useState('');
+  const [vMake, setVMake] = useState('');
+  const [vBodyType, setVBodyType] = useState('14FT Closed Container');
+  const [vColor, setVColor] = useState('');
   const [vType, setVType] = useState('14FT Closed Container');
   const [vOwner, setVOwner] = useState('');
   const [vPhone, setVPhone] = useState('');
@@ -143,7 +158,10 @@ export const LogisticsMastersDrivePanel: React.FC<LogisticsMastersDrivePanelProp
       id,
       {
         truckNo: vTruckNo.trim().toUpperCase(),
-        vehicleType: vType.trim(),
+        vehicleMake: vMake.trim(),
+        bodyType: vBodyType.trim(),
+        vehicleColor: vColor.trim(),
+        vehicleType: vType.trim() || vBodyType.trim(),
         ownerName: vOwner.trim(),
         ownerPhone: vPhone.trim(),
         fitnessExpiry: vFit,
@@ -157,6 +175,8 @@ export const LogisticsMastersDrivePanel: React.FC<LogisticsMastersDrivePanelProp
       true
     );
     setVTruckNo('');
+    setVMake('');
+    setVColor('');
     setVOwner('');
     setVPhone('');
   };
@@ -311,18 +331,20 @@ export const LogisticsMastersDrivePanel: React.FC<LogisticsMastersDrivePanelProp
                   className="w-full px-2.5 py-1.5 rounded border border-slate-300 font-semibold"
                 />
                 <div className="grid grid-cols-2 gap-2">
-                  <select
+                  <SearchableSelect
+                    ariaLabel="Logistics Party Type"
                     value={pType}
-                    onChange={(e) => setPType(e.target.value as LogisticsParty['partyType'])}
-                    className="w-full px-2 py-1.5 rounded border border-slate-300 font-bold"
-                  >
-                    <option value="Customer">Customer (TBB)</option>
-                    <option value="Consignor">Consignor</option>
-                    <option value="Consignee">Consignee</option>
-                    <option value="Broker">Broker</option>
-                    <option value="DeliveryAgent">Delivery Agent</option>
-                    <option value="Vendor">Vendor</option>
-                  </select>
+                    onChange={(val) => setPType(val as LogisticsParty['partyType'])}
+                    options={[
+                      { value: 'Broker', label: 'Broker' },
+                      { value: 'Consignee', label: 'Consignee' },
+                      { value: 'Consignor', label: 'Consignor' },
+                      { value: 'Customer', label: 'Customer (TBB)' },
+                      { value: 'DeliveryAgent', label: 'Delivery Agent' },
+                      { value: 'Vendor', label: 'Vendor' },
+                    ]}
+                    triggerClassName="!py-1.5 !font-bold"
+                  />
                   <input
                     value={pPhone}
                     onChange={(e) => setPPhone(e.target.value)}
@@ -420,12 +442,38 @@ export const LogisticsMastersDrivePanel: React.FC<LogisticsMastersDrivePanelProp
                   placeholder="Vehicle Reg No (e.g. WB23C6597)*"
                   className="w-full px-2.5 py-1.5 rounded border border-slate-300 font-mono-num font-bold"
                 />
-                <input
-                  value={vType}
-                  onChange={(e) => setVType(e.target.value)}
-                  placeholder="Vehicle Type (14FT / 17FT / 407)"
-                  className="w-full px-2.5 py-1.5 rounded border border-slate-300"
-                />
+                <div className="grid grid-cols-2 gap-2">
+                  <div>
+                    <label className="text-[10px] font-bold text-slate-500">Vehicle Make</label>
+                    <EditableSearchSelect
+                      value={vMake}
+                      onChange={setVMake}
+                      options={VEHICLE_MAKE_OPTIONS}
+                      placeholder="Tata / Ashok Leyland / Eicher..."
+                    />
+                  </div>
+                  <div>
+                    <label className="text-[10px] font-bold text-slate-500">Vehicle Color</label>
+                    <EditableSearchSelect
+                      value={vColor}
+                      onChange={setVColor}
+                      options={VEHICLE_COLOR_OPTIONS}
+                      placeholder="Color..."
+                    />
+                  </div>
+                </div>
+                <div>
+                  <label className="text-[10px] font-bold text-slate-500">Body Type / Capacity</label>
+                  <EditableSearchSelect
+                    value={vBodyType}
+                    onChange={(val) => {
+                      setVBodyType(val);
+                      if (val) setVType(val);
+                    }}
+                    options={VEHICLE_BODY_TYPE_OPTIONS}
+                    placeholder="Full Dala / Closed Container / Pickup..."
+                  />
+                </div>
                 <div className="grid grid-cols-2 gap-2">
                   <input
                     required
@@ -493,7 +541,9 @@ export const LogisticsMastersDrivePanel: React.FC<LogisticsMastersDrivePanelProp
                         <tr key={v.id} className={hasAlert ? 'bg-red-50/60' : ''}>
                           <td className="px-3 py-2 font-mono-num font-extrabold text-[#0F766E]">
                             {v.truckNo}
-                            <div className="text-[11px] font-normal text-slate-500">{v.vehicleType}</div>
+                            <div className="text-[11px] font-normal text-slate-500">
+                              {[v.vehicleMake, v.bodyType || v.vehicleType, v.vehicleColor].filter(Boolean).join(' · ')}
+                            </div>
                           </td>
                           <td className="px-3 py-2">
                             <div className="font-bold">{v.ownerName}</div>
@@ -633,10 +683,10 @@ export const LogisticsMastersDrivePanel: React.FC<LogisticsMastersDrivePanelProp
               <Cloud className="w-5 h-5" />
               <div>
                 <h3 className="text-sm font-extrabold">
-                  Separate Logistics Google Drive Folder Backup
+                  Separate {divisionMeta.shortLabel} Google Drive Backup ({divisionMeta.driveFilePrefix}_[Year].json)
                 </h3>
                 <p className="text-[11px] text-slate-500">
-                  Folder: <strong className="font-mono-num">DOLPHIN_LOGISTICS_DIVISION_BACKUP</strong> (100% isolated from FTL folder)
+                  Folder: <strong className="font-mono-num">DOLPHIN_LOGISTICS_DIVISION_BACKUP</strong> · Strictly isolated <code className="font-mono-num">drive.file</code> sandbox
                 </p>
               </div>
             </div>

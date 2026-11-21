@@ -66,6 +66,10 @@ export interface StaffAccount {
   displayName: string;
   role: StaffRole;
   branchCode?: string;
+  bankName?: string;
+  bankAccountNo?: string;
+  bankIfsc?: string;
+  upiId?: string;
   pinHash: string;
   active: boolean;
   permissions: PermissionKey[];
@@ -102,6 +106,9 @@ export interface Vehicle {
   id: string;
   truckNo: string;
   vehicleType?: string;
+  vehicleMake?: string;
+  bodyType?: string;
+  vehicleColor?: string;
   ownerName: string;
   ownerPhone?: string;
   engineNo?: string;
@@ -145,15 +152,43 @@ export interface ExtraTaxInvoice {
   value?: number;
 }
 
+export interface MultiWeightRow {
+  label: string;
+  actualWeightKg: number;
+  grossWeightKg: number;
+  chargedWeightKg: number;
+}
+
+export interface MultiGoodsItem {
+  description: string;
+  packages: number;
+  packageMode: string;
+  weightKg: number;
+  hsnCode?: string;
+}
+
+export interface ExtraInsuranceItem {
+  policyNo: string;
+  policyDate?: string;
+  amount: number;
+}
+
+export type ExtraWeightRow = MultiWeightRow;
+export type MultiGoodsRow = MultiGoodsItem;
+export type ExtraInsurancePolicy = ExtraInsuranceItem;
+
 export interface ConsignmentNote {
   id: string;
   cnNo: string;
   cnDate: string;
   financialYear?: string;
   division?: 'FTL' | 'LOGISTICS' | string;
+  billedAtBranch?: string;
+  hasVehicleNo?: boolean;
   deliveryOffice?: string;
   stockTransfer?: boolean;
   billingPartyName?: string;
+  billToPartyFlag?: boolean;
   creditDays?: number;
   consignorName: string;
   consignorAddress?: string;
@@ -164,14 +199,18 @@ export interface ConsignmentNote {
   packages?: string;
   packageMode?: string;
   particulars?: string;
+  multiGoodsItems?: MultiGoodsItem[];
   rateMode?: string;
   ratePerUnit?: number;
   nettWeight?: number;
   grossWeight?: number;
+  chargedWeight?: number;
+  multiWeights?: MultiWeightRow[];
   loadingCharge?: number;
   unloadingCharge?: number;
   returnLorryCharge?: number;
   sttCharge?: number;
+  otherCharge?: number;
   totalFreight: number;
   paidAmount?: number;
   toPayAmount?: number;
@@ -197,10 +236,20 @@ export interface ConsignmentNote {
   engineNo?: string;
   chassisNo?: string;
   ownerName?: string;
+  brokerName?: string;
   driverName?: string;
   driverDlNo?: string;
+  driverDlExpiry?: string;
+  driverMobile?: string;
+  deliveryModeCode?: 'P' | 'G' | 'D' | string;
   gstPaidBy?: string;
+  gstPaidByCode?: 'R' | 'E' | 'T' | string;
+  riskTakenBy?: 'O' | 'C' | 'I' | string;
   insuranceStatus?: string;
+  insurancePolicyNo?: string;
+  insurancePolicyDate?: string;
+  insuranceAmount?: number;
+  extraInsurances?: ExtraInsuranceItem[];
   remarks?: string;
   scannedLrDataUrl?: string;
   billed: boolean;
@@ -235,11 +284,14 @@ export type BillCopyCount = 1 | 2 | 3 | 4;
 
 export interface Invoice {
   id: string;
+  billId?: string;
   invoiceNo: string;
   invoiceDate: string;
   dueDate?: string;
   financialYear?: string;
   division?: 'FTL' | 'LOGISTICS' | string;
+  billedByCode?: 'B' | 'P' | string;
+  billedAtBranch?: string;
   partyName: string;
   partyAddress?: string;
   partyGstin?: string;
@@ -255,13 +307,25 @@ export interface Invoice {
   igstAmt?: number;
   totalTax?: number;
   freightCharges?: number;
+  insuranceCharge?: number;
+  collCharge?: number;
+  loadingCharge?: number;
   detentionCharges?: number;
   unloadingCharges?: number;
+  surchargeAmt?: number;
   stCharges?: number;
+  fumigationCharge?: number;
+  extraCharge?: number;
+  grossBillAmount?: number;
+  advanceReceived?: number;
+  advanceMode?: string;
+  fullPaymentMode?: string;
   grandTotal: number;
   paidAmount: number;
   status: 'Unpaid' | 'Partial' | 'Paid';
   remarks?: string;
+  billFootnote?: string;
+  additionalNotes?: string;
   copyCount?: BillCopyCount;
   consignmentRows: InvoiceConsignmentRow[];
   annexureLorries?: InvoiceAnnexureLorry[];
@@ -310,8 +374,12 @@ export interface Quotation {
 }
 
 export interface LorryAdvanceRow {
-  payeeType: 'Lorry Owner' | 'Broker' | string;
+  payeeType: 'Lorry Owner' | 'Broker' | 'Driver' | string;
   accountName: string;
+  holderName?: string;
+  bankAccountNo?: string;
+  upiId?: string;
+  refNo?: string;
   advanceDate: string;
   mode: string;
   amount: number;
@@ -328,6 +396,9 @@ export interface LorryHire {
   brokerName?: string;
   fromCity?: string;
   toCity?: string;
+  weightMt?: number;
+  ratePerUnit?: number;
+  rateMode?: string;
   bookedPkgs?: number;
   deliveredPkgs?: number;
   shortageDamagePkgs?: number;
@@ -335,21 +406,31 @@ export interface LorryHire {
   advances?: LorryAdvanceRow[];
   hireAmount: number;
   advancePaid: number;
+  extraAdvanceAmt?: number;
   loadingCharge?: number;
   unloadingCharge?: number;
   parkingCharge?: number;
   kataCharge?: number;
+  detentionCharge?: number;
+  detentionDays?: number;
   shortageCharge?: number;
   damageCharge?: number;
+  tdsRatePct?: number;
+  tdsAmount?: number;
+  receiptChallanNo?: string;
+  receiptChallanDate?: string;
   balancePayable: number;
+  balancePaidAmt?: number;
   podReceived: boolean;
   podReceiveDate?: string;
   podImageDataUrl?: string;
   podFileName?: string;
+  podRemarks?: string;
   balancePaid: boolean;
   balancePaidDate?: string;
   paymentMode?: string;
   paymentRef?: string;
+  remarks?: string;
   branchCode?: string;
   createdByStaff?: string;
   ownerUid: string;
@@ -439,11 +520,34 @@ export interface FyOpeningBalanceEntry {
   balanceType: 'Dr' | 'Cr';
 }
 
+export interface StaffMultiAdvanceLog {
+  date: string;
+  account: string;
+  amount: number;
+  mode?: string;
+}
+
+export interface StaffMultiPaidReturnLog {
+  date: string;
+  amount: number;
+  mode?: string;
+  refNo?: string;
+}
+
+export interface StaffMultiBalanceDateLog {
+  date: string;
+  balanceAmt: number;
+  note?: string;
+}
+
 export interface StaffCommissionEntry {
   id: string;
   entryDate: string;
   financialYear?: string;
+  division?: 'FTL' | 'LOGISTICS' | 'PTL' | 'COURIER' | string;
   staffName: string;
+  staffBankAccount?: string;
+  staffUpiId?: string;
   challanNo: string;
   truckNo?: string;
   wheelType:
@@ -458,9 +562,14 @@ export interface StaffCommissionEntry {
     | string;
   entryType: 'Commission' | 'Advance Taken' | 'Paid';
   commissionRate?: number;
+  travellingAmt?: number;
+  miscAmt?: number;
   amount: number;
   paymentMode?: string;
   remarks?: string;
+  multiAdvances?: StaffMultiAdvanceLog[];
+  multiPaidReturns?: StaffMultiPaidReturnLog[];
+  multiBalanceDates?: StaffMultiBalanceDateLog[];
   branchCode?: string;
   createdByStaff?: string;
   ownerUid: string;
@@ -572,6 +681,7 @@ export interface CompanySettings {
 
 export type SheetTabId =
   | 'dashboard'
+  | 'allInOne'
   | 'master'
   | 'lr'
   | 'billing'
@@ -587,10 +697,91 @@ export type SheetTabId =
   | 'guide'
   | 'about';
 
-export type BusinessMode = 'FTL' | 'LOGISTICS';
+export type LogisticsDivisionCode = 'LOGISTICS' | 'PTL' | 'COURIER';
+
+export type BusinessMode = 'FTL' | LogisticsDivisionCode;
+
+export const BUSINESS_MODE_META: Record<
+  BusinessMode,
+  {
+    code: BusinessMode;
+    shortLabel: string;
+    fullName: string;
+    title: string;
+    subtitle: string;
+    docPrefix: string;
+    idPrefix: string;
+    driveTag: string;
+    driveFilePrefix: string;
+  }
+> = {
+  FTL: {
+    code: 'FTL',
+    shortLabel: 'FTL',
+    fullName: 'FTL Business (Full Truck Load)',
+    title: 'FTL Business (Full Truck Load)',
+    subtitle: 'Full-Truck Consignments, 4-Copy LR, Tax Invoices, Lorry Hire & Financial Books',
+    docPrefix: 'KOL',
+    idPrefix: '',
+    driveTag: 'DRC_FTL_BUSINESS',
+    driveFilePrefix: 'DRC_FTL_BUSINESS',
+  },
+  LOGISTICS: {
+    code: 'LOGISTICS',
+    shortLabel: 'LOGISTICS',
+    fullName: 'Logistics Division',
+    title: 'Logistics Division',
+    subtitle: 'Integrated Express Line-Haul, Hub Manifests, Godown Stock & Logistics Ledgers',
+    docPrefix: 'LOG',
+    idPrefix: '',
+    driveTag: 'DRC_LOGISTICS_BUSINESS',
+    driveFilePrefix: 'DRC_LOGISTICS_BUSINESS',
+  },
+  PTL: {
+    code: 'PTL',
+    shortLabel: 'PTL',
+    fullName: 'PTL Business (Part Truck Load)',
+    title: 'PTL Business (Part Truck Load)',
+    subtitle: 'Part-Load Consolidation, Weight/Pkg Rates, Hub Transfers & PTL Billing',
+    docPrefix: 'PTL',
+    idPrefix: 'ptl_',
+    driveTag: 'DRC_PTL_BUSINESS',
+    driveFilePrefix: 'DRC_PTL_BUSINESS',
+  },
+  COURIER: {
+    code: 'COURIER',
+    shortLabel: 'COURIER',
+    fullName: 'Courier & Express Parcel',
+    title: 'Courier & Express Parcel',
+    subtitle: 'Air/Surface Parcel Dockets, Door-to-Door Pods, COD Cash & Courier Ledgers',
+    docPrefix: 'COUR',
+    idPrefix: 'cour_',
+    driveTag: 'DRC_COURIER_PARCEL',
+    driveFilePrefix: 'DRC_COURIER_PARCEL',
+  },
+};
+
+export function getLogisticsDivisionFromId(id?: string): LogisticsDivisionCode {
+  const s = String(id || '');
+  if (s.startsWith('ptl_')) return 'PTL';
+  if (s.startsWith('cour_')) return 'COURIER';
+  return 'LOGISTICS';
+}
+
+export function makeDivisionDocId(
+  division: BusinessMode,
+  basePrefix: string,
+  suffix?: string
+): string {
+  const divPrefix = BUSINESS_MODE_META[division]?.idPrefix || '';
+  const tail = suffix || `${Date.now()}_${Math.random().toString(36).slice(2, 6)}`;
+  const raw = `${divPrefix}${basePrefix}_${tail}`.replace(/[^a-zA-Z0-9_-]/g, '_');
+  return raw;
+}
 
 export type LogisticsWorkspaceTabId =
   | 'overview'
+  | 'allInOne'
   | 'docket'
   | 'manifest'
   | 'godown'
@@ -639,6 +830,9 @@ export interface LogisticsVehicle {
   id: string;
   truckNo: string;
   vehicleType?: string;
+  vehicleMake?: string;
+  bodyType?: string;
+  vehicleColor?: string;
   ownerName: string;
   ownerPhone?: string;
   fitnessExpiry?: string;
@@ -677,6 +871,7 @@ export interface LogisticsDocket {
   docketNo: string;
   docketDate: string;
   financialYear?: string;
+  billedAtBranch?: string;
   originBranch: string;
   destBranch: string;
   deliveryMode: 'Door Delivery' | 'Godown Delivery';

@@ -45,6 +45,9 @@ import {
   formatVehicleDetailsLine,
   RichEntityPicker,
 } from './RichEntityPicker';
+import { SearchableSelect } from './SearchableSelect';
+import { PAYMENT_MODE_OPTIONS, sortAlphaList } from '../lib/dropdownMasterStore';
+import { playAlertBeep, playVerifiedBeep } from '../lib/audioFeedback';
 
 interface LorryHirePodModuleProps {
   ownerUid: string;
@@ -90,29 +93,40 @@ function parseBookedPkgs(pkgStr?: string): string {
 export function computeLorryNetPayable(params: {
   hireAmount: number;
   advancePaid: number;
+  extraAdvanceAmt?: number;
   loadingCharge: number;
   unloadingCharge: number;
   parkingCharge: number;
   kataCharge: number;
+  detentionCharge?: number;
   shortageCharge: number;
   damageCharge: number;
+  tdsAmount?: number;
 }): {
+  grossWithDetention: number;
   totalDeductions: number;
   balancePayable: number;
 } {
+  const grossWithDetention =
+    Math.round((Number(params.hireAmount || 0) + Number(params.detentionCharge || 0)) * 100) / 100;
   const totalDeductions =
-    Number(params.advancePaid || 0) +
-    Number(params.loadingCharge || 0) +
-    Number(params.unloadingCharge || 0) +
-    Number(params.parkingCharge || 0) +
-    Number(params.kataCharge || 0) +
-    Number(params.shortageCharge || 0) +
-    Number(params.damageCharge || 0);
+    Math.round(
+      (Number(params.advancePaid || 0) +
+        Number(params.extraAdvanceAmt || 0) +
+        Number(params.loadingCharge || 0) +
+        Number(params.unloadingCharge || 0) +
+        Number(params.parkingCharge || 0) +
+        Number(params.kataCharge || 0) +
+        Number(params.shortageCharge || 0) +
+        Number(params.damageCharge || 0) +
+        Number(params.tdsAmount || 0)) *
+        100
+    ) / 100;
   const balancePayable = Math.max(
     0,
-    Math.round((Number(params.hireAmount || 0) - totalDeductions) * 100) / 100
+    Math.round((grossWithDetention - totalDeductions) * 100) / 100
   );
-  return { totalDeductions, balancePayable };
+  return { grossWithDetention, totalDeductions, balancePayable };
 }
 
 const LorryHirePodModuleInner: React.FC<LorryHirePodModuleProps> = ({
@@ -190,6 +204,9 @@ const LorryHirePodModuleInner: React.FC<LorryHirePodModuleProps> = ({
   const [selectedBrokerId, setSelectedBrokerId] = useState('');
   const [fromCity, setFromCity] = useState('KOLKATA');
   const [toCity, setToCity] = useState('');
+  const [weightMt, setWeightMt] = useState('');
+  const [rateMode, setRateMode] = useState<'Fixed' | 'Per MT'>('Fixed');
+  const [ratePerUnit, setRatePerUnit] = useState('');
   const [bookedPkgs, setBookedPkgs] = useState('');
   const [deliveredPkgs, setDeliveredPkgs] = useState('');
   const [hireAmount, setHireAmount] = useState('');
@@ -197,14 +214,24 @@ const LorryHirePodModuleInner: React.FC<LorryHirePodModuleProps> = ({
   // Multi-Advance (Yes/No)
   const [hasMultiAdvance, setHasMultiAdvance] = useState(false);
   const [advances, setAdvances] = useState<LorryAdvanceRow[]>([DEFAULT_ADVANCE_ROW()]);
+  const [extraAdvanceAmt, setExtraAdvanceAmt] = useState('0');
+  const [balancePaidAmt, setBalancePaidAmt] = useState('0');
 
-  // Step-by-step Deductions
+  // Step-by-step Deductions, Detention (2-day free), TDS 194C & Receipt Challan
   const [loadingCharge, setLoadingCharge] = useState('0');
   const [unloadingCharge, setUnloadingCharge] = useState('0');
   const [parkingCharge, setParkingCharge] = useState('0');
   const [kataCharge, setKataCharge] = useState('0');
+  const [detentionDays, setDetentionDays] = useState('0');
+  const [detentionRatePerDay, setDetentionRatePerDay] = useState('1500');
+  const [detentionCharge, setDetentionCharge] = useState('0');
   const [shortageCharge, setShortageCharge] = useState('0');
   const [damageCharge, setDamageCharge] = useState('0');
+  const [tdsRatePct, setTdsRatePct] = useState('0');
+  const [tdsAmount, setTdsAmount] = useState('0');
+  const [receiptChallanNo, setReceiptChallanNo] = useState('');
+  const [receiptChallanDate, setReceiptChallanDate] = useState('');
+  const [remarks, setRemarks] = useState('');
   const [saving, setSaving] = useState(false);
 
   const [search, setSearch] = useState('');
@@ -217,6 +244,8 @@ const LorryHirePodModuleInner: React.FC<LorryHirePodModuleProps> = ({
   const [podDeliveredPkgs, setPodDeliveredPkgs] = useState('');
   const [podShortageCharge, setPodShortageCharge] = useState('0');
   const [podDamageCharge, setPodDamageCharge] = useState('0');
+  const [podRemarks, setPodRemarks] = useState('');
+  const [podShortageAlert, setPodShortageAlert] = useState(false);
   const [podImageUrl, setPodImageUrl] = useState('');
   const [podFileName, setPodFileName] = useState('');
   const [podScanStatus, setPodScanStatus] = useState<string | null>(null);
@@ -245,23 +274,55 @@ const LorryHirePodModuleInner: React.FC<LorryHirePodModuleProps> = ({
   );
 
   const hireNum = Number(hireAmount) || 0;
+  const extraAdvNum = Number(extraAdvanceAmt) || 0;
   const loadNum = Number(loadingCharge) || 0;
   const unloadNum = Number(unloadingCharge) || 0;
   const parkNum = Number(parkingCharge) || 0;
   const kataNum = Number(kataCharge) || 0;
+  const detChgNum = Number(detentionCharge) || 0;
   const shortChgNum = Number(shortageCharge) || 0;
   const dmgChgNum = Number(damageCharge) || 0;
+  const tdsAmtNum = Number(tdsAmount) || 0;
 
-  const { balancePayable } = computeLorryNetPayable({
+  const { grossWithDetention, balancePayable } = computeLorryNetPayable({
     hireAmount: hireNum,
     advancePaid: totalAdvances,
+    extraAdvanceAmt: extraAdvNum,
     loadingCharge: loadNum,
     unloadingCharge: unloadNum,
     parkingCharge: parkNum,
     kataCharge: kataNum,
+    detentionCharge: detChgNum,
     shortageCharge: shortChgNum,
     damageCharge: dmgChgNum,
+    tdsAmount: tdsAmtNum,
   });
+
+  // Running balance per advance row down to final due
+  const advanceRunningBalances = useMemo(() => {
+    const startAfterTripDed =
+      Math.round(
+        (grossWithDetention -
+          (extraAdvNum + loadNum + unloadNum + parkNum + kataNum + shortChgNum + dmgChgNum + tdsAmtNum)) *
+          100
+      ) / 100;
+    let cursor = startAfterTripDed;
+    return activeAdvanceRows.map((row) => {
+      cursor = Math.round((cursor - (Number(row.amount) || 0)) * 100) / 100;
+      return cursor;
+    });
+  }, [
+    grossWithDetention,
+    extraAdvNum,
+    loadNum,
+    unloadNum,
+    parkNum,
+    kataNum,
+    shortChgNum,
+    dmgChgNum,
+    tdsAmtNum,
+    activeAdvanceRows,
+  ]);
 
   const indexedHires = useMemo(() => {
     const sorted = [...lorryHires].sort((a, b) => (b.cnDate || '').localeCompare(a.cnDate || ''));
@@ -331,17 +392,30 @@ const LorryHirePodModuleInner: React.FC<LorryHirePodModuleProps> = ({
     setSelectedBrokerId('');
     setFromCity('KOLKATA');
     setToCity('');
+    setWeightMt('');
+    setRateMode('Fixed');
+    setRatePerUnit('');
     setBookedPkgs('');
     setDeliveredPkgs('');
     setHireAmount('');
     setHasMultiAdvance(false);
     setAdvances([DEFAULT_ADVANCE_ROW()]);
+    setExtraAdvanceAmt('0');
+    setBalancePaidAmt('0');
     setLoadingCharge('0');
     setUnloadingCharge('0');
     setParkingCharge('0');
     setKataCharge('0');
+    setDetentionDays('0');
+    setDetentionRatePerDay('1500');
+    setDetentionCharge('0');
     setShortageCharge('0');
     setDamageCharge('0');
+    setTdsRatePct('0');
+    setTdsAmount('0');
+    setReceiptChallanNo('');
+    setReceiptChallanDate('');
+    setRemarks('');
   };
 
   const handleLoadForEdit = (h: LorryHire) => {
@@ -354,20 +428,47 @@ const LorryHirePodModuleInner: React.FC<LorryHirePodModuleProps> = ({
     setBrokerName(h.brokerName || '');
     setFromCity(h.fromCity || 'KOLKATA');
     setToCity(h.toCity || '');
+    setWeightMt(h.weightMt != null ? String(h.weightMt) : '');
+    setRateMode(h.rateMode === 'Per MT' ? 'Per MT' : 'Fixed');
+    setRatePerUnit(h.ratePerUnit != null ? String(h.ratePerUnit) : '');
     setBookedPkgs(h.bookedPkgs != null ? String(h.bookedPkgs) : '');
     setDeliveredPkgs(h.deliveredPkgs != null ? String(h.deliveredPkgs) : '');
     setHireAmount(String(h.hireAmount || ''));
-    const savedAdv = Array.isArray(h.advances) && h.advances.length > 0
-      ? h.advances
-      : [{ ...DEFAULT_ADVANCE_ROW(), amount: Number(h.advancePaid || 0) }];
+    const savedAdv =
+      Array.isArray(h.advances) && h.advances.length > 0
+        ? h.advances
+        : [{ ...DEFAULT_ADVANCE_ROW(), amount: Number(h.advancePaid || 0) }];
     setHasMultiAdvance(Boolean(h.hasMultiAdvance || savedAdv.length > 1));
     setAdvances(savedAdv);
+    setExtraAdvanceAmt(String(h.extraAdvanceAmt ?? 0));
+    setBalancePaidAmt(String(h.balancePaidAmt ?? 0));
     setLoadingCharge(String(h.loadingCharge ?? 0));
     setUnloadingCharge(String(h.unloadingCharge ?? 0));
     setParkingCharge(String(h.parkingCharge ?? 0));
     setKataCharge(String(h.kataCharge ?? 0));
+    setDetentionDays(String(h.detentionDays ?? 0));
+    setDetentionCharge(String(h.detentionCharge ?? 0));
     setShortageCharge(String(h.shortageCharge ?? 0));
     setDamageCharge(String(h.damageCharge ?? 0));
+    setTdsRatePct(String(h.tdsRatePct ?? 0));
+    setTdsAmount(String(h.tdsAmount ?? 0));
+    setReceiptChallanNo(h.receiptChallanNo || '');
+    setReceiptChallanDate(h.receiptChallanDate || '');
+    setRemarks(h.remarks || '');
+  };
+
+  const handleDetentionDaysChange = (daysVal: string, rateVal = detentionRatePerDay) => {
+    setDetentionDays(daysVal);
+    const days = Math.max(0, Number(daysVal) || 0);
+    const rate = Math.max(0, Number(rateVal) || 0);
+    const chargeableDays = Math.max(0, days - 2);
+    setDetentionCharge(String(Math.round(chargeableDays * rate * 100) / 100));
+  };
+
+  const handleTdsPctChange = (pctVal: string, baseHire = hireNum) => {
+    setTdsRatePct(pctVal);
+    const pct = Math.max(0, Number(pctVal) || 0);
+    setTdsAmount(String(Math.round(((baseHire * pct) / 100) * 100) / 100));
   };
 
   const handleCreateOrUpdateHire = async (e: React.FormEvent) => {
@@ -378,9 +479,14 @@ const LorryHirePodModuleInner: React.FC<LorryHirePodModuleProps> = ({
     try {
       const id = editingHireId || makeSafeDocId('hire');
       const cleanedAdvances = activeAdvanceRows
+        .slice(0, 50)
         .map((a) => ({
           payeeType: a.payeeType || 'Lorry Owner',
           accountName: a.accountName || accountBankOptions[0] || 'Cash in Hand',
+          holderName: (a.holderName || '').trim(),
+          bankAccountNo: (a.bankAccountNo || '').trim(),
+          upiId: (a.upiId || '').trim(),
+          refNo: (a.refNo || '').trim(),
           advanceDate: a.advanceDate || todayISO(),
           mode: a.mode || 'NEFT',
           amount: Number(a.amount) || 0,
@@ -402,6 +508,9 @@ const LorryHirePodModuleInner: React.FC<LorryHirePodModuleProps> = ({
           brokerName: brokerName.trim().slice(0, 140),
           fromCity: fromCity.trim().slice(0, 120),
           toCity: toCity.trim().slice(0, 120),
+          weightMt: Number(weightMt) || 0,
+          rateMode,
+          ratePerUnit: Number(ratePerUnit) || 0,
           bookedPkgs: bookedNum,
           deliveredPkgs: deliveredNum,
           shortageDamagePkgs,
@@ -409,17 +518,27 @@ const LorryHirePodModuleInner: React.FC<LorryHirePodModuleProps> = ({
           advances: cleanedAdvances,
           hireAmount: hireNum,
           advancePaid: totalAdvances,
+          extraAdvanceAmt: extraAdvNum,
+          balancePaidAmt: Number(balancePaidAmt) || 0,
           loadingCharge: loadNum,
           unloadingCharge: unloadNum,
           parkingCharge: parkNum,
           kataCharge: kataNum,
+          detentionDays: Number(detentionDays) || 0,
+          detentionCharge: detChgNum,
           shortageCharge: shortChgNum,
           damageCharge: dmgChgNum,
+          tdsRatePct: Number(tdsRatePct) || 0,
+          tdsAmount: tdsAmtNum,
+          receiptChallanNo: receiptChallanNo.trim(),
+          receiptChallanDate: receiptChallanDate.trim(),
+          remarks: remarks.trim(),
           balancePayable,
           podReceived: existing?.podReceived ?? false,
           podReceiveDate: existing?.podReceiveDate ?? '',
           podImageDataUrl: existing?.podImageDataUrl ?? '',
           podFileName: existing?.podFileName ?? '',
+          podRemarks: existing?.podRemarks ?? '',
           balancePaid: existing?.balancePaid ?? false,
           balancePaidDate: existing?.balancePaidDate ?? '',
           paymentMode: existing?.paymentMode ?? '',
@@ -442,6 +561,7 @@ const LorryHirePodModuleInner: React.FC<LorryHirePodModuleProps> = ({
         ownerUid,
       });
 
+      playVerifiedBeep();
       resetForm();
     } finally {
       setSaving(false);
@@ -451,6 +571,7 @@ const LorryHirePodModuleInner: React.FC<LorryHirePodModuleProps> = ({
   const handlePodScanUpload = async (file: File | undefined) => {
     if (!file || !activePodTarget) return;
     setPodScanStatus('Compressing & scanning POD in background worker...');
+    setPodShortageAlert(false);
     try {
       const { result, compressedDataUrl } = await scanPODDocument(file, (m) =>
         setPodScanStatus(m)
@@ -459,10 +580,19 @@ const LorryHirePodModuleInner: React.FC<LorryHirePodModuleProps> = ({
       const cleanName = `POD_${activePodTarget.cnNo.replace(/[^a-zA-Z0-9]/g, '_')}_${todayISO()}.jpg`;
       setPodFileName(cleanName);
       if (result.podDate) setPodDate(result.podDate);
+      if (result.shortageBreakageLeakageDetected) {
+        setPodShortageAlert(true);
+        setPodRemarks(result.remarks || 'ALERT: Shortage / Breakage / Leakage detected on POD!');
+        playAlertBeep();
+      } else if (result.remarks) {
+        setPodRemarks(result.remarks);
+      }
       setPodScanStatus(
-        result.signedDetected
-          ? `Signed POD verified! ${result.remarks || ''}`
-          : 'POD scanned. Confirm receiver signature, Delivered Pkgs & POD Receive Date.'
+        result.shortageBreakageLeakageDetected
+          ? `RED ALERT: Shortage / Breakage / Leakage detected! ${result.remarks || ''}`
+          : result.signedDetected
+            ? `Signed POD verified! ${result.remarks || ''}`
+            : 'POD scanned. Confirm receiver signature, Delivered Pkgs & POD Receive Date.'
       );
     } catch (err) {
       setPodScanStatus(err instanceof Error ? err.message : 'POD scan failed');
@@ -482,12 +612,15 @@ const LorryHirePodModuleInner: React.FC<LorryHirePodModuleProps> = ({
       const { balancePayable: recomputedNet } = computeLorryNetPayable({
         hireAmount: Number(activePodTarget.hireAmount || 0),
         advancePaid: Number(activePodTarget.advancePaid || 0),
+        extraAdvanceAmt: Number(activePodTarget.extraAdvanceAmt || 0),
         loadingCharge: Number(activePodTarget.loadingCharge || 0),
         unloadingCharge: Number(activePodTarget.unloadingCharge || 0),
         parkingCharge: Number(activePodTarget.parkingCharge || 0),
         kataCharge: Number(activePodTarget.kataCharge || 0),
+        detentionCharge: Number(activePodTarget.detentionCharge || 0),
         shortageCharge: sChg,
         damageCharge: dChg,
+        tdsAmount: Number(activePodTarget.tdsAmount || 0),
       });
 
       await upsertDocument(
@@ -504,6 +637,7 @@ const LorryHirePodModuleInner: React.FC<LorryHirePodModuleProps> = ({
           podReceiveDate: podDate,
           podImageDataUrl: podImageUrl.slice(0, 440000),
           podFileName: podFileName || `POD_${activePodTarget.cnNo}.jpg`,
+          podRemarks: podRemarks.trim(),
         },
         false
       );
@@ -531,9 +665,12 @@ const LorryHirePodModuleInner: React.FC<LorryHirePodModuleProps> = ({
         ownerUid,
       });
 
+      playVerifiedBeep();
       setActivePodTarget(null);
       setPodImageUrl('');
       setPodFileName('');
+      setPodRemarks('');
+      setPodShortageAlert(false);
       setPodScanStatus(null);
     } finally {
       setPodUploading(false);
@@ -593,6 +730,7 @@ const LorryHirePodModuleInner: React.FC<LorryHirePodModuleProps> = ({
       ownerUid,
     });
 
+    playVerifiedBeep();
     setPayTarget(null);
     setPayRef('');
   };
@@ -787,6 +925,8 @@ const LorryHirePodModuleInner: React.FC<LorryHirePodModuleProps> = ({
                 );
                 setPodShortageCharge(String(h.shortageCharge ?? 0));
                 setPodDamageCharge(String(h.damageCharge ?? 0));
+                setPodRemarks(h.podRemarks || '');
+                setPodShortageAlert(false);
                 setPodImageUrl(h.podImageDataUrl || '');
                 setPodFileName(h.podFileName || '');
                 setPodScanStatus(null);
@@ -919,15 +1059,19 @@ const LorryHirePodModuleInner: React.FC<LorryHirePodModuleProps> = ({
             </span>
           </div>
           <div className="flex flex-wrap items-center gap-2">
-            <select
-              aria-label="Lorry Hire Division"
-              value={division}
-              onChange={(e) => setDivision(e.target.value === 'LOGISTICS' ? 'LOGISTICS' : 'FTL')}
-              className="px-2 py-1 rounded bg-white text-[#0D47A1] text-xs font-extrabold cursor-pointer"
-            >
-              <option value="FTL">FTL Division</option>
-              <option value="LOGISTICS">LOGISTICS Division</option>
-            </select>
+            <div className="min-w-[165px]">
+              <SearchableSelect
+                ariaLabel="Lorry Hire Division"
+                value={division}
+                onChange={(val) => setDivision(val === 'LOGISTICS' ? 'LOGISTICS' : 'FTL')}
+                options={[
+                  { value: 'FTL', label: 'FTL Division' },
+                  { value: 'LOGISTICS', label: 'LOGISTICS Division' },
+                ]}
+                triggerClassName="!py-1 !text-[#0D47A1] !font-extrabold"
+                searchPlaceholder="Search division..."
+              />
+            </div>
             <span className="text-xs text-blue-100">
               Booked vs Delivered Pkgs · Multi-Advance · Step-by-Step Deductions
             </span>
@@ -1164,9 +1308,174 @@ const LorryHirePodModuleInner: React.FC<LorryHirePodModuleProps> = ({
                 step="0.01"
                 required
                 value={hireAmount}
-                onChange={(e) => setHireAmount(e.target.value)}
+                onChange={(e) => {
+                  setHireAmount(e.target.value);
+                  const h = Number(e.target.value) || 0;
+                  const pct = Number(tdsRatePct) || 0;
+                  if (pct > 0) {
+                    setTdsAmount(String(Math.round(((h * pct) / 100) * 100) / 100));
+                  }
+                }}
                 placeholder="45000"
                 className="w-full px-2.5 py-1.5 rounded border border-slate-300 font-mono-num font-bold text-blue-900"
+              />
+            </div>
+          </div>
+
+          {/* Weight / Rate / TDS 194C / Receipt Challan / Detention (2-Day Free Rule) */}
+          <div className="grid grid-cols-2 sm:grid-cols-3 lg:grid-cols-6 gap-2.5 bg-slate-50 p-3 rounded-lg border border-slate-200">
+            <div>
+              <label className="block font-semibold text-slate-700 mb-1">Weight (MT)</label>
+              <input
+                type="number"
+                step="0.01"
+                min={0}
+                value={weightMt}
+                onChange={(e) => {
+                  setWeightMt(e.target.value);
+                  if (rateMode === 'Per MT') {
+                    const wt = Number(e.target.value) || 0;
+                    const rt = Number(ratePerUnit) || 0;
+                    if (wt > 0 && rt > 0) setHireAmount(String(Math.round(wt * rt * 100) / 100));
+                  }
+                }}
+                placeholder="20.00"
+                className="w-full px-2 py-1.5 rounded border border-slate-300 bg-white font-mono-num"
+              />
+            </div>
+            <div>
+              <label className="block font-semibold text-slate-700 mb-1">Hire Rate Mode</label>
+              <select
+                value={rateMode}
+                onChange={(e) => {
+                  const m = e.target.value === 'Per MT' ? 'Per MT' : 'Fixed';
+                  setRateMode(m);
+                  if (m === 'Per MT') {
+                    const wt = Number(weightMt) || 0;
+                    const rt = Number(ratePerUnit) || 0;
+                    if (wt > 0 && rt > 0) setHireAmount(String(Math.round(wt * rt * 100) / 100));
+                  }
+                }}
+                className="w-full px-2 py-1.5 rounded border border-slate-300 bg-white font-semibold"
+              >
+                <option value="Fixed">Fixed Lorry</option>
+                <option value="Per MT">Per MT</option>
+              </select>
+            </div>
+            <div>
+              <label className="block font-semibold text-slate-700 mb-1">Rate (₹ / MT)</label>
+              <input
+                type="number"
+                step="0.01"
+                min={0}
+                value={ratePerUnit}
+                onChange={(e) => {
+                  setRatePerUnit(e.target.value);
+                  if (rateMode === 'Per MT') {
+                    const wt = Number(weightMt) || 0;
+                    const rt = Number(e.target.value) || 0;
+                    if (wt > 0 && rt > 0) setHireAmount(String(Math.round(wt * rt * 100) / 100));
+                  }
+                }}
+                className="w-full px-2 py-1.5 rounded border border-slate-300 bg-white font-mono-num"
+              />
+            </div>
+            <div>
+              <label className="block font-semibold text-slate-700 mb-1">Detention Days (2d Free)</label>
+              <input
+                type="number"
+                min={0}
+                value={detentionDays}
+                onChange={(e) => handleDetentionDaysChange(e.target.value)}
+                className="w-full px-2 py-1.5 rounded border border-slate-300 bg-white font-mono-num"
+              />
+            </div>
+            <div>
+              <label className="block font-semibold text-slate-700 mb-1">Detention Rate/Day (₹)</label>
+              <input
+                type="number"
+                min={0}
+                value={detentionRatePerDay}
+                onChange={(e) => {
+                  setDetentionRatePerDay(e.target.value);
+                  handleDetentionDaysChange(detentionDays, e.target.value);
+                }}
+                className="w-full px-2 py-1.5 rounded border border-slate-300 bg-white font-mono-num"
+              />
+            </div>
+            <div>
+              <label className="block font-bold text-emerald-800 mb-1">(+) Detention Chg (₹)</label>
+              <input
+                type="number"
+                step="0.01"
+                min={0}
+                value={detentionCharge}
+                onChange={(e) => setDetentionCharge(e.target.value)}
+                className="w-full px-2 py-1.5 rounded border border-emerald-300 bg-emerald-50 font-mono-num font-bold text-emerald-900"
+              />
+            </div>
+
+            <div>
+              <label className="block font-semibold text-slate-700 mb-1">TDS 194C (%)</label>
+              <select
+                value={tdsRatePct}
+                onChange={(e) => handleTdsPctChange(e.target.value)}
+                className="w-full px-2 py-1.5 rounded border border-slate-300 bg-white font-semibold"
+              >
+                <option value="0">0% (194C Decl)</option>
+                <option value="1">1% (Individual/HUF)</option>
+                <option value="2">2% (Company/Firm)</option>
+              </select>
+            </div>
+            <div>
+              <label className="block font-semibold text-slate-700 mb-1">(-) TDS Amount (₹)</label>
+              <input
+                type="number"
+                step="0.01"
+                min={0}
+                value={tdsAmount}
+                onChange={(e) => setTdsAmount(e.target.value)}
+                className="w-full px-2 py-1.5 rounded border border-slate-300 bg-white font-mono-num"
+              />
+            </div>
+            <div>
+              <label className="block font-semibold text-slate-700 mb-1">Receipt Challan No.</label>
+              <input
+                type="text"
+                value={receiptChallanNo}
+                onChange={(e) => setReceiptChallanNo(e.target.value)}
+                placeholder="CH-1042"
+                className="w-full px-2 py-1.5 rounded border border-slate-300 bg-white font-mono-num"
+              />
+            </div>
+            <div>
+              <label className="block font-semibold text-slate-700 mb-1">Challan Receipt Date</label>
+              <input
+                type="date"
+                value={receiptChallanDate}
+                onChange={(e) => setReceiptChallanDate(e.target.value)}
+                className="w-full px-2 py-1.5 rounded border border-slate-300 bg-white font-mono-num"
+              />
+            </div>
+            <div>
+              <label className="block font-semibold text-slate-700 mb-1">Extra Advance (₹)</label>
+              <input
+                type="number"
+                step="0.01"
+                min={0}
+                value={extraAdvanceAmt}
+                onChange={(e) => setExtraAdvanceAmt(e.target.value)}
+                className="w-full px-2 py-1.5 rounded border border-slate-300 bg-white font-mono-num"
+              />
+            </div>
+            <div>
+              <label className="block font-semibold text-slate-700 mb-1">Remarks</label>
+              <input
+                type="text"
+                value={remarks}
+                onChange={(e) => setRemarks(e.target.value)}
+                placeholder="Optional note..."
+                className="w-full px-2 py-1.5 rounded border border-slate-300 bg-white"
               />
             </div>
           </div>
@@ -1215,11 +1524,11 @@ const LorryHirePodModuleInner: React.FC<LorryHirePodModuleProps> = ({
             </div>
           </div>
 
-          {/* Multi-Advance (Yes/No) Rows */}
+          {/* Multi-Advance (Yes/No) Rows up to 50 with Live Running Balance */}
           <div className="bg-slate-50 p-3 rounded-lg border border-slate-200 space-y-2.5">
             <div className="flex flex-wrap items-center justify-between gap-2">
               <div className="flex items-center gap-2">
-                <span className="font-bold text-slate-900">ADVANCE PAYMENTS</span>
+                <span className="font-bold text-slate-900">ADVANCE PAYMENTS ({activeAdvanceRows.length}/50)</span>
                 <label className="inline-flex items-center gap-1.5 font-semibold text-slate-700">
                   <span>Multi-Advance:</span>
                   <select
@@ -1251,8 +1560,9 @@ const LorryHirePodModuleInner: React.FC<LorryHirePodModuleProps> = ({
               {hasMultiAdvance && (
                 <button
                   type="button"
-                  onClick={() => setAdvances((prev) => [...prev, DEFAULT_ADVANCE_ROW()])}
-                  className="inline-flex items-center gap-1 px-2.5 py-1 rounded bg-blue-700 hover:bg-blue-800 text-white font-bold cursor-pointer"
+                  disabled={advances.length >= 50}
+                  onClick={() => setAdvances((prev) => [...prev.slice(0, 49), DEFAULT_ADVANCE_ROW()])}
+                  className="inline-flex items-center gap-1 px-2.5 py-1 rounded bg-blue-700 hover:bg-blue-800 disabled:opacity-50 text-white font-bold cursor-pointer"
                 >
                   <Plus className="w-3.5 h-3.5" />
                   Add Advance Row
@@ -1264,122 +1574,173 @@ const LorryHirePodModuleInner: React.FC<LorryHirePodModuleProps> = ({
               {activeAdvanceRows.map((adv, idx) => (
                 <div
                   key={idx}
-                  className="grid grid-cols-1 sm:grid-cols-2 md:grid-cols-6 gap-2 items-end bg-white p-2 rounded border border-slate-200"
+                  className="bg-white p-2.5 rounded border border-slate-200 space-y-2"
                 >
-                  <div>
-                    <label className="block text-[11px] font-semibold text-slate-600 mb-0.5">
-                      Payee Type
-                    </label>
-                    <select
-                      aria-label={`Advance ${idx + 1} Payee Type`}
-                      value={adv.payeeType}
-                      onChange={(e) =>
-                        setAdvances((prev) =>
-                          prev.map((r, i) => (i === idx ? { ...r, payeeType: e.target.value } : r))
-                        )
-                      }
-                      className="w-full px-2 py-1.5 rounded border border-slate-300 bg-white font-semibold"
-                    >
-                      <option value="Lorry Owner">Lorry Owner</option>
-                      <option value="Broker">Broker</option>
-                    </select>
-                  </div>
-                  <div className="md:col-span-2">
-                    <label className="block text-[11px] font-semibold text-slate-600 mb-0.5">
-                      Account Name / Bank
-                    </label>
-                    <select
-                      aria-label={`Advance ${idx + 1} Account Name`}
-                      value={adv.accountName}
-                      onChange={(e) =>
-                        setAdvances((prev) =>
-                          prev.map((r, i) => (i === idx ? { ...r, accountName: e.target.value } : r))
-                        )
-                      }
-                      className="w-full px-2 py-1.5 rounded border border-slate-300 bg-white"
-                    >
-                      {accountBankOptions.map((opt) => (
-                        <option key={opt} value={opt}>
-                          {opt}
-                        </option>
-                      ))}
-                      {!accountBankOptions.includes(adv.accountName) && adv.accountName && (
-                        <option value={adv.accountName}>{adv.accountName}</option>
-                      )}
-                    </select>
-                  </div>
-                  <div>
-                    <label className="block text-[11px] font-semibold text-slate-600 mb-0.5">
-                      Advance Date
-                    </label>
-                    <input
-                      type="date"
-                      value={adv.advanceDate}
-                      onChange={(e) =>
-                        setAdvances((prev) =>
-                          prev.map((r, i) => (i === idx ? { ...r, advanceDate: e.target.value } : r))
-                        )
-                      }
-                      className="w-full px-2 py-1.5 rounded border border-slate-300 font-mono-num"
-                    />
-                  </div>
-                  <div>
-                    <label className="block text-[11px] font-semibold text-slate-600 mb-0.5">
-                      Mode
-                    </label>
-                    <select
-                      aria-label={`Advance ${idx + 1} Mode`}
-                      value={adv.mode}
-                      onChange={(e) =>
-                        setAdvances((prev) =>
-                          prev.map((r, i) => (i === idx ? { ...r, mode: e.target.value } : r))
-                        )
-                      }
-                      className="w-full px-2 py-1.5 rounded border border-slate-300 bg-white"
-                    >
-                      <option value="NEFT">NEFT</option>
-                      <option value="RTGS">RTGS</option>
-                      <option value="IMPS">IMPS</option>
-                      <option value="UPI">UPI</option>
-                      <option value="Bank Transfer">Bank Transfer</option>
-                      <option value="Cash">Cash</option>
-                      <option value="Cheque">Cheque</option>
-                      <option value="Diesel Slip">Diesel Slip</option>
-                    </select>
-                  </div>
-                  <div className="flex items-end gap-1.5">
-                    <div className="flex-1">
+                  <div className="grid grid-cols-1 sm:grid-cols-2 md:grid-cols-6 gap-2 items-end">
+                    <div>
                       <label className="block text-[11px] font-semibold text-slate-600 mb-0.5">
-                        Amount (₹)
+                        Payee Type
                       </label>
-                      <input
-                        type="number"
-                        step="0.01"
-                        min={0}
-                        value={adv.amount}
-                        onChange={(e) =>
+                      <SearchableSelect
+                        ariaLabel={`Advance ${idx + 1} Payee Type`}
+                        value={adv.payeeType}
+                        onChange={(val) =>
                           setAdvances((prev) =>
-                            prev.map((r, i) =>
-                              i === idx ? { ...r, amount: Number(e.target.value) || 0 } : r
-                            )
+                            prev.map((r, i) => (i === idx ? { ...r, payeeType: val } : r))
                           )
                         }
-                        className="w-full px-2 py-1.5 rounded border border-slate-300 font-mono-num font-bold text-right"
+                        options={[
+                          { value: 'Broker', label: 'Broker' },
+                          { value: 'Lorry Owner', label: 'Lorry Owner' },
+                          { value: 'Driver', label: 'Driver' },
+                        ]}
+                        triggerClassName="!py-1.5 !font-semibold"
                       />
                     </div>
-                    {hasMultiAdvance && activeAdvanceRows.length > 1 && (
-                      <button
-                        type="button"
-                        onClick={() => setAdvances((prev) => prev.filter((_, i) => i !== idx))}
-                        className="p-1.5 rounded text-red-600 hover:bg-red-50 cursor-pointer"
-                        title="Remove advance row"
-                      >
-                        <Trash2 className="w-4 h-4" />
-                      </button>
-                    )}
+                    <div className="md:col-span-2">
+                      <label className="block text-[11px] font-semibold text-slate-600 mb-0.5">
+                        Account Name / Bank
+                      </label>
+                      <SearchableSelect
+                        ariaLabel={`Advance ${idx + 1} Account Name`}
+                        value={adv.accountName}
+                        onChange={(val) =>
+                          setAdvances((prev) =>
+                            prev.map((r, i) => (i === idx ? { ...r, accountName: val } : r))
+                          )
+                        }
+                        options={sortAlphaList(
+                          !accountBankOptions.includes(adv.accountName) && adv.accountName
+                            ? [...accountBankOptions, adv.accountName]
+                            : accountBankOptions
+                        ).map((opt) => ({ value: opt, label: opt }))}
+                        triggerClassName="!py-1.5"
+                        searchPlaceholder="Search bank / account..."
+                      />
+                    </div>
+                    <div>
+                      <label className="block text-[11px] font-semibold text-slate-600 mb-0.5">
+                        Advance Date
+                      </label>
+                      <input
+                        type="date"
+                        value={adv.advanceDate}
+                        onChange={(e) =>
+                          setAdvances((prev) =>
+                            prev.map((r, i) => (i === idx ? { ...r, advanceDate: e.target.value } : r))
+                          )
+                        }
+                        className="w-full px-2 py-1.5 rounded border border-slate-300 font-mono-num"
+                      />
+                    </div>
+                    <div>
+                      <label className="block text-[11px] font-semibold text-slate-600 mb-0.5">
+                        Mode
+                      </label>
+                      <SearchableSelect
+                        ariaLabel={`Advance ${idx + 1} Mode`}
+                        value={adv.mode}
+                        onChange={(val) =>
+                          setAdvances((prev) =>
+                            prev.map((r, i) => (i === idx ? { ...r, mode: val } : r))
+                          )
+                        }
+                        options={[...PAYMENT_MODE_OPTIONS, 'Diesel Slip']}
+                        triggerClassName="!py-1.5"
+                        searchPlaceholder="Search payment mode..."
+                      />
+                    </div>
+                    <div className="flex items-end gap-1.5">
+                      <div className="flex-1">
+                        <label className="block text-[11px] font-semibold text-slate-600 mb-0.5">
+                          Amount (₹)
+                        </label>
+                        <input
+                          type="number"
+                          step="0.01"
+                          min={0}
+                          value={adv.amount}
+                          onChange={(e) =>
+                            setAdvances((prev) =>
+                              prev.map((r, i) =>
+                                i === idx ? { ...r, amount: Number(e.target.value) || 0 } : r
+                              )
+                            )
+                          }
+                          className="w-full px-2 py-1.5 rounded border border-slate-300 font-mono-num font-bold text-right"
+                        />
+                      </div>
+                      {hasMultiAdvance && activeAdvanceRows.length > 1 && (
+                        <button
+                          type="button"
+                          onClick={() => setAdvances((prev) => prev.filter((_, i) => i !== idx))}
+                          className="p-1.5 rounded text-red-600 hover:bg-red-50 cursor-pointer"
+                          title="Remove advance row"
+                        >
+                          <Trash2 className="w-4 h-4" />
+                        </button>
+                      )}
+                    </div>
+                  </div>
+                  <div className="grid grid-cols-2 md:grid-cols-5 gap-2 items-center text-[11px]">
+                    <input
+                      type="text"
+                      value={adv.holderName || ''}
+                      onChange={(e) =>
+                        setAdvances((prev) =>
+                          prev.map((r, i) => (i === idx ? { ...r, holderName: e.target.value } : r))
+                        )
+                      }
+                      placeholder="Holder Name"
+                      className="px-2 py-1 rounded border border-slate-200 bg-slate-50"
+                    />
+                    <input
+                      type="text"
+                      value={adv.bankAccountNo || ''}
+                      onChange={(e) =>
+                        setAdvances((prev) =>
+                          prev.map((r, i) =>
+                            i === idx ? { ...r, bankAccountNo: e.target.value } : r
+                          )
+                        )
+                      }
+                      placeholder="A/c No."
+                      className="px-2 py-1 rounded border border-slate-200 bg-slate-50 font-mono-num"
+                    />
+                    <input
+                      type="text"
+                      value={adv.upiId || ''}
+                      onChange={(e) =>
+                        setAdvances((prev) =>
+                          prev.map((r, i) => (i === idx ? { ...r, upiId: e.target.value } : r))
+                        )
+                      }
+                      placeholder="UPI ID"
+                      className="px-2 py-1 rounded border border-slate-200 bg-slate-50 font-mono-num"
+                    />
+                    <input
+                      type="text"
+                      value={adv.refNo || ''}
+                      onChange={(e) =>
+                        setAdvances((prev) =>
+                          prev.map((r, i) => (i === idx ? { ...r, refNo: e.target.value } : r))
+                        )
+                      }
+                      placeholder="UTR / Cheque / Ref No."
+                      className="px-2 py-1 rounded border border-slate-200 bg-slate-50 font-mono-num"
+                    />
+                    <div className="px-2 py-1 rounded bg-emerald-50 border border-emerald-200 font-mono-num font-bold text-emerald-900 text-right">
+                      Running Bal: ₹{formatINR(advanceRunningBalances[idx] ?? balancePayable)}
+                    </div>
                   </div>
                 </div>
               ))}
+            </div>
+            <div className="flex justify-end text-xs font-extrabold text-slate-900 pt-1">
+              <span>
+                Final Balance Due after {activeAdvanceRows.length} Advance(s): ₹{' '}
+                <span className="font-mono-num text-emerald-700">{formatINR(balancePayable)}</span>
+              </span>
             </div>
           </div>
 
@@ -1462,9 +1823,15 @@ const LorryHirePodModuleInner: React.FC<LorryHirePodModuleProps> = ({
                 <span>Gross Lorry Hire:</span>
                 <span className="font-bold">₹ {formatINR(hireNum)}</span>
               </div>
+              {detChgNum > 0 && (
+                <div className="flex justify-between text-emerald-700">
+                  <span>(+) Detention ({Math.max(0, (Number(detentionDays) || 0) - 2)}d):</span>
+                  <span>+ ₹ {formatINR(detChgNum)}</span>
+                </div>
+              )}
               <div className="flex justify-between text-slate-600">
-                <span>(-) Multi-Advances ({activeAdvanceRows.length}):</span>
-                <span>- ₹ {formatINR(totalAdvances)}</span>
+                <span>(-) Advances ({activeAdvanceRows.length}) + Extra:</span>
+                <span>- ₹ {formatINR(totalAdvances + extraAdvNum)}</span>
               </div>
               <div className="flex justify-between text-slate-600">
                 <span>(-) Loading + Unloading:</span>
@@ -1474,6 +1841,12 @@ const LorryHirePodModuleInner: React.FC<LorryHirePodModuleProps> = ({
                 <span>(-) Parking + Kata:</span>
                 <span>- ₹ {formatINR(parkNum + kataNum)}</span>
               </div>
+              {tdsAmtNum > 0 && (
+                <div className="flex justify-between text-slate-600">
+                  <span>(-) TDS 194C ({tdsRatePct}%):</span>
+                  <span>- ₹ {formatINR(tdsAmtNum)}</span>
+                </div>
+              )}
               <div className="flex justify-between text-red-700">
                 <span>(-) Shortage ({shortageDamagePkgs} Pkgs) / Damage:</span>
                 <span>- ₹ {formatINR(shortChgNum + dmgChgNum)}</span>
@@ -1631,8 +2004,23 @@ const LorryHirePodModuleInner: React.FC<LorryHirePodModuleProps> = ({
                 )}
               </div>
 
+              {podShortageAlert && (
+                <div className="p-3 rounded-lg bg-red-600 text-white font-extrabold flex items-center gap-2 shadow-sm animate-pulse">
+                  <AlertTriangle className="w-5 h-5 shrink-0" />
+                  <span>
+                    SHORTAGE / BREAKAGE / LEAKAGE DETECTED ON POD! Verify Delivered Pkgs &amp; Deduction Charges before unlocking payment.
+                  </span>
+                </div>
+              )}
+
               {podScanStatus && (
-                <p className="text-xs font-semibold text-blue-800 bg-blue-50 p-2.5 rounded-lg border border-blue-200">
+                <p
+                  className={`text-xs font-semibold p-2.5 rounded-lg border ${
+                    podShortageAlert
+                      ? 'text-red-900 bg-red-50 border-red-300'
+                      : 'text-blue-800 bg-blue-50 border-blue-200'
+                  }`}
+                >
                   {podScanStatus}
                 </p>
               )}
@@ -1712,6 +2100,17 @@ const LorryHirePodModuleInner: React.FC<LorryHirePodModuleProps> = ({
               </div>
 
               <div>
+                <label className="block font-semibold text-slate-700 mb-1">POD Remarks / Shortage Note</label>
+                <input
+                  type="text"
+                  value={podRemarks}
+                  onChange={(e) => setPodRemarks(e.target.value)}
+                  placeholder="Clean delivery / shortage or damage observation..."
+                  className="w-full px-3 py-1.5 rounded border border-slate-300 bg-white"
+                />
+              </div>
+
+              <div>
                 <label className="block font-semibold text-slate-700 mb-1">
                   POD Receive Date (Mandatory to Unlock Balance Payment) *
                 </label>
@@ -1774,16 +2173,13 @@ const LorryHirePodModuleInner: React.FC<LorryHirePodModuleProps> = ({
               </div>
               <div>
                 <label className="block font-semibold text-slate-700 mb-1">Payment Mode</label>
-                <select
+                <SearchableSelect
+                  ariaLabel="Balance Payment Mode"
                   value={payMode}
-                  onChange={(e) => setPayMode(e.target.value)}
-                  className="w-full px-3 py-1.5 rounded border border-slate-300"
-                >
-                  <option value="Bank Transfer">Bank Transfer</option>
-                  <option value="NEFT">NEFT</option>
-                  <option value="UPI">UPI</option>
-                  <option value="Cash">Cash</option>
-                </select>
+                  onChange={setPayMode}
+                  options={PAYMENT_MODE_OPTIONS}
+                  triggerClassName="!py-1.5"
+                />
               </div>
               <div>
                 <label className="block font-semibold text-slate-700 mb-1">Reference / UTR No</label>

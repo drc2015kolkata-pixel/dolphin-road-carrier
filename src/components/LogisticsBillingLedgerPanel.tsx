@@ -10,12 +10,14 @@ import {
 } from 'lucide-react';
 import {
   CompanySettings,
+  LogisticsDivisionCode,
   LogisticsDocket,
   LogisticsDriveFolderName,
   LogisticsInvoice,
   LogisticsInvoiceDocketRow,
   LogisticsLedgerEntry,
   LogisticsParty,
+  makeDivisionDocId,
 } from '../types/erp';
 import { removeDocument, upsertDocument } from '../lib/firestoreStore';
 import { formatDateDDMMYYYY, formatINR, normalizeFyLabel } from '../lib/formatters';
@@ -29,8 +31,11 @@ import {
   formatPartyDetailsLine,
   RichEntityPicker,
 } from './RichEntityPicker';
+import { SearchableSelect } from './SearchableSelect';
+import { COMMON_REMARK_PRESETS, PAYMENT_MODE_OPTIONS } from '../lib/dropdownMasterStore';
 
 interface LogisticsBillingLedgerPanelProps {
+  divisionMode?: LogisticsDivisionCode;
   subView: 'billing' | 'ledgers';
   ownerUid: string;
   activeStaffCode: string;
@@ -54,10 +59,17 @@ interface LogisticsBillingLedgerPanelProps {
 function buildNextDocNo(
   existing: LogisticsInvoice[],
   docType: 'Tax Invoice' | 'Credit Note' | 'Debit Note',
-  fy: string
+  fy: string,
+  divisionMode: LogisticsDivisionCode = 'LOGISTICS'
 ): string {
   const shortFy = fy.replace(/^FY\s+/i, '');
-  const prefix = docType === 'Credit Note' ? 'LCN' : docType === 'Debit Note' ? 'LDN' : 'LINV';
+  const baseTag = divisionMode === 'PTL' ? 'P' : divisionMode === 'COURIER' ? 'C' : 'L';
+  const prefix =
+    docType === 'Credit Note'
+      ? `${baseTag}CN`
+      : docType === 'Debit Note'
+      ? `${baseTag}DN`
+      : `${baseTag}INV`;
   const sameType = existing.filter((i) => i.docType === docType);
   const maxNum = sameType.reduce((max, inv) => {
     const m = String(inv.docNo || '').match(/(\d+)/);
@@ -68,6 +80,7 @@ function buildNextDocNo(
 }
 
 export const LogisticsBillingLedgerPanel: React.FC<LogisticsBillingLedgerPanelProps> = ({
+  divisionMode = 'LOGISTICS',
   subView,
   ownerUid,
   activeStaffCode,
@@ -86,7 +99,7 @@ export const LogisticsBillingLedgerPanel: React.FC<LogisticsBillingLedgerPanelPr
 
   // ---------------- BILLING (TAX INVOICE / CN / DN) ----------------
   const [docType, setDocType] = useState<'Tax Invoice' | 'Credit Note' | 'Debit Note'>('Tax Invoice');
-  const [docNo, setDocNo] = useState(() => buildNextDocNo(invoices, 'Tax Invoice', activeFy));
+  const [docNo, setDocNo] = useState(() => buildNextDocNo(invoices, 'Tax Invoice', activeFy, divisionMode));
   const [docDate, setDocDate] = useState(today);
   const [linkedDocNo, setLinkedDocNo] = useState('');
   const [partyName, setPartyName] = useState('');
@@ -182,7 +195,7 @@ export const LogisticsBillingLedgerPanel: React.FC<LogisticsBillingLedgerPanelPr
     if (!partyName.trim() || !docNo.trim()) return;
     setSavingDoc(true);
     try {
-      const id = `linv_${Date.now()}_${Math.random().toString(36).slice(2, 6)}`;
+      const id = makeDivisionDocId(divisionMode, 'linv');
       const rows: LogisticsInvoiceDocketRow[] =
         billingTotals.picked.length > 0
           ? billingTotals.picked.map((d) => ({
@@ -253,7 +266,7 @@ export const LogisticsBillingLedgerPanel: React.FC<LogisticsBillingLedgerPanelPr
       }
       setSelectedDocketIds([]);
       setManualAdjustmentAmt('0');
-      setDocNo(buildNextDocNo(invoices, docType, activeFy));
+      setDocNo(buildNextDocNo(invoices, docType, activeFy, divisionMode));
     } finally {
       setSavingDoc(false);
     }
@@ -282,7 +295,7 @@ export const LogisticsBillingLedgerPanel: React.FC<LogisticsBillingLedgerPanelPr
     if (!ledgerParty.trim() || amt <= 0) return;
     setSavingVoucher(true);
     try {
-      const id = `lled_${Date.now()}_${Math.random().toString(36).slice(2, 6)}`;
+      const id = makeDivisionDocId(divisionMode, 'lled');
       const tds = Number(tdsAmt) || 0;
       await upsertDocument(
         'logistics_ledgers',
@@ -614,13 +627,26 @@ export const LogisticsBillingLedgerPanel: React.FC<LogisticsBillingLedgerPanelPr
                     className="w-full px-2.5 py-1.5 rounded border border-slate-300 font-mono-num"
                   />
                 </div>
-                <div>
+                <div className="space-y-1">
                   <label className="block text-[11px] font-bold text-slate-600 mb-0.5">Remarks</label>
                   <input
                     value={remarks}
                     onChange={(e) => setRemarks(e.target.value)}
                     placeholder="Billing note..."
                     className="w-full px-2.5 py-1.5 rounded border border-slate-300"
+                  />
+                  <SearchableSelect
+                    ariaLabel="Billing Remarks Preset"
+                    value=""
+                    onChange={(val) => {
+                      if (val) setRemarks(val);
+                    }}
+                    options={[
+                      { value: '', label: '+ Quick Remark Preset (A-Z)...', pinFirst: true },
+                      ...COMMON_REMARK_PRESETS.map((r) => ({ value: r, label: r })),
+                    ]}
+                    triggerClassName="!py-1 !text-[11px]"
+                    searchPlaceholder="Search remarks..."
                   />
                 </div>
               </div>
@@ -636,15 +662,19 @@ export const LogisticsBillingLedgerPanel: React.FC<LogisticsBillingLedgerPanelPr
                 </label>
                 {!reverseCharge && (
                   <div className="flex items-center gap-2">
-                    <select
-                      value={gstRate}
-                      onChange={(e) => setGstRate(e.target.value)}
-                      className="px-2 py-1 rounded border border-teal-300 bg-white text-[11px] font-bold"
-                    >
-                      <option value="5">5%</option>
-                      <option value="12">12%</option>
-                      <option value="18">18%</option>
-                    </select>
+                    <div className="w-[95px]">
+                      <SearchableSelect
+                        ariaLabel="Billing GST Rate"
+                        value={gstRate}
+                        onChange={setGstRate}
+                        options={[
+                          { value: '12', label: '12%' },
+                          { value: '18', label: '18%' },
+                          { value: '5', label: '5%' },
+                        ]}
+                        triggerClassName="!py-1 !text-[11px] !font-bold !border-teal-300"
+                      />
+                    </div>
                     <label className="inline-flex items-center gap-1 text-[11px] font-bold">
                       <input
                         type="checkbox"
@@ -851,18 +881,20 @@ export const LogisticsBillingLedgerPanel: React.FC<LogisticsBillingLedgerPanelPr
                   </div>
                   <div>
                     <label className="block text-[11px] font-bold text-slate-600 mb-0.5">Type</label>
-                    <select
+                    <SearchableSelect
+                      ariaLabel="Logistics Voucher Type"
                       value={voucherType}
-                      onChange={(e) =>
-                        setVoucherType(e.target.value as 'Receipt' | 'Payment' | 'COD Cash' | 'Adjustment')
+                      onChange={(val) =>
+                        setVoucherType(val as 'Receipt' | 'Payment' | 'COD Cash' | 'Adjustment')
                       }
-                      className="w-full px-2 py-1.5 rounded border border-slate-300 font-bold"
-                    >
-                      <option value="Receipt">Receipt (TBB / Paid)</option>
-                      <option value="COD Cash">To-Pay COD Cash</option>
-                      <option value="Payment">Line-Haul / Vendor Pay</option>
-                      <option value="Adjustment">Adjustment</option>
-                    </select>
+                      options={[
+                        { value: 'Adjustment', label: 'Adjustment' },
+                        { value: 'Payment', label: 'Line-Haul / Vendor Pay' },
+                        { value: 'Receipt', label: 'Receipt (TBB / Paid)' },
+                        { value: 'COD Cash', label: 'To-Pay COD Cash' },
+                      ]}
+                      triggerClassName="!py-1.5 !font-bold"
+                    />
                   </div>
                 </div>
 
@@ -953,18 +985,13 @@ export const LogisticsBillingLedgerPanel: React.FC<LogisticsBillingLedgerPanelPr
                   </div>
                   <div>
                     <label className="block text-[11px] font-bold text-slate-600 mb-0.5">Payment Mode</label>
-                    <select
+                    <SearchableSelect
+                      ariaLabel="Logistics Payment Mode"
                       value={paymentMode}
-                      onChange={(e) => setPaymentMode(e.target.value)}
-                      className="w-full px-2 py-1.5 rounded border border-slate-300 font-bold"
-                    >
-                      <option value="UPI">UPI</option>
-                      <option value="NEFT">NEFT</option>
-                      <option value="RTGS">RTGS</option>
-                      <option value="Cheque">Cheque</option>
-                      <option value="Cash">Cash</option>
-                      <option value="Advance">Advance</option>
-                    </select>
+                      onChange={setPaymentMode}
+                      options={PAYMENT_MODE_OPTIONS}
+                      triggerClassName="!py-1.5 !font-bold"
+                    />
                   </div>
                 </div>
 

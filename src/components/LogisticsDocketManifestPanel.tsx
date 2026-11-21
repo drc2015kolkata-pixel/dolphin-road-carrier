@@ -16,6 +16,7 @@ import {
 import {
   BRANCH_OPTIONS,
   CompanySettings,
+  LogisticsDivisionCode,
   LogisticsDocket,
   LogisticsDriveFolderName,
   LogisticsDriver,
@@ -23,6 +24,7 @@ import {
   LogisticsParty,
   LogisticsStockStage,
   LogisticsVehicle,
+  makeDivisionDocId,
 } from '../types/erp';
 import { removeDocument, upsertDocument } from '../lib/firestoreStore';
 import { formatDateDDMMYYYY, formatINR, normalizeFyLabel } from '../lib/formatters';
@@ -41,8 +43,17 @@ import {
   formatVehicleDetailsLine,
   RichEntityPicker,
 } from './RichEntityPicker';
+import { SearchableSelect } from './SearchableSelect';
+import { EditableSearchSelect } from './EditableSearchSelect';
+import {
+  ALL_INDIA_BRANCH_OPTIONS,
+  DEFAULT_PACKAGE_MODES,
+  getEffectiveDropdownList,
+} from '../lib/dropdownMasterStore';
+import { playVerifiedBeep } from '../lib/audioFeedback';
 
 interface LogisticsDocketManifestPanelProps {
+  divisionMode?: LogisticsDivisionCode;
   subView: 'docket' | 'manifest' | 'godown';
   ownerUid: string;
   activeStaffCode: string;
@@ -66,28 +77,40 @@ interface LogisticsDocketManifestPanelProps {
 
 const HUB_BRANCHES = BRANCH_OPTIONS.filter((b) => b !== 'ALL');
 
-function buildNextDocketNo(existing: LogisticsDocket[], branch: string, fy: string): string {
+function buildNextDocketNo(
+  existing: LogisticsDocket[],
+  branch: string,
+  fy: string,
+  divisionMode: LogisticsDivisionCode = 'LOGISTICS'
+): string {
   const shortFy = fy.replace(/^FY\s+/i, '');
   const br = (branch || 'KOL').replace(/[^A-Z0-9]/gi, '').toUpperCase().slice(0, 3) || 'KOL';
+  const divCode = divisionMode === 'PTL' ? 'PTL' : divisionMode === 'COURIER' ? 'COUR' : 'LOG';
   const maxNum = existing.reduce((max, d) => {
     const m = String(d.docketNo || '').match(/(\d+)/);
     const n = m ? Number(m[1]) : 0;
     return n > max ? n : max;
   }, 100);
-  return `LOG-${br}-${maxNum + 1}/${shortFy}`;
+  return `${divCode}-${br}-${maxNum + 1}/${shortFy}`;
 }
 
-function buildNextManifestNo(existing: LogisticsManifest[], fy: string): string {
+function buildNextManifestNo(
+  existing: LogisticsManifest[],
+  fy: string,
+  divisionMode: LogisticsDivisionCode = 'LOGISTICS'
+): string {
   const shortFy = fy.replace(/^FY\s+/i, '');
+  const divPrefix = divisionMode === 'PTL' ? 'PMNF' : divisionMode === 'COURIER' ? 'CMNF' : 'MNF';
   const maxNum = existing.reduce((max, m) => {
     const match = String(m.manifestNo || '').match(/(\d+)/);
     const n = match ? Number(match[1]) : 0;
     return n > max ? n : max;
   }, 10);
-  return `MNF-${maxNum + 1}/${shortFy}`;
+  return `${divPrefix}-${maxNum + 1}/${shortFy}`;
 }
 
 export const LogisticsDocketManifestPanel: React.FC<LogisticsDocketManifestPanelProps> = ({
+  divisionMode = 'LOGISTICS',
   subView,
   ownerUid,
   activeStaffCode,
@@ -107,8 +130,9 @@ export const LogisticsDocketManifestPanel: React.FC<LogisticsDocketManifestPanel
 
   // ---------------- DOCKET FORM STATE ----------------
   const [editingDocketId, setEditingDocketId] = useState<string | null>(null);
-  const [docketNo, setDocketNo] = useState(() => buildNextDocketNo(dockets, defaultOrigin, activeFy));
+  const [docketNo, setDocketNo] = useState(() => buildNextDocketNo(dockets, defaultOrigin, activeFy, divisionMode));
   const [docketDate, setDocketDate] = useState(today);
+  const [billedAtBranch, setBilledAtBranch] = useState<string>(defaultOrigin);
   const [originBranch, setOriginBranch] = useState<string>(defaultOrigin);
   const [destBranch, setDestBranch] = useState<string>('SILIGURI');
   const [deliveryMode, setDeliveryMode] = useState<'Door Delivery' | 'Godown Delivery'>('Godown Delivery');
@@ -272,7 +296,7 @@ export const LogisticsDocketManifestPanel: React.FC<LogisticsDocketManifestPanel
 
   const resetDocketForm = () => {
     setEditingDocketId(null);
-    setDocketNo(buildNextDocketNo(dockets, originBranch, activeFy));
+    setDocketNo(buildNextDocketNo(dockets, originBranch, activeFy, divisionMode));
     setConsignorName('');
     setSelectedConsignorId('');
     setConsignorAddress('');
@@ -294,11 +318,12 @@ export const LogisticsDocketManifestPanel: React.FC<LogisticsDocketManifestPanel
     setDocketSaving(true);
     try {
       const existing = editingDocketId ? dockets.find((d) => d.id === editingDocketId) : undefined;
-      const docId = editingDocketId || `ldkt_${Date.now()}_${Math.random().toString(36).slice(2, 6)}`;
+      const docId = editingDocketId || makeDivisionDocId(divisionMode, 'ldkt');
       const payload: Record<string, unknown> = {
         docketNo: docketNo.trim().toUpperCase(),
         docketDate,
         financialYear: normalizeFyLabel(activeFy),
+        billedAtBranch: billedAtBranch.trim() || originBranch,
         originBranch,
         destBranch,
         deliveryMode,
@@ -344,6 +369,7 @@ export const LogisticsDocketManifestPanel: React.FC<LogisticsDocketManifestPanel
         ownerUid,
       };
       await upsertDocument('logistics_dockets', docId, payload, !editingDocketId);
+      playVerifiedBeep();
       resetDocketForm();
     } finally {
       setDocketSaving(false);
@@ -354,6 +380,7 @@ export const LogisticsDocketManifestPanel: React.FC<LogisticsDocketManifestPanel
     setEditingDocketId(d.id);
     setDocketNo(d.docketNo);
     setDocketDate(d.docketDate);
+    setBilledAtBranch(d.billedAtBranch || d.originBranch || defaultOrigin);
     setOriginBranch(d.originBranch);
     setDestBranch(d.destBranch);
     setDeliveryMode(d.deliveryMode);
@@ -418,7 +445,7 @@ export const LogisticsDocketManifestPanel: React.FC<LogisticsDocketManifestPanel
     if (!manifestNo.trim() || !mnfTruckNo.trim() || selectedManifestDockets.length === 0) return;
     setManifestSaving(true);
     try {
-      const mId = `lmnf_${Date.now()}_${Math.random().toString(36).slice(2, 6)}`;
+      const mId = makeDivisionDocId(divisionMode, 'lmnf');
       const totalPkgs = selectedManifestDockets.reduce((s, d) => s + Number(d.packages || 0), 0);
       const totalWeightKg = selectedManifestDockets.reduce((s, d) => s + Number(d.chargedWeightKg || 0), 0);
       const totalTopayAmount = selectedManifestDockets
@@ -470,7 +497,8 @@ export const LogisticsDocketManifestPanel: React.FC<LogisticsDocketManifestPanel
         );
       }
       setSelectedDocketIds([]);
-      setManifestNo(buildNextManifestNo(manifests, activeFy));
+      setManifestNo(buildNextManifestNo(manifests, activeFy, divisionMode));
+      playVerifiedBeep();
     } finally {
       setManifestSaving(false);
     }
@@ -630,57 +658,65 @@ export const LogisticsDocketManifestPanel: React.FC<LogisticsDocketManifestPanel
                 </div>
                 <div>
                   <label className="block text-[11px] font-bold text-slate-600 mb-0.5">Pay Mode</label>
-                  <select
+                  <SearchableSelect
+                    ariaLabel="Docket Pay Mode"
                     value={payMode}
-                    onChange={(e) => setPayMode(e.target.value as 'Paid' | 'To-Pay' | 'TBB')}
-                    className="w-full px-2 py-1.5 rounded border border-slate-300 font-bold text-[#0F766E]"
-                  >
-                    <option value="TBB">TBB (To Be Billed)</option>
-                    <option value="Paid">Paid</option>
-                    <option value="To-Pay">To-Pay (COD)</option>
-                  </select>
+                    onChange={(val) => setPayMode(val as 'Paid' | 'To-Pay' | 'TBB')}
+                    options={[
+                      { value: 'Paid', label: 'Paid' },
+                      { value: 'TBB', label: 'TBB (To Be Billed)' },
+                      { value: 'To-Pay', label: 'To-Pay (COD)' },
+                    ]}
+                    triggerClassName="!py-1.5 !font-bold !text-[#0F766E]"
+                  />
                 </div>
               </div>
 
-              <div className="grid grid-cols-3 gap-2">
+              <div className="grid grid-cols-2 sm:grid-cols-4 gap-2">
                 <div>
                   <label className="block text-[11px] font-bold text-slate-600 mb-0.5">Origin Hub</label>
-                  <select
+                  <SearchableSelect
+                    ariaLabel="Origin Hub"
                     value={originBranch}
-                    onChange={(e) => setOriginBranch(e.target.value)}
-                    className="w-full px-2 py-1.5 rounded border border-slate-300 font-semibold"
-                  >
-                    {HUB_BRANCHES.map((b) => (
-                      <option key={b} value={b}>
-                        {b}
-                      </option>
-                    ))}
-                  </select>
+                    onChange={setOriginBranch}
+                    options={HUB_BRANCHES}
+                    triggerClassName="!py-1.5 !font-semibold"
+                    searchPlaceholder="Search origin hub..."
+                  />
                 </div>
                 <div>
                   <label className="block text-[11px] font-bold text-slate-600 mb-0.5">Dest Hub</label>
-                  <select
+                  <SearchableSelect
+                    ariaLabel="Destination Hub"
                     value={destBranch}
-                    onChange={(e) => setDestBranch(e.target.value)}
-                    className="w-full px-2 py-1.5 rounded border border-slate-300 font-semibold"
-                  >
-                    {HUB_BRANCHES.map((b) => (
-                      <option key={b} value={b}>
-                        {b}
-                      </option>
-                    ))}
-                  </select>
+                    onChange={setDestBranch}
+                    options={HUB_BRANCHES}
+                    triggerClassName="!py-1.5 !font-semibold"
+                    searchPlaceholder="Search dest hub..."
+                  />
+                </div>
+                <div>
+                  <label className="block text-[11px] font-bold text-slate-600 mb-0.5">Billed At (Branch)</label>
+                  <EditableSearchSelect
+                    ariaLabel="Docket Billed At Branch"
+                    value={billedAtBranch}
+                    onChange={setBilledAtBranch}
+                    options={ALL_INDIA_BRANCH_OPTIONS}
+                    placeholder="Select billing branch..."
+                  />
                 </div>
                 <div>
                   <label className="block text-[11px] font-bold text-slate-600 mb-0.5">Delivery Type</label>
-                  <select
+                  <SearchableSelect
+                    ariaLabel="Delivery Type"
                     value={deliveryMode}
-                    onChange={(e) => setDeliveryMode(e.target.value as 'Door Delivery' | 'Godown Delivery')}
-                    className="w-full px-2 py-1.5 rounded border border-slate-300"
-                  >
-                    <option value="Godown Delivery">Godown Delivery</option>
-                    <option value="Door Delivery">Door Delivery</option>
-                  </select>
+                    onChange={(val) => setDeliveryMode(val as 'Door Delivery' | 'Godown Delivery')}
+                    options={[
+                      { value: 'Door Delivery', label: 'Door Delivery' },
+                      { value: 'Godown Delivery', label: 'Godown Delivery' },
+                    ]}
+                    triggerClassName="!py-1.5"
+                  />
                 </div>
               </div>
 
@@ -819,20 +855,28 @@ export const LogisticsDocketManifestPanel: React.FC<LogisticsDocketManifestPanel
               <div className="grid grid-cols-2 gap-2">
                 <div>
                   <label className="block text-[11px] font-bold text-slate-600 mb-0.5">Goods Description</label>
-                  <input
+                  <EditableSearchSelect
+                    ariaLabel="Docket Goods Description"
                     value={goodsDesc}
-                    onChange={(e) => setGoodsDesc(e.target.value)}
-                    className="w-full px-2.5 py-1.5 rounded border border-slate-300"
+                    onChange={setGoodsDesc}
+                    options={getEffectiveDropdownList(company, 'goodsTypes')}
+                    placeholder="Select or type goods A-Z..."
                   />
                 </div>
                 <div>
                   <label className="block text-[11px] font-bold text-slate-600 mb-0.5">Packing / Godown Rack</label>
                   <div className="grid grid-cols-2 gap-1">
-                    <input
+                    <EditableSearchSelect
+                      ariaLabel="Docket Packing Type"
                       value={packingType}
-                      onChange={(e) => setPackingType(e.target.value)}
-                      placeholder="Carton"
-                      className="w-full px-2 py-1.5 rounded border border-slate-300"
+                      onChange={setPackingType}
+                      options={Array.from(
+                        new Set([
+                          ...DEFAULT_PACKAGE_MODES,
+                          ...getEffectiveDropdownList(company, 'packageModes'),
+                        ])
+                      )}
+                      placeholder="Carton / Drum..."
                     />
                     <input
                       value={godownRack}
@@ -847,15 +891,17 @@ export const LogisticsDocketManifestPanel: React.FC<LogisticsDocketManifestPanel
               <div className="grid grid-cols-4 gap-2">
                 <div>
                   <label className="block text-[11px] font-bold text-slate-600 mb-0.5">Rate Basis</label>
-                  <select
+                  <SearchableSelect
+                    ariaLabel="Docket Rate Basis"
                     value={rateBasis}
-                    onChange={(e) => setRateBasis(e.target.value as 'Per Kg' | 'Per Package' | 'Fixed')}
-                    className="w-full px-1.5 py-1.5 rounded border border-slate-300"
-                  >
-                    <option value="Per Kg">Per Kg</option>
-                    <option value="Per Package">Per Pkg</option>
-                    <option value="Fixed">Fixed</option>
-                  </select>
+                    onChange={(val) => setRateBasis(val as 'Per Kg' | 'Per Package' | 'Fixed')}
+                    options={[
+                      { value: 'Fixed', label: 'Fixed' },
+                      { value: 'Per Kg', label: 'Per Kg' },
+                      { value: 'Per Package', label: 'Per Pkg' },
+                    ]}
+                    triggerClassName="!py-1.5"
+                  />
                 </div>
                 <div>
                   <label className="block text-[11px] font-bold text-slate-600 mb-0.5">Rate (₹)</label>
@@ -928,16 +974,20 @@ export const LogisticsDocketManifestPanel: React.FC<LogisticsDocketManifestPanel
                 </label>
                 {!reverseCharge && (
                   <div className="flex items-center gap-2">
-                    <select
-                      value={gstRate}
-                      onChange={(e) => setGstRate(e.target.value)}
-                      className="px-2 py-1 rounded border border-teal-300 bg-white text-[11px] font-bold"
-                    >
-                      <option value="5">5% GST</option>
-                      <option value="12">12% GST</option>
-                      <option value="18">18% GST</option>
-                      <option value="0">0%</option>
-                    </select>
+                    <div className="w-[115px]">
+                      <SearchableSelect
+                        ariaLabel="Docket GST Rate"
+                        value={gstRate}
+                        onChange={setGstRate}
+                        options={[
+                          { value: '0', label: '0%' },
+                          { value: '12', label: '12% GST' },
+                          { value: '18', label: '18% GST' },
+                          { value: '5', label: '5% GST' },
+                        ]}
+                        triggerClassName="!py-1 !text-[11px] !font-bold !border-teal-300"
+                      />
+                    </div>
                     <label className="inline-flex items-center gap-1 text-[11px] font-semibold">
                       <input
                         type="checkbox"
@@ -1170,31 +1220,25 @@ export const LogisticsDocketManifestPanel: React.FC<LogisticsDocketManifestPanel
               <div className="grid grid-cols-2 gap-2">
                 <div>
                   <label className="block text-[11px] font-bold text-slate-600 mb-0.5">From Hub</label>
-                  <select
+                  <SearchableSelect
+                    ariaLabel="Manifest From Hub"
                     value={mnfFromBranch}
-                    onChange={(e) => setMnfFromBranch(e.target.value)}
-                    className="w-full px-2 py-1.5 rounded border border-slate-300 font-semibold"
-                  >
-                    {HUB_BRANCHES.map((b) => (
-                      <option key={b} value={b}>
-                        {b}
-                      </option>
-                    ))}
-                  </select>
+                    onChange={setMnfFromBranch}
+                    options={HUB_BRANCHES}
+                    triggerClassName="!py-1.5 !font-semibold"
+                    searchPlaceholder="Search from hub..."
+                  />
                 </div>
                 <div>
                   <label className="block text-[11px] font-bold text-slate-600 mb-0.5">Destination Hub</label>
-                  <select
+                  <SearchableSelect
+                    ariaLabel="Manifest Destination Hub"
                     value={mnfToBranch}
-                    onChange={(e) => setMnfToBranch(e.target.value)}
-                    className="w-full px-2 py-1.5 rounded border border-slate-300 font-semibold"
-                  >
-                    {HUB_BRANCHES.map((b) => (
-                      <option key={b} value={b}>
-                        {b}
-                      </option>
-                    ))}
-                  </select>
+                    onChange={setMnfToBranch}
+                    options={HUB_BRANCHES}
+                    triggerClassName="!py-1.5 !font-semibold"
+                    searchPlaceholder="Search destination hub..."
+                  />
                 </div>
               </div>
 
@@ -1592,30 +1636,35 @@ export const LogisticsDocketManifestPanel: React.FC<LogisticsDocketManifestPanel
           </div>
 
           <div className="p-3 bg-slate-50 border-b border-slate-200 flex flex-wrap items-center gap-2 text-xs">
-            <select
-              value={godownBranchFilter}
-              onChange={(e) => setGodownBranchFilter(e.target.value)}
-              className="px-2.5 py-1.5 rounded-lg border border-slate-300 bg-white font-bold text-[#0F766E]"
-            >
-              <option value="ALL">All Branch Godowns</option>
-              {HUB_BRANCHES.map((b) => (
-                <option key={b} value={b}>
-                  Hub: {b}
-                </option>
-              ))}
-            </select>
-            <select
-              value={godownStageFilter}
-              onChange={(e) => setGodownStageFilter(e.target.value)}
-              className="px-2.5 py-1.5 rounded-lg border border-slate-300 bg-white font-bold"
-            >
-              <option value="ALL">All Stages</option>
-              <option value="Origin Godown">Origin Godown</option>
-              <option value="Manifested / In Transit">In Transit</option>
-              <option value="Destination Godown">Destination Godown</option>
-              <option value="Out for Delivery">Out for Delivery</option>
-              <option value="Delivered">Delivered (POD Done)</option>
-            </select>
+            <div className="min-w-[180px]">
+              <SearchableSelect
+                ariaLabel="Godown Branch Filter"
+                value={godownBranchFilter}
+                onChange={setGodownBranchFilter}
+                options={[
+                  { value: 'ALL', label: 'All Branch Godowns', pinFirst: true },
+                  ...HUB_BRANCHES.map((b) => ({ value: b, label: `Hub: ${b}` })),
+                ]}
+                triggerClassName="!py-1.5 !font-bold !text-[#0F766E]"
+                searchPlaceholder="Search branch..."
+              />
+            </div>
+            <div className="min-w-[175px]">
+              <SearchableSelect
+                ariaLabel="Godown Stage Filter"
+                value={godownStageFilter}
+                onChange={setGodownStageFilter}
+                options={[
+                  { value: 'ALL', label: 'All Stages', pinFirst: true },
+                  { value: 'Delivered', label: 'Delivered (POD Done)' },
+                  { value: 'Destination Godown', label: 'Destination Godown' },
+                  { value: 'Manifested / In Transit', label: 'In Transit' },
+                  { value: 'Origin Godown', label: 'Origin Godown' },
+                  { value: 'Out for Delivery', label: 'Out for Delivery' },
+                ]}
+                triggerClassName="!py-1.5 !font-bold"
+              />
+            </div>
             <div className="relative flex-1 min-w-[200px]">
               <Search className="w-3.5 h-3.5 text-slate-400 absolute left-2.5 top-2" />
               <input
@@ -1672,25 +1721,27 @@ export const LogisticsDocketManifestPanel: React.FC<LogisticsDocketManifestPanel
                           {d.payMode}: ₹{formatINR(d.totalAmount)}
                         </div>
                       </td>
-                      <td className="px-3 py-2">
-                        <select
+                      <td className="px-3 py-2 min-w-[165px]">
+                        <SearchableSelect
+                          ariaLabel={`Stock stage for ${d.docketNo}`}
                           value={d.stockStage}
-                          onChange={(e) =>
+                          onChange={(val) =>
                             void upsertDocument(
                               'logistics_dockets',
                               d.id,
-                              { stockStage: e.target.value as LogisticsStockStage },
+                              { stockStage: val as LogisticsStockStage },
                               false
                             )
                           }
-                          className="px-2 py-1 rounded border border-slate-300 text-[11px] font-bold bg-white"
-                        >
-                          <option value="Origin Godown">Origin Godown</option>
-                          <option value="Manifested / In Transit">In Transit</option>
-                          <option value="Destination Godown">Destination Godown</option>
-                          <option value="Out for Delivery">Out for Delivery</option>
-                          <option value="Delivered">Delivered</option>
-                        </select>
+                          options={[
+                            { value: 'Delivered', label: 'Delivered' },
+                            { value: 'Destination Godown', label: 'Destination Godown' },
+                            { value: 'Manifested / In Transit', label: 'In Transit' },
+                            { value: 'Origin Godown', label: 'Origin Godown' },
+                            { value: 'Out for Delivery', label: 'Out for Delivery' },
+                          ]}
+                          triggerClassName="!py-1 !text-[11px] !font-bold"
+                        />
                       </td>
                       <td className="px-3 py-2 text-right whitespace-nowrap space-x-1">
                         {d.podImageDataUrl ? (

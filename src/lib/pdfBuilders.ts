@@ -753,29 +753,47 @@ function buildInvoiceDoc(
     doc.text(`GST Paid By : ${gstPaidByLabel}`, M + 2, taxY + 39);
     doc.setTextColor(15, 23, 42);
 
-    const charges = [
+    const allCharges = [
       ['FREIGHT CHARGES', invoice.freightCharges || 0],
-      ['DETENTION CHARGES', invoice.detentionCharges || 0],
+      ['INSURANCE CHARGES', invoice.insuranceCharge || 0],
+      ['COLL CHARGES', invoice.collCharge || 0],
+      ['LOADING CHARGES', invoice.loadingCharge || 0],
       ['UNLOADING CHARGES', invoice.unloadingCharges || 0],
+      ['SURCHARGE', invoice.surchargeAmt || 0],
+      ['DETENTION CHARGES', invoice.detentionCharges || 0],
       ['ST CHARGES', invoice.stCharges || 0],
+      ['FUMIGATION CHARGES', invoice.fumigationCharge || 0],
+      ['EXTRA CHARGES', invoice.extraCharge || 0],
     ] as const;
 
-    let cy = boxTop + 11;
+    const visibleCharges = allCharges.filter(
+      ([label, val]) => Number(val) > 0 || label === 'FREIGHT CHARGES'
+    );
+    const stepY = Math.min(5.2, 28 / Math.max(1, visibleCharges.length));
+    let cy = boxTop + 9.5;
     doc.setFont('helvetica', 'normal');
-    doc.setFontSize(7.7);
-    charges.forEach(([label, val]) => {
-      if (Number(val) > 0 || label === 'FREIGHT CHARGES') {
-        doc.text(label, descColStart + 4, cy);
-        doc.text(Number(val).toFixed(2), M + cw - 3, cy, { align: 'right' });
-        cy += 5.5;
-      }
+    doc.setFontSize(visibleCharges.length > 5 ? 6.8 : 7.6);
+    visibleCharges.forEach(([label, val]) => {
+      doc.text(label, descColStart + 4, cy);
+      doc.text(formatINR(val), M + cw - 3, cy, { align: 'right' });
+      cy += stepY;
     });
 
-    doc.line(descColStart, boxTop + 42, M + cw, boxTop + 42);
+    doc.line(descColStart, boxTop + 40, M + cw, boxTop + 40);
     doc.setFont('helvetica', 'bold');
-    doc.setFontSize(9);
-    doc.text('GRAND TOTAL :', descColStart + 4, boxTop + 49.5);
-    doc.text(formatINR(invoice.grandTotal || 0), M + cw - 3, boxTop + 49.5, { align: 'right' });
+    doc.setFontSize(8.8);
+    doc.text('GRAND TOTAL :', descColStart + 4, boxTop + 46.5);
+    doc.text(formatINR(invoice.grandTotal || 0), M + cw - 3, boxTop + 46.5, { align: 'right' });
+    if (Number(invoice.advanceReceived || 0) > 0) {
+      doc.setFont('helvetica', 'normal');
+      doc.setFontSize(6.8);
+      const netDue = Math.max(0, (invoice.grandTotal || 0) - Number(invoice.advanceReceived || 0));
+      doc.text(
+        `Adv Recd (${invoice.advanceMode || 'NEFT'}): Rs.${formatINR(invoice.advanceReceived)} | Net Due: Rs.${formatINR(netDue)}`,
+        descColStart + 4,
+        boxTop + 51.5
+      );
+    }
 
     const wordsBarY = boxTop + 54;
     doc.rect(M, wordsBarY, cw, 7);
@@ -840,10 +858,15 @@ function buildInvoiceDoc(
     doc.setFontSize(7.2);
     doc.text('REMARKS & TERMS :', M + 2, remBoxY + 4.5);
     doc.setFont('helvetica', 'normal');
-    const remLines = doc.splitTextToSize(
-      `${invoice.remarks || '-'} | Payment Terms: 100% within 7 days (18% p.a. thereafter). Pay via A/C Payee NEFT/RTGS.`,
-      cw - 4
-    );
+    const combinedRem = [
+      invoice.remarks || '-',
+      invoice.additionalNotes || '',
+      invoice.billFootnote ||
+        'Payment Terms: 100% within 7 days (18% p.a. thereafter). Pay via A/C Payee NEFT/RTGS.',
+    ]
+      .filter(Boolean)
+      .join(' | ');
+    const remLines = doc.splitTextToSize(combinedRem, cw - 4);
     doc.text(remLines.slice(0, 2), M + 2, remBoxY + 9);
 
     // ANNEXURE inside same single combined PDF
@@ -1020,8 +1043,8 @@ function buildLR3CopyDoc(
     doc.setFontSize(8.2);
     doc.text(`C/N No   : ${cn.cnNo}`, x0 + 2.5, row1Y + 5);
     doc.text(`C/N Date : ${formatDateDDMMYYYY(cn.cnDate)}`, x0 + 2.5, row1Y + 9.8);
-    doc.setFontSize(7.2);
-    doc.text(`FY: ${cn.financialYear || company.currentFy}  |  Credit: ${cn.creditDays || 15} Days`, x0 + 2.5, row1Y + 14.6);
+    doc.setFontSize(7);
+    doc.text(`Billed At: ${(cn.billedAtBranch || cn.branchCode || 'KOLKATA').slice(0, 14)} | Cr: ${cn.creditDays || 15}d`, x0 + 2.5, row1Y + 14.6);
     doc.text(`Del. Office: ${(cn.deliveryOffice || cn.toCity || '').slice(0, 25)}`, x0 + 2.5, row1Y + 19.6);
 
     doc.rect(x0 + b1W, row1Y, b2W, 23);
@@ -1152,11 +1175,14 @@ function buildLR3CopyDoc(
     doc.text(`Nett : ${Number(cn.nettWeight || 0).toFixed(3)}`, c2 + 2, tblY + 14);
     doc.text(`Gross: ${Number(cn.grossWeight || 0).toFixed(3)}`, c2 + 2, tblY + 21);
 
-    doc.setFontSize(7.2);
-    doc.text(`Loading : ${formatINR(cn.loadingCharge || 0)}`, c3 + 2, tblY + 13);
-    doc.text(`Unload  : ${formatINR(cn.unloadingCharge || 0)}`, c3 + 2, tblY + 18.5);
-    doc.text(`Return  : ${formatINR(cn.returnLorryCharge || 0)}`, c3 + 2, tblY + 24);
-    doc.text(`S.TT    : ${formatINR(cn.sttCharge || 0)}`, c3 + 2, tblY + 29.5);
+    doc.setFontSize(7);
+    doc.text(`Loading : ${formatINR(cn.loadingCharge || 0)}`, c3 + 2, tblY + 12.5);
+    doc.text(`Unload  : ${formatINR(cn.unloadingCharge || 0)}`, c3 + 2, tblY + 17.5);
+    doc.text(`Return  : ${formatINR(cn.returnLorryCharge || 0)}`, c3 + 2, tblY + 22.5);
+    doc.text(`S.TT    : ${formatINR(cn.sttCharge || 0)}`, c3 + 2, tblY + 27.5);
+    if (Number(cn.otherCharge || 0) > 0) {
+      doc.text(`Others  : ${formatINR(cn.otherCharge || 0)}`, c3 + 2, tblY + 32.5);
+    }
 
     doc.setFont('helvetica', 'bold');
     doc.setFontSize(7.8);
@@ -1165,9 +1191,13 @@ function buildLR3CopyDoc(
     doc.text(`Paid : Rs.${formatINR(cn.paidAmount || 0)}`, c4 + 2, tblY + 20);
     doc.text(`ToPay: Rs.${formatINR(cn.toPayAmount || 0)}`, c4 + 2, tblY + 26.5);
     doc.setFont('helvetica', 'bold');
-    doc.setFontSize(6.9);
+    doc.setFontSize(6.6);
     doc.setTextColor(13, 71, 161);
-    doc.text(`GST Paid By: ${(cn.gstPaidBy || 'Consignee').slice(0, 12)}`, c4 + 2, tblY + 34);
+    doc.text(
+      `[Del:${cn.deliveryModeCode || 'D'} | GST:${cn.gstPaidByCode || 'R'} | Risk:${cn.riskTakenBy || 'O'}]`,
+      c4 + 2,
+      tblY + 34
+    );
     doc.setTextColor(15, 23, 42);
 
     // EXTRA-LARGE WIDE REMARKS BOX inside LR
@@ -1178,9 +1208,14 @@ function buildLR3CopyDoc(
     doc.setFontSize(8);
     doc.text('REMARKS / SPECIAL INSTRUCTIONS :', x0 + 2.5, remY + 5);
     doc.setFont('helvetica', 'normal');
-    doc.setFontSize(8);
+    doc.setFontSize(7.8);
+    const extraGoodsSummary =
+      cn.multiGoodsItems && cn.multiGoodsItems.length > 0
+        ? `Items: ${cn.multiGoodsItems.map((g) => `${g.description}(${g.packages} ${g.packageMode})`).join(', ')}`
+        : '';
     const largeRemarksText = [
       cn.remarks || '',
+      extraGoodsSummary,
       allVehicles.length > 1 ? `All Vehicles: ${allVehicles.join(', ')}` : '',
       allEwbs.length > 1 ? `E-Way Bills: ${allEwbs.map((e) => e.no).join(', ')}` : '',
       allInvoices.length > 1 ? `Tax Invoices: ${allInvoices.map((i) => i.no).join(', ')}` : '',

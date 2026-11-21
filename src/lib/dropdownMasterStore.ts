@@ -414,30 +414,42 @@ export const ALL_INDIA_STATES_DISTRICTS: StateDistrictGroup[] = [
 ];
 
 export const DEFAULT_PACKAGE_MODES: string[] = [
-  'Bags / Sacks',
-  'Boxes / Cartons',
-  'Bundles',
-  'Coils',
-  'Wooden Crates',
-  'Pallets',
-  'Loose / Bulk',
-  'Bales',
-  'Rolls / Reels',
-  'Sheets / Plates',
-  'Drums (Dry/Powder)',
-  'Tins / Cases',
-  'Full Truck Load (FTL)',
-  'Part Load',
+  'BAGS',
+  'BALES',
+  'BOXES',
+  'BUNDLES',
+  'COILS',
+  'CRATES (WOODEN)',
+  'DRUMS',
+  'FTL (FULL TRUCK LOAD)',
+  'INCH',
+  'LOOSE',
+  'METER',
+  'MULTI',
+  'NOS',
+  'NUMBER',
+  'PACKAGES',
+  'PALLETS',
+  'PART LOAD',
+  'PIECES',
+  'ROLLS',
+  'SHEETS / PLATES',
+  'TINS / CASES',
 ];
 
 export const DEFAULT_RATE_MODES: string[] = [
   'Fixed Lorry Freight (Lump Sum)',
-  'Per Ton / MT',
-  'Per Quintal',
+  'Per Bag / Sack',
+  'Per Box / Carton',
+  'Per Inch',
   'Per Kg',
-  'Per Package / Box',
-  'Per Trip',
   'Per Km',
+  'Per Meter',
+  'Per Nos / Piece',
+  'Per Package / Box',
+  'Per Quintal',
+  'Per Ton / MT',
+  'Per Trip',
 ];
 
 export const DEFAULT_CREDIT_DAY_PRESETS: number[] = [10, 15, 20, 30, 45, 60];
@@ -492,6 +504,180 @@ export const DEFAULT_DELIVERY_TYPES: string[] = [
   'Border / Export Crossing Delivery',
 ];
 
+export function sortAlphaList(items: string[]): string[] {
+  return [...items].sort((a, b) =>
+    String(a).localeCompare(String(b), undefined, { sensitivity: 'base', numeric: true })
+  );
+}
+
+export const COMMON_EXPENSE_HEAD_OPTIONS: string[] = sortAlphaList([
+  'Bank Charges & Commission',
+  'Broker Commission / Dalali',
+  'Detention & Waiting Charges',
+  'Diesel & Fuel Expense',
+  'Driver Bata & Fooding',
+  'GPS & Fastag Recharge',
+  'Loading & Labour Charges (Hamali)',
+  'Lorry Hire Advance / Balance',
+  'Office Rent & Electricity',
+  'Permit, Border & Checkpost Fee',
+  'RTO, Fitness & Road Tax',
+  'Salary & Staff Commission',
+  'Telephone & Internet',
+  'Toll & Highway Plaza',
+  'Tyre, Spare Parts & Repair',
+  'Unloading Charges',
+  'Vehicle Insurance Premium',
+]);
+
+export const COMMON_REMARK_PRESETS: string[] = sortAlphaList([
+  '100% Delivery Verified — No Shortage / No Damage',
+  'Advance Paid Against Lorry Hire Challan',
+  'Balance Locked Pending Signed POD Receipt',
+  'Border / Export Crossing Clearance Included',
+  'CGST + SGST Applied (Intra-State West Bengal)',
+  'Consignee To Pay Basis (RCM Applicable)',
+  'Credit Period 15 Days From Bill Submission',
+  'Credit Period 30 Days From Bill Submission',
+  'Detention Free 2 Days — Extra Per Day Thereafter',
+  'Door Delivery Completed With Consignee Stamp',
+  'Full & Final Settlement Received via NEFT/RTGS',
+  'GST Exempt Export Movement (Nepal / Bangladesh / Bhutan)',
+  'Handle With Care — Non-Liquid Dry Cargo',
+  'IGST Applied (Interstate Movement Outside WB)',
+  'Part Payment Received — Balance Due',
+  'TDS Sec 194C Declaration Attached (0% Deduction)',
+]);
+
+export const PAYMENT_MODE_OPTIONS: string[] = sortAlphaList([
+  'Adjustment',
+  'Advance',
+  'Bank Transfer',
+  'Cash',
+  'Cheque',
+  'Diesel Slip',
+  'IMPS',
+  'NEFT',
+  'RTGS',
+  'UPI',
+]);
+
+export const VEHICLE_MAKE_OPTIONS: string[] = sortAlphaList([
+  'AMW (Asia Motor Works)',
+  'Ashok Leyland',
+  'Bajaj',
+  'BharatBenz',
+  'Eicher',
+  'Force Motors',
+  'Hino',
+  'Isuzu',
+  'Mahindra',
+  'MAN',
+  'Maruti Suzuki',
+  'Piaggio',
+  'Scania',
+  'SML Isuzu',
+  'Tata Motors',
+  'Volvo',
+]);
+
+export const VEHICLE_BODY_TYPE_OPTIONS: string[] = [
+  'Full Dala Body',
+  'Half Dala Body',
+  'Open Body',
+  'Closed Container 20ft',
+  'Closed Container 32ft',
+  'Closed Container 40ft',
+  'Flatbed Trailer',
+  'Low-Bed Trailer',
+  'Semi Low-Bed Trailer',
+  'Skeleton Trailer',
+  'Bulker / Tanker',
+  'Tipper / Hyva',
+  'Reefer Van',
+  'LCV / Pickup',
+  '6W',
+  '10W',
+  '12W',
+  '14W',
+  '16W',
+  '18W',
+  '22W',
+];
+
+export const VEHICLE_COLOR_OPTIONS: string[] = sortAlphaList([
+  'Black',
+  'Blue',
+  'Brown',
+  'Cream',
+  'Golden',
+  'Green',
+  'Grey',
+  'Maroon',
+  'Multi-Color',
+  'Orange / Saffron',
+  'Red',
+  'Silver',
+  'White',
+  'Yellow',
+]);
+
+export const ALL_INDIA_BRANCH_OPTIONS: string[] = sortAlphaList([
+  'Asansol',
+  'Dankuni',
+  'Delhi NCR',
+  'Durgapur',
+  'Guwahati',
+  'Haldia',
+  'Howrah',
+  'Jharkhand',
+  'Kharagpur',
+  'Kolkata',
+  'Mumbai',
+  'Patna',
+  'Ranchi',
+  'Siliguri',
+  'Varanasi',
+]);
+
+export const DELIVERY_MODE_CODES = [
+  { code: 'P', label: 'P = Party Delivery (Door)' },
+  { code: 'G', label: 'G = Godown Delivery' },
+  { code: 'D', label: 'D = Dock / Hub Delivery' },
+] as const;
+
+export const GST_PAID_BY_CODES = [
+  { code: 'R', mapped: 'Consignor', label: 'R = Consignor (RCM)' },
+  { code: 'E', mapped: 'Consignee', label: 'E = Consignee (RCM)' },
+  { code: 'T', mapped: 'Transporter', label: 'T = Transporter (FCM)' },
+] as const;
+
+export const RISK_TYPE_CODES = [
+  { code: 'O', label: "O = Owner's Risk" },
+  { code: 'C', label: "C = Carrier's Risk" },
+  { code: 'I', label: 'I = Insurance Risk' },
+] as const;
+
+export const BILL_REMARK_PRESETS: string[] = sortAlphaList([
+  '100% Delivery Verified With Signed POD Attached',
+  'Advance Received Deducted — Balance Payable',
+  'Consignee To Pay Basis (GST Under RCM)',
+  'Consignor To Pay Basis (GST Under RCM)',
+  'Detention Beyond 48 Hrs Extra As Per Agreement',
+  'Direct Door Delivery Completed On Time',
+  'Export Freight Zero-Rated GST (Bangladesh / Nepal / Bhutan)',
+  'Full Truck Load Freight Charges',
+  'Loading & Unloading Extra At Actuals',
+  'Part-Load / Parcel Consolidation Freight',
+]);
+
+export const BILL_FOOTNOTE_PRESETS: string[] = [
+  'Terms: Subject to Kolkata Jurisdiction. Payment due within 15/30 days; 18% p.a. interest on delayed payment.',
+  'RCM Note: GST on GTA Service is payable directly by the Recipient under Reverse Charge Notification 13/2017-CT(R).',
+  'Export Exemption: International Freight up to Nepal / Bangladesh / Bhutan Border Exempt under SAC 9965/9967.',
+  'TDS Exemption: Sec 194C Non-Deduction Declaration & PAN Copy (DOTPS3540M) attached with this Bill.',
+];
+
 export function mergeDropdownOptions(existing: string[], additions: string[]): string[] {
   const seen = new Set<string>();
   const result: string[] = [];
@@ -506,7 +692,7 @@ export function mergeDropdownOptions(existing: string[], additions: string[]): s
     }
   }
 
-  return result;
+  return sortAlphaList(result);
 }
 
 export type DropdownCategoryKey =
@@ -530,9 +716,12 @@ export function getEffectiveDropdownList(
 ): string[] {
   const custom = company.dropdownMaster?.[category];
   if (Array.isArray(custom)) {
-    return custom;
+    if (category === 'packageModes') {
+      return mergeDropdownOptions(custom, ['MULTI', 'NOS', 'METER', 'LOOSE', 'BAGS', 'NUMBER', 'PACKAGES', 'PIECES', 'BOXES', 'BUNDLES', 'DRUMS', 'ROLLS', 'PALLETS', 'INCH']);
+    }
+    return sortAlphaList(custom);
   }
-  return [...CATEGORY_DEFAULTS[category]];
+  return sortAlphaList(CATEGORY_DEFAULTS[category]);
 }
 
 export function getEffectiveDistrictsForState(
@@ -559,11 +748,11 @@ export function getEffectiveDistrictsForState(
     (trimmed && Array.isArray(customMap[trimmed]) && customMap[trimmed]) ||
     (matchedRegion?.label && Array.isArray(customMap[matchedRegion.label]) && customMap[matchedRegion.label]);
   if (customExact) {
-    return customExact;
+    return sortAlphaList(customExact);
   }
   return matchedRegion
-    ? [...matchedRegion.districts]
-    : ALL_INDIA_STATES_DISTRICTS.flatMap((s) => s.districts).slice(0, 60);
+    ? sortAlphaList([...matchedRegion.districts])
+    : sortAlphaList(ALL_INDIA_STATES_DISTRICTS.flatMap((s) => s.districts).slice(0, 60));
 }
 
 export function getEffectiveCreditDayPresets(company: CompanySettings): number[] {

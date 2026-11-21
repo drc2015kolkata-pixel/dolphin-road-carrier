@@ -56,6 +56,7 @@ import { useDebouncedValue } from '../hooks/useDebounce';
 import { PaginatedDataTable, TableColumn } from './PaginatedDataTable';
 import { GstFilingHubModule } from './GstFilingHubModule';
 import { EntityQuickPreviewCard, formatPartyDetailsLine } from './RichEntityPicker';
+import { SearchableSelect } from './SearchableSelect';
 
 interface ReportsMisModuleProps {
   ownerUid: string;
@@ -2357,33 +2358,37 @@ const ReportsMisModuleInner: React.FC<ReportsMisModuleProps> = ({
           <div className="bg-white rounded-xl border border-slate-200 shadow-sm p-3 flex flex-wrap items-center justify-between gap-2.5 text-xs">
             <div className="flex flex-wrap items-center gap-2">
               <label className="font-bold text-slate-800">Next-Gen Party Ledger:</label>
-              <select
-                aria-label="Select Party Ledger"
-                value={selectedPartyLedger}
-                onChange={(e) => setSelectedPartyLedger(e.target.value)}
-                className="px-3 py-1.5 rounded-lg border border-slate-300 bg-white font-bold text-slate-900 min-w-[260px] max-w-md"
-              >
-                <option value="ALL">All Parties Account Summary ({filteredAccountBook.length})</option>
-                {partyLedgerOptions.map((pName) => {
-                  const matches = parties.filter(
-                    (p) => p.name.trim().toLowerCase() === pName.trim().toLowerCase()
-                  );
-                  let optionLabel = pName;
-                  if (matches.length === 1) {
-                    optionLabel = `${pName} [${matches[0].partyType}] | ${formatPartyDetailsLine(matches[0])}`;
-                  } else if (matches.length > 1) {
-                    optionLabel = `${pName} (${matches.length} records: ${matches
-                      .map((m) => m.gstin || m.pan || m.phone || m.address || m.partyType)
-                      .filter(Boolean)
-                      .join(' / ')})`;
-                  }
-                  return (
-                    <option key={pName} value={pName}>
-                      {optionLabel}
-                    </option>
-                  );
-                })}
-              </select>
+              <div className="min-w-[260px] max-w-md flex-1">
+                <SearchableSelect
+                  ariaLabel="Select Party Ledger"
+                  value={selectedPartyLedger}
+                  onChange={setSelectedPartyLedger}
+                  options={[
+                    {
+                      value: 'ALL',
+                      label: `All Parties Account Summary (${filteredAccountBook.length})`,
+                      pinFirst: true,
+                    },
+                    ...partyLedgerOptions.map((pName) => {
+                      const matches = parties.filter(
+                        (p) => p.name.trim().toLowerCase() === pName.trim().toLowerCase()
+                      );
+                      let optionLabel = pName;
+                      if (matches.length === 1) {
+                        optionLabel = `${pName} [${matches[0].partyType}] | ${formatPartyDetailsLine(matches[0])}`;
+                      } else if (matches.length > 1) {
+                        optionLabel = `${pName} (${matches.length} records: ${matches
+                          .map((m) => m.gstin || m.pan || m.phone || m.address || m.partyType)
+                          .filter(Boolean)
+                          .join(' / ')})`;
+                      }
+                      return { value: pName, label: optionLabel };
+                    }),
+                  ]}
+                  triggerClassName="!py-1.5 !font-bold"
+                  searchPlaceholder="Search party ledger A-Z..."
+                />
+              </div>
               {selectedPartyLedger !== 'ALL' && (
                 <button
                   type="button"

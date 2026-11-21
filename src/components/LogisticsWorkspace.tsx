@@ -1,7 +1,9 @@
-import React, { useMemo, useState } from 'react';
+import React, { useEffect, useMemo, useState } from 'react';
 import {
   AlertTriangle,
+  ArrowLeft,
   Boxes,
+  ClipboardList,
   Cloud,
   FileText,
   IndianRupee,
@@ -12,7 +14,11 @@ import {
   Warehouse,
 } from 'lucide-react';
 import {
+  AnyDriveFolderName,
+  BUSINESS_MODE_META,
   CompanySettings,
+  Driver,
+  LogisticsDivisionCode,
   LogisticsDocket,
   LogisticsDriveFolderName,
   LogisticsDriver,
@@ -22,6 +28,11 @@ import {
   LogisticsParty,
   LogisticsVehicle,
   LogisticsWorkspaceTabId,
+  LorryHire,
+  Party,
+  StaffAccount,
+  StaffCommissionEntry,
+  Vehicle,
 } from '../types/erp';
 import { daysUntilDate, formatINR } from '../lib/formatters';
 import { getEwayBillExpiryState } from '../lib/ewayBillUtils';
@@ -29,12 +40,18 @@ import { GeneratedPdfResult } from '../lib/pdfEngine';
 import { LogisticsDocketManifestPanel } from './LogisticsDocketManifestPanel';
 import { LogisticsBillingLedgerPanel } from './LogisticsBillingLedgerPanel';
 import { LogisticsMastersDrivePanel } from './LogisticsMastersDrivePanel';
+import { AllInOneEntrySheet } from './AllInOneEntrySheet';
 
 interface LogisticsWorkspaceProps {
+  divisionMode?: LogisticsDivisionCode;
+  activeTab?: LogisticsWorkspaceTabId;
+  onActiveTabChange?: (tab: LogisticsWorkspaceTabId) => void;
   ownerUid: string;
   activeStaffCode: string;
+  activeStaffName?: string;
   activeBranchCode: string;
   activeFy: string;
+  isMasterAdmin?: boolean;
   dockets: LogisticsDocket[];
   manifests: LogisticsManifest[];
   parties: LogisticsParty[];
@@ -42,6 +59,12 @@ interface LogisticsWorkspaceProps {
   drivers: LogisticsDriver[];
   invoices: LogisticsInvoice[];
   ledgers: LogisticsLedgerEntry[];
+  ftlParties?: Party[];
+  ftlVehicles?: Vehicle[];
+  ftlDrivers?: Driver[];
+  staffAccounts?: StaffAccount[];
+  lorryHires?: LorryHire[];
+  staffCommissions?: StaffCommissionEntry[];
   company: CompanySettings;
   connectedEmail: string | null;
   driveAccessToken: string | null;
@@ -56,22 +79,16 @@ interface LogisticsWorkspaceProps {
   }) => void;
 }
 
-const LOGI_TABS: Array<{ id: LogisticsWorkspaceTabId; label: string; icon: React.ComponentType<{ className?: string }> }> = [
-  { id: 'overview', label: 'Logistics Hub', icon: LayoutDashboard },
-  { id: 'docket', label: 'Parcel Docket / LR', icon: Package },
-  { id: 'manifest', label: 'Line-Haul Manifest', icon: Truck },
-  { id: 'godown', label: 'Branch Godown Stock', icon: Warehouse },
-  { id: 'masters', label: 'Logistics Masters', icon: Users },
-  { id: 'billing', label: 'Invoices / CN / DN', icon: FileText },
-  { id: 'ledgers', label: 'Logistics Ledgers', icon: IndianRupee },
-  { id: 'backup', label: 'Drive Backup & JSON', icon: Cloud },
-];
-
 export const LogisticsWorkspace: React.FC<LogisticsWorkspaceProps> = ({
+  divisionMode = 'LOGISTICS',
+  activeTab: controlledTab,
+  onActiveTabChange,
   ownerUid,
   activeStaffCode,
+  activeStaffName = 'Operator',
   activeBranchCode,
   activeFy,
+  isMasterAdmin = false,
   dockets,
   manifests,
   parties,
@@ -79,6 +96,12 @@ export const LogisticsWorkspace: React.FC<LogisticsWorkspaceProps> = ({
   drivers,
   invoices,
   ledgers,
+  ftlParties = [],
+  ftlVehicles = [],
+  ftlDrivers = [],
+  staffAccounts = [],
+  lorryHires = [],
+  staffCommissions = [],
   company,
   connectedEmail,
   driveAccessToken,
@@ -86,7 +109,44 @@ export const LogisticsWorkspace: React.FC<LogisticsWorkspaceProps> = ({
   onPreviewPdf,
   onShowConfirm,
 }) => {
-  const [activeLogiTab, setActiveLogiTab] = useState<LogisticsWorkspaceTabId>('overview');
+  const [internalTab, setInternalTab] = useState<LogisticsWorkspaceTabId>('overview');
+  const activeLogiTab = controlledTab ?? internalTab;
+
+  const setActiveLogiTab = (next: LogisticsWorkspaceTabId) => {
+    setInternalTab(next);
+    onActiveTabChange?.(next);
+  };
+
+  useEffect(() => {
+    setInternalTab('overview');
+    onActiveTabChange?.('overview');
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [divisionMode]);
+
+  const divisionMeta = BUSINESS_MODE_META[divisionMode];
+
+  const logiTabs: Array<{
+    id: LogisticsWorkspaceTabId;
+    label: string;
+    icon: React.ComponentType<{ className?: string }>;
+  }> = useMemo(
+    () => [
+      { id: 'overview', label: `${divisionMeta.shortLabel} Hub`, icon: LayoutDashboard },
+      { id: 'allInOne', label: 'All-in-One Sheet', icon: ClipboardList },
+      {
+        id: 'docket',
+        label: divisionMode === 'COURIER' ? 'Courier Docket / AWB' : 'Parcel Docket / LR',
+        icon: Package,
+      },
+      { id: 'manifest', label: 'Line-Haul Manifest', icon: Truck },
+      { id: 'godown', label: 'Branch Godown Stock', icon: Warehouse },
+      { id: 'masters', label: `${divisionMeta.shortLabel} Masters`, icon: Users },
+      { id: 'billing', label: 'Invoices / CN / DN', icon: FileText },
+      { id: 'ledgers', label: `${divisionMeta.shortLabel} Ledgers`, icon: IndianRupee },
+      { id: 'backup', label: 'Drive Backup & JSON', icon: Cloud },
+    ],
+    [divisionMeta.shortLabel, divisionMode]
+  );
 
   const stats = useMemo(() => {
     const inGodownDockets = dockets.filter(
@@ -124,23 +184,23 @@ export const LogisticsWorkspace: React.FC<LogisticsWorkspaceProps> = ({
   }, [dockets, manifests, vehicles, drivers]);
 
   return (
-    <div className="flex-1 flex flex-col min-h-0 bg-[#F0FDFA]">
-      {/* Logistics Isolated Sub-Navigation Header */}
+    <div className="flex-1 flex flex-col min-h-0 overflow-x-hidden bg-[#F0FDFA]">
+      {/* Isolated Division Sub-Navigation Header */}
       <div className="bg-gradient-to-r from-[#0F766E] via-[#0D9488] to-[#0B3B8C] text-white px-3 md:px-5 py-2 shadow-sm flex flex-wrap items-center justify-between gap-2 no-print">
-        <div className="flex items-center gap-2">
+        <div className="flex items-center gap-2 min-w-0">
           <Boxes className="w-5 h-5 text-amber-300 shrink-0" />
-          <div>
-            <h2 className="text-xs sm:text-sm font-extrabold tracking-wide leading-none">
-              EXPRESS PARCEL &amp; PART-LOAD LOGISTICS DIVISION
+          <div className="min-w-0">
+            <h2 className="text-xs sm:text-sm font-extrabold tracking-wide leading-none truncate">
+              {divisionMeta.title.toUpperCase()}
             </h2>
-            <p className="text-[10px] text-teal-100 mt-0.5">
-              100% Isolated Ledgers, Dockets, Manifests &amp; Godown Stock · {activeFy}
+            <p className="text-[10px] text-teal-100 mt-0.5 truncate">
+              100% Isolated {divisionMeta.shortLabel} Dockets, Manifests &amp; Ledgers · {activeFy}
             </p>
           </div>
         </div>
 
         <div className="flex flex-wrap items-center gap-1">
-          {LOGI_TABS.map((tab) => {
+          {logiTabs.map((tab) => {
             const Icon = tab.icon;
             const selected = activeLogiTab === tab.id;
             return (
@@ -162,8 +222,24 @@ export const LogisticsWorkspace: React.FC<LogisticsWorkspaceProps> = ({
         </div>
       </div>
 
-      {/* Main Logistics Content */}
-      <div className="flex-1 p-3 md:p-4 overflow-y-auto space-y-4">
+      {/* Main Division Content */}
+      <div className="flex-1 p-3 md:p-4 overflow-y-auto overflow-x-hidden space-y-4">
+        {activeLogiTab !== 'overview' && (
+          <div className="flex flex-wrap items-center justify-between gap-2 no-print">
+            <button
+              type="button"
+              onClick={() => setActiveLogiTab('overview')}
+              className="inline-flex items-center gap-1.5 px-3 py-1.5 rounded-lg bg-white border border-teal-300 hover:bg-teal-50 text-[#0F766E] text-xs font-extrabold shadow-sm cursor-pointer"
+            >
+              <ArrowLeft className="w-3.5 h-3.5" />
+              <span>Back to {divisionMeta.shortLabel} Dashboard</span>
+            </button>
+            <span className="text-[11px] font-bold text-slate-500">
+              Active Workspace: {divisionMeta.title} ({activeFy})
+            </span>
+          </div>
+        )}
+
         {activeLogiTab === 'overview' && (
           <div className="space-y-4">
             <div className="grid grid-cols-2 md:grid-cols-3 xl:grid-cols-6 gap-3">
@@ -206,14 +282,29 @@ export const LogisticsWorkspace: React.FC<LogisticsWorkspaceProps> = ({
               </div>
             </div>
 
-            <div className="grid grid-cols-1 md:grid-cols-2 lg:grid-cols-4 gap-3">
+            <div className="grid grid-cols-1 md:grid-cols-2 lg:grid-cols-5 gap-3">
+              <button
+                type="button"
+                onClick={() => setActiveLogiTab('allInOne')}
+                className="p-4 rounded-xl bg-amber-50 border-2 border-amber-400 hover:border-amber-600 text-left shadow-sm cursor-pointer transition-all"
+              >
+                <ClipboardList className="w-6 h-6 text-amber-700 mb-2" />
+                <div className="text-sm font-extrabold text-slate-900">
+                  All-in-One Entry Sheet
+                </div>
+                <div className="text-xs text-slate-700 mt-0.5">
+                  Single-sheet Docket + Lorry Hire + Staff Ledger + Party Bill &amp; Live Register
+                </div>
+              </button>
               <button
                 type="button"
                 onClick={() => setActiveLogiTab('docket')}
                 className="p-4 rounded-xl bg-white border-2 border-teal-200 hover:border-[#0F766E] text-left shadow-sm cursor-pointer transition-all"
               >
                 <Package className="w-6 h-6 text-[#0F766E] mb-2" />
-                <div className="text-sm font-extrabold text-slate-900">+ Book Parcel Docket / LR</div>
+                <div className="text-sm font-extrabold text-slate-900">
+                  + Book {divisionMode === 'COURIER' ? 'Courier Docket / AWB' : 'Parcel Docket / LR'}
+                </div>
                 <div className="text-xs text-slate-600 mt-0.5">
                   Per Kg / Per Pkg booking, EWB QR scan &amp; Verify QR A4 Docket PDF
                 </div>
@@ -246,7 +337,9 @@ export const LogisticsWorkspace: React.FC<LogisticsWorkspaceProps> = ({
                 className="p-4 rounded-xl bg-white border-2 border-emerald-200 hover:border-emerald-700 text-left shadow-sm cursor-pointer transition-all"
               >
                 <FileText className="w-6 h-6 text-emerald-700 mb-2" />
-                <div className="text-sm font-extrabold text-slate-900">Logistics Bills, CN &amp; DN</div>
+                <div className="text-sm font-extrabold text-slate-900">
+                  {divisionMeta.shortLabel} Bills, CN &amp; DN
+                </div>
                 <div className="text-xs text-slate-600 mt-0.5">
                   Monthly TBB Tax Invoices, Credit Notes &amp; Debit Notes with Bank QR
                 </div>
@@ -255,8 +348,40 @@ export const LogisticsWorkspace: React.FC<LogisticsWorkspaceProps> = ({
           </div>
         )}
 
+        {activeLogiTab === 'allInOne' && (
+          <AllInOneEntrySheet
+            divisionMode={divisionMode}
+            ownerUid={ownerUid}
+            activeStaffCode={activeStaffCode}
+            activeStaffName={activeStaffName}
+            activeBranchCode={activeBranchCode}
+            activeFy={activeFy}
+            isMasterAdmin={isMasterAdmin}
+            parties={ftlParties}
+            vehicles={ftlVehicles}
+            drivers={ftlDrivers}
+            staffAccounts={staffAccounts}
+            consignments={[]}
+            lorryHires={lorryHires}
+            staffCommissions={staffCommissions}
+            invoices={[]}
+            logisticsDockets={dockets}
+            logisticsInvoices={invoices}
+            logisticsParties={parties}
+            logisticsVehicles={vehicles}
+            logisticsDrivers={drivers}
+            company={company}
+            onPreviewPdf={(pdf: GeneratedPdfResult, folder: AnyDriveFolderName) =>
+              onPreviewPdf(pdf, folder as LogisticsDriveFolderName)
+            }
+            onShowConfirm={onShowConfirm}
+            onExitToDashboard={() => setActiveLogiTab('overview')}
+          />
+        )}
+
         {(activeLogiTab === 'docket' || activeLogiTab === 'manifest' || activeLogiTab === 'godown') && (
           <LogisticsDocketManifestPanel
+            divisionMode={divisionMode}
             subView={activeLogiTab}
             ownerUid={ownerUid}
             activeStaffCode={activeStaffCode}
@@ -275,6 +400,7 @@ export const LogisticsWorkspace: React.FC<LogisticsWorkspaceProps> = ({
 
         {(activeLogiTab === 'billing' || activeLogiTab === 'ledgers') && (
           <LogisticsBillingLedgerPanel
+            divisionMode={divisionMode}
             subView={activeLogiTab}
             ownerUid={ownerUid}
             activeStaffCode={activeStaffCode}
@@ -292,6 +418,7 @@ export const LogisticsWorkspace: React.FC<LogisticsWorkspaceProps> = ({
 
         {(activeLogiTab === 'masters' || activeLogiTab === 'backup') && (
           <LogisticsMastersDrivePanel
+            divisionMode={divisionMode}
             subView={activeLogiTab}
             ownerUid={ownerUid}
             activeBranchCode={activeBranchCode}
@@ -312,3 +439,4 @@ export const LogisticsWorkspace: React.FC<LogisticsWorkspaceProps> = ({
     </div>
   );
 };
+

@@ -6,6 +6,7 @@ import {
   CreditCard,
   MapPin,
   Phone,
+  Search,
   ShieldCheck,
   Truck,
   UserCheck,
@@ -114,32 +115,50 @@ export function RichEntityPicker<T>({
   const [open, setOpen] = useState(false);
   const [highlightIdx, setHighlightIdx] = useState(0);
   const [openedByToggle, setOpenedByToggle] = useState(false);
+  const [menuQuery, setMenuQuery] = useState('');
 
   useEffect(() => {
     const onOutside = (e: MouseEvent) => {
       if (containerRef.current && !containerRef.current.contains(e.target as Node)) {
         setOpen(false);
         setOpenedByToggle(false);
+        setMenuQuery('');
       }
     };
     document.addEventListener('mousedown', onOutside);
     return () => document.removeEventListener('mousedown', onOutside);
   }, []);
 
+  const sortedItems = useMemo(() => {
+    return [...items].sort((a, b) =>
+      String(renderTitle(a) || '').localeCompare(String(renderTitle(b) || ''), undefined, {
+        sensitivity: 'base',
+        numeric: true,
+      })
+    );
+  }, [items, renderTitle]);
+
   const filtered = useMemo(() => {
+    const activeQ = menuQuery.trim().toLowerCase();
+    if (activeQ) {
+      return sortedItems
+        .filter((item) => getSearchText(item).toLowerCase().includes(activeQ))
+        .slice(0, maxResults);
+    }
     const q = value.trim().toLowerCase();
     if (!q || openedByToggle) {
-      return items.slice(0, maxResults);
+      return sortedItems.slice(0, maxResults);
     }
-    return items
+    return sortedItems
       .filter((item) => getSearchText(item).toLowerCase().includes(q))
       .slice(0, maxResults);
-  }, [items, value, openedByToggle, maxResults, getSearchText]);
+  }, [sortedItems, value, menuQuery, openedByToggle, maxResults, getSearchText]);
 
   const handlePick = (item: T) => {
     onSelectEntity(item);
     setOpen(false);
     setOpenedByToggle(false);
+    setMenuQuery('');
   };
 
   return (
@@ -219,7 +238,34 @@ export function RichEntityPicker<T>({
       </div>
 
       {open && !disabled && (
-        <div className="absolute left-0 right-0 mt-1 max-h-64 overflow-y-auto bg-white border border-blue-300 rounded-lg shadow-2xl z-50 divide-y divide-slate-100 text-xs">
+        <div className="absolute left-0 right-0 mt-1 max-h-68 overflow-y-auto bg-white border border-blue-300 rounded-lg shadow-2xl z-50 divide-y divide-slate-100 text-xs">
+          <div className="sticky top-0 z-10 p-1.5 bg-slate-50 border-b border-slate-200 flex items-center gap-1.5">
+            <Search className="w-3.5 h-3.5 text-slate-400 shrink-0 ml-1" />
+            <input
+              type="text"
+              value={menuQuery}
+              onMouseDown={(e) => e.stopPropagation()}
+              onChange={(e) => {
+                setMenuQuery(e.target.value);
+                setHighlightIdx(0);
+              }}
+              placeholder="Live filter A-Z by Name, GSTIN, PAN, Truck, DL..."
+              className="flex-1 min-w-0 px-2 py-1 rounded border border-slate-200 bg-white text-[11px] focus:outline-none focus:border-blue-500"
+            />
+            {menuQuery && (
+              <button
+                type="button"
+                onMouseDown={(e) => {
+                  e.preventDefault();
+                  e.stopPropagation();
+                  setMenuQuery('');
+                }}
+                className="p-0.5 text-slate-400 hover:text-slate-700 cursor-pointer"
+              >
+                <X className="w-3 h-3" />
+              </button>
+            )}
+          </div>
           {filtered.length === 0 ? (
             <div className="px-3 py-2 text-[11px] text-slate-500 italic">{emptyHint}</div>
           ) : (

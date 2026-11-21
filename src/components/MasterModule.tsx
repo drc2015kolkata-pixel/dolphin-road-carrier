@@ -35,6 +35,13 @@ import {
 } from '../lib/pdfEngine';
 import { useDebouncedValue } from '../hooks/useDebounce';
 import { PaginatedDataTable, TableColumn } from './PaginatedDataTable';
+import { SearchableSelect } from './SearchableSelect';
+import { EditableSearchSelect } from './EditableSearchSelect';
+import {
+  VEHICLE_BODY_TYPE_OPTIONS,
+  VEHICLE_COLOR_OPTIONS,
+  VEHICLE_MAKE_OPTIONS,
+} from '../lib/dropdownMasterStore';
 
 export type MasterTabId = 'parties' | 'owners' | 'brokers' | 'vehicles' | 'drivers';
 
@@ -156,6 +163,9 @@ const MasterModuleInner: React.FC<MasterModuleProps> = ({
 
   // Vehicle (Lorry Register) form
   const [vTruck, setVTruck] = useState('');
+  const [vMake, setVMake] = useState('');
+  const [vBodyType, setVBodyType] = useState('');
+  const [vColor, setVColor] = useState('');
   const [vType, setVType] = useState('22 FT Open Trailer');
   const [vOwner, setVOwner] = useState('');
   const [vPhone, setVPhone] = useState('');
@@ -364,7 +374,10 @@ const MasterModuleInner: React.FC<MasterModuleProps> = ({
       makeSafeDocId('veh'),
       {
         truckNo: vTruck.trim().toUpperCase(),
-        vehicleType: vType.trim(),
+        vehicleMake: vMake.trim(),
+        bodyType: vBodyType.trim(),
+        vehicleColor: vColor.trim(),
+        vehicleType: vType.trim() || vBodyType.trim(),
         ownerName: vOwner.trim(),
         ownerPhone: vPhone.trim(),
         engineNo: vEngine.trim(),
@@ -379,6 +392,9 @@ const MasterModuleInner: React.FC<MasterModuleProps> = ({
       true
     );
     setVTruck('');
+    setVMake('');
+    setVBodyType('');
+    setVColor('');
     setVOwner('');
     setVPhone('');
     setVEngine('');
@@ -633,14 +649,14 @@ const MasterModuleInner: React.FC<MasterModuleProps> = ({
         rows: list.map((v, idx) => ({
           line1: [
             String(idx + 1),
-            v.truckNo,
+            `${v.truckNo}${v.vehicleMake ? ` (${v.vehicleMake})` : ''}`,
             v.ownerName,
             `Eng: ${v.engineNo || '-'}`,
             `Fit: ${formatDateDDMMYYYY(v.fitnessExpiry) || '-'} | Ins: ${formatDateDDMMYYYY(v.insuranceExpiry) || '-'}`,
           ],
           line2: [
             '',
-            v.vehicleType || '-',
+            [v.bodyType || v.vehicleType || '-', v.vehicleColor || ''].filter(Boolean).join(' · '),
             `Ph: ${v.ownerPhone || '-'}`,
             `Chs: ${v.chassisNo || '-'}`,
             `Prm: ${formatDateDDMMYYYY(v.permitExpiry) || '-'} | Tax: ${formatDateDDMMYYYY(v.roadTaxExpiry) || '-'} | PUC: ${formatDateDDMMYYYY(v.pucExpiry) || '-'}`,
@@ -885,7 +901,20 @@ const MasterModuleInner: React.FC<MasterModuleProps> = ({
 
   const vehicleColumns = useMemo<Array<TableColumn<Vehicle>>>(
     () => [
-      { key: 'truckNo', header: 'Truck No', cellClassName: 'font-mono-num font-bold text-blue-800', render: (v) => v.truckNo },
+      {
+        key: 'truckNo',
+        header: 'Truck No & Specs',
+        render: (v) => (
+          <div>
+            <div className="font-mono-num font-bold text-blue-800">{v.truckNo}</div>
+            {(v.vehicleMake || v.bodyType || v.vehicleColor) && (
+              <div className="text-[11px] text-slate-600">
+                {[v.vehicleMake, v.bodyType || v.vehicleType, v.vehicleColor].filter(Boolean).join(' · ')}
+              </div>
+            )}
+          </div>
+        ),
+      },
       { key: 'ownerName', header: 'Owner', render: (v) => v.ownerName },
       { key: 'fitness', header: 'Fitness', render: (v) => renderExpiryStatus(v.fitnessExpiry) },
       { key: 'insurance', header: 'Insurance', render: (v) => renderExpiryStatus(v.insuranceExpiry) },
@@ -1088,18 +1117,20 @@ const MasterModuleInner: React.FC<MasterModuleProps> = ({
               </div>
               <div>
                 <label className="block font-semibold text-slate-700 mb-1">Category</label>
-                <select
+                <SearchableSelect
+                  ariaLabel="Party Category"
                   value={pType}
-                  onChange={(e) => setPType(e.target.value as Party['partyType'])}
-                  className="w-full px-2.5 py-1.5 rounded border border-slate-300"
-                >
-                  <option value="Customer">Customer (Billing)</option>
-                  <option value="Consignor">Consignor</option>
-                  <option value="Consignee">Consignee</option>
-                  <option value="TruckOwner">Truck Owner</option>
-                  <option value="Broker">Broker</option>
-                  <option value="Vendor">Vendor / Fuel</option>
-                </select>
+                  onChange={(val) => setPType(val as Party['partyType'])}
+                  options={[
+                    { value: 'Broker', label: 'Broker' },
+                    { value: 'Consignee', label: 'Consignee' },
+                    { value: 'Consignor', label: 'Consignor' },
+                    { value: 'Customer', label: 'Customer (Billing)' },
+                    { value: 'TruckOwner', label: 'Truck Owner' },
+                    { value: 'Vendor', label: 'Vendor / Fuel' },
+                  ]}
+                  triggerClassName="!py-1.5"
+                />
               </div>
               <div>
                 <label className="block font-semibold text-slate-700 mb-1">WhatsApp / Mobile No</label>
@@ -1144,18 +1175,19 @@ const MasterModuleInner: React.FC<MasterModuleProps> = ({
               </div>
               <div>
                 <label className="block font-semibold text-slate-700 mb-1">Follow-Up Channel</label>
-                <select
-                  aria-label="Preferred Follow-Up Channel"
+                <SearchableSelect
+                  ariaLabel="Preferred Follow-Up Channel"
                   value={pPreferredChannel}
-                  onChange={(e) =>
-                    setPPreferredChannel(e.target.value as 'WhatsApp Only' | 'Email Only' | 'Both')
+                  onChange={(val) =>
+                    setPPreferredChannel(val as 'WhatsApp Only' | 'Email Only' | 'Both')
                   }
-                  className="w-full px-2.5 py-1.5 rounded border border-slate-300 bg-white font-semibold"
-                >
-                  <option value="WhatsApp Only">WhatsApp Only</option>
-                  <option value="Email Only">Email Only</option>
-                  <option value="Both">Both (WhatsApp + Email)</option>
-                </select>
+                  options={[
+                    { value: 'Both', label: 'Both (WhatsApp + Email)' },
+                    { value: 'Email Only', label: 'Email Only' },
+                    { value: 'WhatsApp Only', label: 'WhatsApp Only' },
+                  ]}
+                  triggerClassName="!py-1.5 !font-semibold"
+                />
               </div>
               <div className="md:col-span-2">
                 <label className="block font-semibold text-slate-700 mb-1">Address (Region / State / Export Country)</label>
@@ -1193,14 +1225,18 @@ const MasterModuleInner: React.FC<MasterModuleProps> = ({
                     onChange={(e) => setPOpening(e.target.value)}
                     className="flex-1 px-2.5 py-1.5 rounded border border-slate-300 font-mono-num"
                   />
-                  <select
-                    value={pBalType}
-                    onChange={(e) => setPBalType(e.target.value as 'Dr' | 'Cr')}
-                    className="px-2 py-1.5 rounded border border-slate-300"
-                  >
-                    <option value="Dr">Dr</option>
-                    <option value="Cr">Cr</option>
-                  </select>
+                  <div className="w-[74px] shrink-0">
+                    <SearchableSelect
+                      ariaLabel="Opening Balance Type"
+                      value={pBalType}
+                      onChange={(val) => setPBalType(val as 'Dr' | 'Cr')}
+                      options={[
+                        { value: 'Cr', label: 'Cr' },
+                        { value: 'Dr', label: 'Dr' },
+                      ]}
+                      triggerClassName="!py-1.5"
+                    />
+                  </div>
                 </div>
               </div>
             </div>
@@ -1542,7 +1578,37 @@ const MasterModuleInner: React.FC<MasterModuleProps> = ({
                 />
               </div>
               <div>
-                <label className="block font-semibold text-slate-700 mb-1">Vehicle Type</label>
+                <label className="block font-semibold text-slate-700 mb-1">Vehicle Make (OEM)</label>
+                <EditableSearchSelect
+                  value={vMake}
+                  onChange={setVMake}
+                  options={VEHICLE_MAKE_OPTIONS}
+                  placeholder="Tata / Ashok Leyland / BharatBenz..."
+                />
+              </div>
+              <div>
+                <label className="block font-semibold text-slate-700 mb-1">Body Type / Wheel</label>
+                <EditableSearchSelect
+                  value={vBodyType}
+                  onChange={(val) => {
+                    setVBodyType(val);
+                    if (val) setVType(val);
+                  }}
+                  options={VEHICLE_BODY_TYPE_OPTIONS}
+                  placeholder="Full Dala Body / Container / Trailer..."
+                />
+              </div>
+              <div>
+                <label className="block font-semibold text-slate-700 mb-1">Vehicle Color</label>
+                <EditableSearchSelect
+                  value={vColor}
+                  onChange={setVColor}
+                  options={VEHICLE_COLOR_OPTIONS}
+                  placeholder="Yellow-Black / Golden Yellow / White..."
+                />
+              </div>
+              <div>
+                <label className="block font-semibold text-slate-700 mb-1">Capacity / Remarks Type</label>
                 <input
                   type="text"
                   value={vType}

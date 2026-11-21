@@ -1,5 +1,5 @@
 import React, { useEffect, useMemo, useRef, useState } from 'react';
-import { Check, ChevronDown, Edit2, Plus, Trash2, X } from 'lucide-react';
+import { Check, ChevronDown, Edit2, Plus, Search, Trash2, X } from 'lucide-react';
 
 interface YesNoSelectProps {
   value: boolean;
@@ -91,6 +91,8 @@ export const EditableSearchSelect: React.FC<EditableSearchSelectProps> = ({
   const [editingTarget, setEditingTarget] = useState<string | null>(null);
   const [editingDraft, setEditingDraft] = useState('');
 
+  const [menuSearch, setMenuSearch] = useState('');
+
   useEffect(() => {
     setQuery(value);
   }, [value]);
@@ -100,20 +102,29 @@ export const EditableSearchSelect: React.FC<EditableSearchSelectProps> = ({
       if (containerRef.current && !containerRef.current.contains(e.target as Node)) {
         setOpen(false);
         setManagerOpen(false);
+        setMenuSearch('');
       }
     };
     document.addEventListener('mousedown', handleClickOutside);
     return () => document.removeEventListener('mousedown', handleClickOutside);
   }, []);
 
+  const sortedOptions = useMemo(() => {
+    const clean = Array.from(new Set(options.map((o) => String(o || '').trim()).filter(Boolean)));
+    return clean.sort((a, b) =>
+      a.localeCompare(b, undefined, { sensitivity: 'base', numeric: true })
+    );
+  }, [options]);
+
   const filtered = useMemo(() => {
-    const q = query.trim().toLowerCase();
-    // If query equals current exact value while dropdown opened by button, show full list first with current highlighted
-    const list = !q || q === value.trim().toLowerCase()
-      ? options
-      : options.filter((opt) => opt.toLowerCase().includes(q));
+    const q = (menuSearch || query).trim().toLowerCase();
+    // If query equals current exact value and user didn't type in dropdown filter, show full A-Z sorted list
+    const list =
+      !q || (!menuSearch && q === value.trim().toLowerCase())
+        ? sortedOptions
+        : sortedOptions.filter((opt) => opt.toLowerCase().includes(q));
     return list.slice(0, maxResults);
-  }, [options, query, value, maxResults]);
+  }, [sortedOptions, query, menuSearch, value, maxResults]);
 
   const commitValue = (nextRaw: string) => {
     const next = uppercase ? nextRaw.toUpperCase() : nextRaw;
@@ -249,23 +260,52 @@ export const EditableSearchSelect: React.FC<EditableSearchSelectProps> = ({
         )}
       </div>
 
-      {/* Searchable Suggestions Menu */}
+      {/* Searchable A-to-Z Suggestions Menu */}
       {open && !disabled && (
-        <div className="absolute left-0 right-0 mt-1 max-h-56 overflow-y-auto bg-white border border-slate-300 rounded-lg shadow-xl z-40 divide-y divide-slate-100 text-xs">
+        <div className="absolute left-0 right-0 mt-1 max-h-60 overflow-y-auto bg-white border border-slate-300 rounded-lg shadow-xl z-40 divide-y divide-slate-100 text-xs">
+          <div className="sticky top-0 z-10 p-1.5 bg-slate-50 border-b border-slate-200 flex items-center gap-1.5">
+            <Search className="w-3.5 h-3.5 text-slate-400 shrink-0 ml-1" />
+            <input
+              type="text"
+              value={menuSearch}
+              onMouseDown={(e) => e.stopPropagation()}
+              onChange={(e) => {
+                setMenuSearch(e.target.value);
+                setHighlightIdx(0);
+              }}
+              placeholder="Filter list A-Z..."
+              className="flex-1 min-w-0 px-2 py-1 rounded border border-slate-200 bg-white text-[11px] focus:outline-none focus:border-blue-500"
+            />
+            {menuSearch && (
+              <button
+                type="button"
+                onMouseDown={(e) => {
+                  e.preventDefault();
+                  e.stopPropagation();
+                  setMenuSearch('');
+                }}
+                className="p-0.5 text-slate-400 hover:text-slate-700 cursor-pointer"
+              >
+                <X className="w-3 h-3" />
+              </button>
+            )}
+          </div>
           {filtered.length === 0 ? (
             <div className="p-2.5 text-slate-500 space-y-1.5">
               <p>{emptyOptionHint}</p>
-              {onAddOption && query.trim() && (
+              {onAddOption && (menuSearch || query).trim() && (
                 <button
                   type="button"
                   onClick={async () => {
-                    const clean = (uppercase ? query.toUpperCase() : query).trim();
+                    const raw = (menuSearch || query).trim();
+                    const clean = uppercase ? raw.toUpperCase() : raw;
                     await onAddOption(clean);
+                    setMenuSearch('');
                     commitValue(clean);
                   }}
                   className="inline-flex items-center gap-1 px-2.5 py-1 rounded bg-emerald-600 text-white font-bold cursor-pointer"
                 >
-                  <Plus className="w-3 h-3" /> Add &ldquo;{query.trim()}&rdquo; to Dropdown
+                  <Plus className="w-3 h-3" /> Add &ldquo;{(menuSearch || query).trim()}&rdquo; to Dropdown
                 </button>
               )}
             </div>
@@ -285,6 +325,7 @@ export const EditableSearchSelect: React.FC<EditableSearchSelectProps> = ({
                   }`}
                   onMouseDown={(e) => {
                     e.preventDefault();
+                    setMenuSearch('');
                     commitValue(opt);
                   }}
                 >
@@ -336,9 +377,9 @@ export const EditableSearchSelect: React.FC<EditableSearchSelectProps> = ({
             </div>
           )}
 
-          {(onEditOption || onDeleteOption) && options.length > 0 && (
+          {(onEditOption || onDeleteOption) && sortedOptions.length > 0 && (
             <div className="max-h-40 overflow-y-auto divide-y divide-slate-100 border border-slate-200 rounded">
-              {options
+              {sortedOptions
                 .filter((opt) =>
                   !newItemText.trim()
                     ? true

@@ -12,6 +12,7 @@ import { CompanySettings, ConsignmentNote, Invoice } from '../types/erp';
 import { formatDateDDMMYYYY, formatINR, todayISO } from '../lib/formatters';
 import { FoxproStatementSpec } from '../lib/pdfBuilders';
 import { generateFoxproStatementPDF, GeneratedPdfResult } from '../lib/pdfEngine';
+import { SearchableSelect } from './SearchableSelect';
 
 interface GstFilingHubModuleProps {
   invoices: Invoice[];
@@ -346,28 +347,32 @@ export const GstFilingHubModule: React.FC<GstFilingHubModuleProps> = ({
         </div>
 
         <div className="flex flex-wrap items-center gap-2 pt-1">
-          <select
-            value={selectedMonth}
-            onChange={(e) => setSelectedMonth(e.target.value)}
-            className="px-2.5 py-1.5 rounded-lg border border-slate-300 text-xs font-bold bg-slate-50"
-          >
-            <option value="ALL">All Months ({activeFy})</option>
-            {availableMonths.map((m) => (
-              <option key={m} value={m}>
-                Month: {m}
-              </option>
-            ))}
-          </select>
+          <div className="w-52">
+            <SearchableSelect
+              ariaLabel="Filter GST Filing Month"
+              value={selectedMonth}
+              onChange={(val) => setSelectedMonth(val)}
+              options={[
+                { value: 'ALL', label: `All Months (${activeFy})` },
+                ...availableMonths.map((m) => ({ value: m, label: `Month: ${m}` })),
+              ]}
+              buttonClassName="px-2.5 py-1.5 rounded-lg border-slate-300 text-xs font-bold bg-slate-50"
+            />
+          </div>
 
-          <select
-            value={selectedDivision}
-            onChange={(e) => setSelectedDivision(e.target.value as 'ALL' | 'FTL' | 'LOGISTICS')}
-            className="px-2.5 py-1.5 rounded-lg border border-slate-300 text-xs font-bold bg-slate-50"
-          >
-            <option value="ALL">All Divisions (FTL + LOGISTICS)</option>
-            <option value="FTL">FTL Division Only</option>
-            <option value="LOGISTICS">LOGISTICS Division Only</option>
-          </select>
+          <div className="w-60">
+            <SearchableSelect
+              ariaLabel="Filter Business Division"
+              value={selectedDivision}
+              onChange={(val) => setSelectedDivision(val as 'ALL' | 'FTL' | 'LOGISTICS')}
+              options={[
+                { value: 'ALL', label: 'All Divisions (FTL + LOGISTICS)' },
+                { value: 'FTL', label: 'FTL Division Only' },
+                { value: 'LOGISTICS', label: 'LOGISTICS Division Only' },
+              ]}
+              buttonClassName="px-2.5 py-1.5 rounded-lg border-slate-300 text-xs font-bold bg-slate-50"
+            />
+          </div>
 
           <button
             type="button"
