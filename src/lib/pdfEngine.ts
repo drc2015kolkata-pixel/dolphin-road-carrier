@@ -361,7 +361,7 @@ export async function generateLR3CopyPDF(
     shareMeta: shareMeta || {
       partyName: cn.billingPartyName || cn.consignorName,
       docNo: cn.cnNo,
-      summaryText: `Consignment Note (LR) ${cn.cnNo} | Date: ${cn.cnDate} | ${cn.fromCity} -> ${cn.toCity} | Truck: ${cn.truckNo} | Freight: Rs. ${Number(cn.totalFreight || 0).toLocaleString('en-IN')}`,
+      summaryText: `Consignment Note (LR) ${cn.cnNo} | Date: ${cn.cnDate} | ${cn.fromCity} -> ${cn.toCity} | Truck: ${cn.truckNo} | Freight: ${cn.showFreightOnPrint === false ? 'As Agreed' : `Rs. ${Number(cn.totalFreight || 0).toLocaleString('en-IN')}`}`,
     },
   };
 }
@@ -464,6 +464,19 @@ export async function generateFoxproStatementPDF(
     spec,
     company,
     orientation: orientation || spec.orientation || 'l',
+    assets: { ...assets },
+  });
+}
+
+export async function generateAppFormatBlueprintPDF(
+  company: CompanySettings,
+  orientation: PdfOrientation = 'p'
+): Promise<GeneratedPdfResult> {
+  const assets = await getAssets(company);
+  return runPdfTask({
+    kind: 'appBlueprint',
+    company,
+    orientation,
     assets: { ...assets },
   });
 }
@@ -573,3 +586,161 @@ export function printPdfDirect(pdf: GeneratedPdfResult): void {
   };
   document.body.appendChild(iframe);
 }
+
+export interface OperatingBookPdfPart {
+  partTitle: string;
+  subtitle: string;
+  items: Array<{
+    numEn: string;
+    en: string;
+    numBn: string;
+    bn: string;
+  }>;
+}
+
+/**
+ * Generates an A4 Portrait Low-KB Bilingual Operating Book PDF (English + বাংলা)
+ * using HTML5 Canvas UTF-8 system font rasterization so Bengali typography prints crisply on all OS.
+ */
+export async function generateOperatingBookPDF(params: {
+  bookTitle: string;
+  company: CompanySettings;
+  parts: OperatingBookPdfPart[];
+  fileName?: string;
+}): Promise<GeneratedPdfResult> {
+  const pageW = 1120;
+  const pageH = 1584; // A4 Portrait ratio (~1:1.414)
+  const padX = 56;
+  const maxTextW = pageW - padX * 2;
+  const bottomLimit = pageH - 64;
+
+  const pages: string[] = [];
+  let canvas = document.createElement('canvas');
+  canvas.width = pageW;
+  canvas.height = pageH;
+  let ctx = canvas.getContext('2d')!;
+  let y = 0;
+
+  const initPage = (pageNum: number) => {
+    ctx.fillStyle = '#ffffff';
+    ctx.fillRect(0, 0, pageW, pageH);
+    ctx.strokeStyle = '#1e3a8a';
+    ctx.lineWidth = 2;
+    ctx.strokeRect(24, 24, pageW - 48, pageH - 48);
+
+    ctx.fillStyle = '#0f172a';
+    ctx.font = 'bold 20px "Noto Sans", "Segoe UI", Arial, sans-serif';
+    ctx.fillText(params.company.companyName || 'DOLPHIN ROAD CARRIER', padX, 62);
+    ctx.fillStyle = '#1d4ed8';
+    ctx.font = 'bold 14px "Noto Sans", Arial, sans-serif';
+    ctx.fillText(params.bookTitle, padX, 86);
+    ctx.fillStyle = '#64748b';
+    ctx.font = '12px Arial, sans-serif';
+    ctx.fillText(`Page ${pageNum}`, pageW - padX - 60, 62);
+
+    ctx.strokeStyle = '#cbd5e1';
+    ctx.lineWidth = 1;
+    ctx.beginPath();
+    ctx.moveTo(padX, 98);
+    ctx.lineTo(pageW - padX, 98);
+    ctx.stroke();
+    y = 124;
+  };
+
+  const pushPageAndReset = () => {
+    pages.push(canvas.toDataURL('image/jpeg', 0.78));
+    canvas = document.createElement('canvas');
+    canvas.width = pageW;
+    canvas.height = pageH;
+    ctx = canvas.getContext('2d')!;
+    initPage(pages.length + 1);
+  };
+
+  const wrapLines = (text: string, font: string, maxW: number): string[] => {
+    ctx.font = font;
+    const words = String(text || '').split(/\s+/).filter(Boolean);
+    const lines: string[] = [];
+    let current = '';
+    for (const w of words) {
+      const test = current ? `${current} ${w}` : w;
+      if (ctx.measureText(test).width > maxW && current) {
+        lines.push(current);
+        current = w;
+      } else {
+        current = test;
+      }
+    }
+    if (current) lines.push(current);
+    return lines;
+  };
+
+  initPage(1);
+
+  for (const part of params.parts) {
+    if (y + 90 > bottomLimit) {
+      pushPageAndReset();
+    }
+    // Bold part header bar
+    ctx.fillStyle = '#eff6ff';
+    ctx.fillRect(padX, y, maxTextW, 46);
+    ctx.strokeStyle = '#3b82f6';
+    ctx.lineWidth = 1.5;
+    ctx.strokeRect(padX, y, maxTextW, 46);
+    ctx.fillStyle = '#1e3a8a';
+    ctx.font = 'bold 18px "Noto Sans", "Segoe UI", Arial, sans-serif';
+    ctx.fillText(part.partTitle, padX + 14, y + 22);
+    ctx.fillStyle = '#475569';
+    ctx.font = '12px "Noto Sans", "Noto Sans Bengali", "Nirmala UI", sans-serif';
+    ctx.fillText(part.subtitle, padX + 14, y + 39);
+    y += 62;
+
+    for (const item of part.items) {
+      const enFont = 'bold 14px "Segoe UI", Arial, sans-serif';
+      const bnFont = '14px "Noto Sans Bengali", "Nirmala UI", "Vrinda", Arial, sans-serif';
+      const enLines = wrapLines(`${item.numEn} ${item.en}`, enFont, maxTextW - 12);
+      const bnLines = wrapLines(`${item.numBn} ${item.bn}`, bnFont, maxTextW - 12);
+      const neededH = enLines.length * 20 + bnLines.length * 21 + 16;
+
+      if (y + neededH > bottomLimit) {
+        pushPageAndReset();
+      }
+
+      ctx.fillStyle = '#0f172a';
+      ctx.font = enFont;
+      for (const ln of enLines) {
+        ctx.fillText(ln, padX + 4, y);
+        y += 20;
+      }
+
+      ctx.fillStyle = '#065f46';
+      ctx.font = bnFont;
+      for (const ln of bnLines) {
+        ctx.fillText(ln, padX + 4, y);
+        y += 21;
+      }
+
+      ctx.strokeStyle = '#e2e8f0';
+      ctx.lineWidth = 1;
+      ctx.beginPath();
+      ctx.moveTo(padX, y - 6);
+      ctx.lineTo(pageW - padX, y - 6);
+      ctx.stroke();
+      y += 10;
+    }
+    y += 10;
+  }
+
+  pages.push(canvas.toDataURL('image/jpeg', 0.78));
+
+  const assets = await getAssets(params.company);
+  return runPdfTask({
+    kind: 'imagePages',
+    pages,
+    title: params.bookTitle,
+    fileName: params.fileName || 'DRC_Operating_Book_Bilingual.pdf',
+    company: params.company,
+    orientation: 'p',
+    assets: { ...assets },
+  });
+}
+

@@ -487,17 +487,84 @@ function notifyCollection(collectionName: string, items: unknown[]): void {
   }
 }
 
-function applyFullState(state: Record<string, unknown>): void {
+function extractEpochMillis(ts: unknown): number {
+  if (!ts) return 0;
+  if (typeof ts === 'number') return Number.isFinite(ts) ? ts : 0;
+  if (typeof ts === 'string') {
+    const parsed = Date.parse(ts);
+    return Number.isFinite(parsed) ? parsed : 0;
+  }
+  if (typeof ts === 'object' && ts !== null && 'toMillis' in ts) {
+    const fn = (ts as { toMillis?: () => number }).toMillis;
+    if (typeof fn === 'function') return fn() || 0;
+  }
+  return 0;
+}
+
+function mergeCollectionByTimestamp(
+  localItems: unknown[] | undefined,
+  incomingItems: unknown[]
+): {
+  merged: unknown[];
+  newerLocalRecords: Array<Record<string, unknown>>;
+} {
+  const localArr = Array.isArray(localItems) ? localItems : [];
+  if (localArr.length === 0) {
+    return { merged: incomingItems, newerLocalRecords: [] };
+  }
+
+  const mergedMap = new Map<string, Record<string, unknown>>();
+  const newerLocalRecords: Array<Record<string, unknown>> = [];
+
+  for (const raw of incomingItems) {
+    if (!raw || typeof raw !== 'object') continue;
+    const rec = raw as Record<string, unknown>;
+    const id = String(rec.id || '').trim();
+    if (id) mergedMap.set(id, rec);
+  }
+
+  for (const rawLocal of localArr) {
+    if (!rawLocal || typeof rawLocal !== 'object') continue;
+    const localRec = rawLocal as Record<string, unknown>;
+    const id = String(localRec.id || '').trim();
+    if (!id) continue;
+    const remoteRec = mergedMap.get(id);
+    if (!remoteRec) {
+      mergedMap.set(id, localRec);
+      newerLocalRecords.push(localRec);
+      continue;
+    }
+    const localTs = extractEpochMillis(localRec.updatedAt) || extractEpochMillis(localRec.createdAt);
+    const remoteTs = extractEpochMillis(remoteRec.updatedAt) || extractEpochMillis(remoteRec.createdAt);
+    if (localTs > remoteTs) {
+      mergedMap.set(id, { ...remoteRec, ...localRec });
+      newerLocalRecords.push({ ...remoteRec, ...localRec });
+    }
+  }
+
+  return {
+    merged: Array.from(mergedMap.values()),
+    newerLocalRecords,
+  };
+}
+
+function applyFullState(state: Record<string, unknown>): Record<string, Array<Record<string, unknown>>> {
   const idbBatch: Record<string, unknown[]> = {};
+  const newerLocalByCollection: Record<string, Array<Record<string, unknown>>> = {};
   for (const [key, val] of Object.entries(state)) {
     if (Array.isArray(val)) {
-      collectionState.set(key, val);
-      idbBatch[key] = val;
+      const existing = collectionState.get(key);
+      const { merged, newerLocalRecords } = mergeCollectionByTimestamp(existing, val);
+      if (newerLocalRecords.length > 0) {
+        newerLocalByCollection[key] = newerLocalRecords;
+      }
+      collectionState.set(key, merged);
+      idbBatch[key] = merged;
       const listeners = collectionListeners.get(key);
       if (listeners) {
         listeners.forEach((cb) => {
           try {
-            cb(val);
+            cb(merged);
           } catch (err) {
             console.error(`Listener error on ${key}:`, err);
           }
@@ -507,6 +574,60 @@ function applyFullState(state: Record<string, unknown>): void {
   }
   saveOfflineCache();
   void saveAllCollectionsToIdb(idbBatch);
+  return newerLocalByCollection;
+}
+
+/**
+ * Forces a full 2-way instant sync between Windows/Android offline cache and server state:
+ * 1) Flushes any queued local writes up.
+ * 2) Pulls server state and merges strictly by newest `updatedAt` timestamp.
+ * 3) Pushes any newer local/mobile edits back up so neither device loses work.
+ */
+export async function forceTwoWaySyncAndMerge(): Promise<{
+  flushedQueue: number;
+  mergedCollections: number;
+  pushedLocalRecords: number;
+}> {
+  const flushRes = await flushOfflineSyncQueue();
+  let mergedCollections = 0;
+  let pushedLocalRecords = 0;
+
+  try {
+    const res = await fetch('/api/erp/state', { cache: 'no-store' });
+    if (res.ok) {
+      const json = (await res.json()) as { ok?: boolean; state?: Record<string, unknown> };
+      if (json.state) {
+        serverLoaded = true;
+        const newerLocalByCol = applyFullState(json.state);
+        mergedCollections = Object.keys(json.state).length;
+        for (const [col, rows] of Object.entries(newerLocalByCol)) {
+          if (rows.length > 0 && col !== 'settings') {
+            try {
+              const upRes = await fetch('/api/erp/bulk-upsert', {
+                method: 'POST',
+                headers: { 'Content-Type': 'application/json' },
+                body: JSON.stringify({ collection: col, items: rows }),
+              });
+              if (upRes.ok) {
+                pushedLocalRecords += rows.length;
+              }
+            } catch {
+              // Offline queue covers any unreachable writes
+            }
+          }
+        }
+        markCloudSyncedNow();
+      }
+    }
+  } catch {
+    // Offline mode preserves local IndexedDB/localStorage safely
+  }
+
+  return {
+    flushedQueue: flushRes.flushed,
+    mergedCollections,
+    pushedLocalRecords,
+  };
 }
 
 async function ensureServerSyncStarted(): Promise<void> {

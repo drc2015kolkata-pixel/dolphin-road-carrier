@@ -1,4 +1,5 @@
 import { Party } from '../types/erp';
+import { validateIndianGstin } from './gstinValidator';
 
 const LAST_90DAY_MAINT_KEY = 'drc_erp_last_90day_autofix_v1';
 const NINETY_DAYS_MS = 90 * 24 * 60 * 60 * 1000;
@@ -40,15 +41,10 @@ export function validateAndNormalizeContact(input: {
     warnings.push('Email format looks invalid (e.g. accounts@company.com).');
   }
 
-  const normalizedGstin = String(input.gstin || '')
-    .trim()
-    .toUpperCase()
-    .replace(/\s+/g, '');
-  if (
-    normalizedGstin &&
-    !/^\d{2}[A-Z]{5}\d{4}[A-Z][1-9A-Z]Z[0-9A-Z]$/.test(normalizedGstin)
-  ) {
-    warnings.push('GSTIN should be 15 characters (e.g. 19DOTPS3540M1ZZ).');
+  const gstCheck = validateIndianGstin(input.gstin);
+  const normalizedGstin = gstCheck.normalized;
+  if (!gstCheck.isEmpty && !gstCheck.valid && gstCheck.error) {
+    warnings.push(gstCheck.error);
   }
 
   const normalizedPan = String(input.pan || '')

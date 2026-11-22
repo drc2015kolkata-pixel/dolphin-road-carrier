@@ -133,6 +133,21 @@ export type PdfTaskPayload =
       company: CompanySettings;
       orientation?: PdfOrientation;
       assets: PdfAssets;
+    }
+  | {
+      kind: 'imagePages';
+      pages: string[];
+      title: string;
+      fileName: string;
+      company: CompanySettings;
+      orientation?: PdfOrientation;
+      assets: PdfAssets;
+    }
+  | {
+      kind: 'appBlueprint';
+      company: CompanySettings;
+      orientation?: PdfOrientation;
+      assets: PdfAssets;
     };
 
 const SAFE_MARGIN = 11; // >=10mm safe print margin for HP Ink Tank 315 A4
@@ -316,6 +331,105 @@ function drawTopLeftLogo(doc: jsPDF, assets: PdfAssets | undefined, x: number, y
   doc.text('DRC', x + w / 2, y + h - 4, { align: 'center' });
 }
 
+/**
+ * Printed Bilty (CN/LR) Logo:
+ * Crisp Yellow-background Red/Blue Oval Truck "DRC" + "!! OM SAI RAM !!" badge
+ */
+function drawBiltyYellowTruckLogo(doc: jsPDF, x: number, y: number, w = 22, h = 20) {
+  // Vibrant yellow plate
+  doc.setFillColor(254, 240, 138);
+  doc.setDrawColor(180, 28, 28);
+  doc.setLineWidth(0.45);
+  doc.roundedRect(x, y, w, h, 2, 2, 'FD');
+
+  // Top "!! OM SAI RAM !!" micro strip
+  doc.setFont('helvetica', 'bold');
+  doc.setFontSize(4.4);
+  doc.setTextColor(180, 28, 28);
+  doc.text('!! OM SAI RAM !!', x + w / 2, y + 3.2, { align: 'center' });
+
+  // Red & blue oval truck emblem inside yellow box
+  const cx = x + w / 2;
+  const cy = y + h * 0.54;
+  doc.setFillColor(220, 38, 38);
+  doc.setDrawColor(13, 71, 161);
+  doc.setLineWidth(0.5);
+  doc.ellipse(cx, cy, w * 0.41, h * 0.25, 'FD');
+
+  // Stylised cab & trailer silhouette bar
+  doc.setFillColor(30, 58, 138);
+  doc.rect(cx - w * 0.27, cy - 2.2, w * 0.36, 3.6, 'F');
+  doc.setFillColor(255, 255, 255);
+  doc.rect(cx + w * 0.10, cy - 1.5, w * 0.14, 2.9, 'F');
+
+  // DRC lettering centered
+  doc.setTextColor(255, 255, 255);
+  doc.setFont('helvetica', 'bold');
+  doc.setFontSize(7.6);
+  doc.text('DRC', cx - 1, cy + 0.9, { align: 'center' });
+
+  // Wheels
+  doc.setFillColor(15, 23, 42);
+  doc.circle(cx - w * 0.16, cy + 2.1, 0.95, 'F');
+  doc.circle(cx + w * 0.04, cy + 2.1, 0.95, 'F');
+  doc.circle(cx + w * 0.18, cy + 2.1, 0.95, 'F');
+
+  // Bottom subcaption
+  doc.setTextColor(13, 71, 161);
+  doc.setFont('helvetica', 'bold');
+  doc.setFontSize(4.5);
+  doc.text('DOLPHIN CARRIER', x + w / 2, y + h - 1.5, { align: 'center' });
+}
+
+/**
+ * Printed Tax Invoice / Bill Logo:
+ * Crisp Blue-White Circular Road "D.R.C" emblem
+ */
+function drawInvoiceCircularRoadLogo(doc: jsPDF, x: number, y: number, w = 21, h = 21) {
+  const cx = x + w / 2;
+  const cy = y + h / 2;
+  const r = Math.min(w, h) / 2 - 0.5;
+
+  // Outer navy-blue circular seal
+  doc.setFillColor(13, 71, 161);
+  doc.setDrawColor(30, 58, 138);
+  doc.setLineWidth(0.5);
+  doc.circle(cx, cy, r, 'FD');
+
+  // Inner crisp white ring
+  doc.setFillColor(255, 255, 255);
+  doc.setDrawColor(147, 197, 253);
+  doc.setLineWidth(0.35);
+  doc.circle(cx, cy, r * 0.82, 'FD');
+
+  // Upper sky-blue highway semicircle / arc band
+  doc.setFillColor(29, 78, 216);
+  doc.circle(cx, cy, r * 0.68, 'F');
+
+  // Tapered white road perspective trapezoid from bottom edge toward center
+  doc.setFillColor(255, 255, 255);
+  doc.triangle(cx - r * 0.42, cy + r * 0.56, cx + r * 0.42, cy + r * 0.56, cx, cy - r * 0.05, 'F');
+
+  // Center dashed highway stripe in blue
+  doc.setDrawColor(13, 71, 161);
+  doc.setLineWidth(0.45);
+  doc.line(cx, cy + r * 0.16, cx, cy + r * 0.28);
+  doc.line(cx, cy + r * 0.35, cx, cy + r * 0.49);
+
+  // D.R.C bold mark in upper half
+  doc.setTextColor(255, 255, 255);
+  doc.setFont('helvetica', 'bold');
+  doc.setFontSize(7.4);
+  doc.text('D.R.C', cx, cy - r * 0.15, { align: 'center' });
+
+  // Bottom curved banner text
+  doc.setFillColor(13, 71, 161);
+  doc.rect(cx - r * 0.72, cy + r * 0.54, r * 1.44, 2.8, 'F');
+  doc.setTextColor(255, 255, 255);
+  doc.setFontSize(4.2);
+  doc.text('ROAD CARRIER', cx, cy + r * 0.54 + 2.1, { align: 'center' });
+}
+
 function drawBottomRightStampAndSign(
   doc: jsPDF,
   assets: PdfAssets | undefined,
@@ -442,6 +556,35 @@ export function buildPdfArrayBuffer(task: PdfTaskPayload): {
   if (task.kind === 'logisticsInvoice') {
     return buildLogisticsInvoiceDoc(task.invoice, task.company, task.assets, task.orientation || 'p');
   }
+  if (task.kind === 'appBlueprint') {
+    return buildAppFormatBlueprintDoc(task.company, task.assets, task.orientation || 'p');
+  }
+  if (task.kind === 'imagePages') {
+    const doc = new jsPDF({
+      orientation: (task.orientation || 'p') === 'l' ? 'landscape' : 'portrait',
+      unit: 'mm',
+      format: 'a4',
+      compress: true,
+    });
+    const pw = doc.internal.pageSize.getWidth();
+    const ph = doc.internal.pageSize.getHeight();
+    (task.pages || []).forEach((imgUrl, idx) => {
+      if (idx > 0) doc.addPage();
+      try {
+        doc.addImage(imgUrl, getJsPdfImageFormat(imgUrl), 4, 4, pw - 8, ph - 8, undefined, 'FAST');
+      } catch {
+        doc.setFont('helvetica', 'bold');
+        doc.setFontSize(12);
+        doc.text(`${task.title} (Page ${idx + 1})`, 15, 20);
+      }
+    });
+    return {
+      buffer: doc.output('arraybuffer'),
+      fileName: task.fileName || 'DRC_Operating_Book_Bilingual.pdf',
+      title: task.title || 'Dolphin Road Carriers Bilingual Operating Book',
+      orientation: task.orientation || 'p',
+    };
+  }
   return buildTableReportDoc(task);
 }
 
@@ -503,8 +646,8 @@ function buildInvoiceDoc(
 
     drawOuterBorder();
 
-    // TOP-LEFT Triangular DRC Logo inside 8mm outer border
-    drawTopLeftLogo(doc, assets, M + 2.5, M + 2.5, 21, 21);
+    // TOP-LEFT Blue-White Circular Road D.R.C Logo inside 8mm outer border
+    drawInvoiceCircularRoadLogo(doc, M + 2.5, M + 2.5, 21, 21);
 
     // TOP-RIGHT Copy Label Badge inside outer border
     doc.setFont('helvetica', 'bold');
@@ -531,19 +674,22 @@ function buildInvoiceDoc(
     doc.text(`PAN: ${company.pan}   |   GSTIN: ${company.gstin}`, M + 26, M + 15.2);
     doc.text(`PH: ${company.phones}   |   MSME: ${company.msme}   |   SAC/HSN: ${invoice.sac || company.hsn}`, M + 26, M + 19.2);
 
-    doc.setTextColor(180, 35, 35);
-    doc.setFont('helvetica', 'bold');
-    doc.setFontSize(10);
-    doc.text(
-      isContPage
+    const docKindLabel = (invoice.docKind || 'Tax Invoice').toUpperCase();
+    const spacedHeading =
+      docKindLabel === 'CREDIT NOTE'
+        ? 'G S T   C R E D I T   N O T E'
+        : docKindLabel === 'DEBIT NOTE'
+        ? 'G S T   D E B I T   N O T E'
+        : isContPage
         ? 'T A X   I N V O I C E   ( C O N T I N U A T I O N )'
         : isCrossBorderExempt
         ? 'B I L L   O F   S U P P L Y   ( E X P O R T   /   G S T   E X E M P T )'
-        : 'T A X   I N V O I C E   /   B I L L   O F   S U P P L Y',
-      pw / 2,
-      M + 26.5,
-      { align: 'center' }
-    );
+        : 'T A X   I N V O I C E   /   B I L L   O F   S U P P L Y';
+
+    doc.setTextColor(docKindLabel === 'CREDIT NOTE' ? 180 : 180, 35, 35);
+    doc.setFont('helvetica', 'bold');
+    doc.setFontSize(10);
+    doc.text(spacedHeading, pw / 2, M + 26.5, { align: 'center' });
 
     doc.setDrawColor(15, 23, 42);
     doc.setLineWidth(0.4);
@@ -577,10 +723,10 @@ function buildInvoiceDoc(
     const valX = metaX + 25.5;
     doc.setFontSize(7.8);
     const metas = [
-      ['INVOICE NO', invoice.invoiceNo],
+      ['INVOICE NO', invoice.againstInvoiceNo ? `${invoice.invoiceNo} (Ref: ${invoice.againstInvoiceNo})` : invoice.invoiceNo],
       ['DATE', formatDateDDMMYYYY(invoice.invoiceDate)],
-      ['DUE / FY', `${formatDateDDMMYYYY(invoice.dueDate) || '-'} / ${invoice.financialYear || company.currentFy}`],
-      ['COUNTRY', `${billingCountry.toUpperCase()}${invoice.division === 'LOGISTICS' ? ' · LOGISTICS' : ''}`],
+      ['DUE / CREDIT', `${formatDateDDMMYYYY(invoice.dueDate) || '-'} (${invoice.creditDays || 15}d) · ${invoice.financialYear || company.currentFy}`],
+      ['PO / BRANCH', `${invoice.poWorkOrderNo || '-'} | ${invoice.billedAtBranch || invoice.branchCode || 'KOLKATA'}`],
       ['SAC / CODE', `${invoice.sac || company.hsn || '996791'} / ${isCrossBorderExempt ? 'EXPORT 0%' : (invoice.interstate ? 'IGST' : 'CGST+SGST')}`],
     ];
     metas.forEach(([k, v], i) => {
@@ -589,7 +735,7 @@ function buildInvoiceDoc(
       doc.text(k, metaX, my);
       doc.text(':', colonX, my);
       doc.setFont('helvetica', 'normal');
-      doc.text(String(v || '-').slice(0, 30), valX, my);
+      doc.text(String(v || '-').slice(0, 34), valX, my);
     });
 
     doc.line(M, M + 55.5, M + cw, M + 55.5);
@@ -764,10 +910,13 @@ function buildInvoiceDoc(
       ['ST CHARGES', invoice.stCharges || 0],
       ['FUMIGATION CHARGES', invoice.fumigationCharge || 0],
       ['EXTRA CHARGES', invoice.extraCharge || 0],
+      ...(Math.abs(Number(invoice.roundOffAmt || 0)) >= 0.005
+        ? ([['ROUND OFF (+/-)', invoice.roundOffAmt || 0]] as const)
+        : []),
     ] as const;
 
     const visibleCharges = allCharges.filter(
-      ([label, val]) => Number(val) > 0 || label === 'FREIGHT CHARGES'
+      ([label, val]) => Math.abs(Number(val)) > 0 || label === 'FREIGHT CHARGES'
     );
     const stepY = Math.min(5.2, 28 / Math.max(1, visibleCharges.length));
     let cy = boxTop + 9.5;
@@ -775,7 +924,11 @@ function buildInvoiceDoc(
     doc.setFontSize(visibleCharges.length > 5 ? 6.8 : 7.6);
     visibleCharges.forEach(([label, val]) => {
       doc.text(label, descColStart + 4, cy);
-      doc.text(formatINR(val), M + cw - 3, cy, { align: 'right' });
+      const formatted =
+        label === 'ROUND OFF (+/-)' && Number(val) < 0
+          ? `-${formatINR(Math.abs(Number(val)))}`
+          : formatINR(val);
+      doc.text(formatted, M + cw - 3, cy, { align: 'right' });
       cy += stepY;
     });
 
@@ -859,10 +1012,11 @@ function buildInvoiceDoc(
     doc.text('REMARKS & TERMS :', M + 2, remBoxY + 4.5);
     doc.setFont('helvetica', 'normal');
     const combinedRem = [
+      invoice.narrationText || '',
       invoice.remarks || '-',
       invoice.additionalNotes || '',
       invoice.billFootnote ||
-        'Payment Terms: 100% within 7 days (18% p.a. thereafter). Pay via A/C Payee NEFT/RTGS.',
+        'Payment Terms: 100% within credit period (18% p.a. thereafter). Pay via A/C Payee NEFT/RTGS.',
     ]
       .filter(Boolean)
       .join(' | ');
@@ -881,7 +1035,7 @@ function buildInvoiceDoc(
       for (let ap = 0; ap < annPages; ap++) {
         doc.addPage();
         drawOuterBorder();
-        drawTopLeftLogo(doc, assets, M + 2.5, M + 2.5, 19, 19);
+        drawInvoiceCircularRoadLogo(doc, M + 2.5, M + 2.5, 19, 19);
         doc.setTextColor(15, 76, 129);
         doc.setFont('helvetica', 'bold');
         doc.setFontSize(12.5);
@@ -1014,8 +1168,8 @@ function buildLR3CopyDoc(
     );
     doc.text(`Subhajit Saha · Mob: ${company.phones}`, x0 + cw - 3, y0 + 4.5, { align: 'right' });
 
-    // TOP-LEFT Triangular DRC Dolphin Logo
-    drawTopLeftLogo(doc, assets, x0 + 3, y0 + 7.5, 20, 20);
+    // TOP-LEFT Bilty Yellow-Background Red/Blue Oval Truck "DRC" + "!! OM SAI RAM !!" Logo
+    drawBiltyYellowTruckLogo(doc, x0 + 3, y0 + 7.5, 22, 20);
 
     doc.setTextColor(175, 25, 25);
     doc.setFont('helvetica', 'bold');
@@ -1041,11 +1195,15 @@ function buildLR3CopyDoc(
     doc.rect(x0, row1Y, b1W, 23);
     doc.setFont('helvetica', 'bold');
     doc.setFontSize(8.2);
-    doc.text(`C/N No   : ${cn.cnNo}`, x0 + 2.5, row1Y + 5);
-    doc.text(`C/N Date : ${formatDateDDMMYYYY(cn.cnDate)}`, x0 + 2.5, row1Y + 9.8);
+    doc.text(
+      `C/N No   : ${cn.branchShort ? `[${cn.branchShort}] ` : ''}${cn.cnNo}${cn.refCnNo ? ` (Ref:${cn.refCnNo})` : ''}`,
+      x0 + 2.5,
+      row1Y + 5
+    );
+    doc.text(`C/N Date : ${formatDateDDMMYYYY(cn.cnDate)} (${cn.transportMode || 'Road'})`, x0 + 2.5, row1Y + 9.8);
     doc.setFontSize(7);
     doc.text(`Billed At: ${(cn.billedAtBranch || cn.branchCode || 'KOLKATA').slice(0, 14)} | Cr: ${cn.creditDays || 15}d`, x0 + 2.5, row1Y + 14.6);
-    doc.text(`Del. Office: ${(cn.deliveryOffice || cn.toCity || '').slice(0, 25)}`, x0 + 2.5, row1Y + 19.6);
+    doc.text(`Deliver At: ${(cn.deliverAt || cn.deliveryOffice || cn.toCity || '').slice(0, 24)}`, x0 + 2.5, row1Y + 19.6);
 
     doc.rect(x0 + b1W, row1Y, b2W, 23);
     doc.setFont('helvetica', 'bold');
@@ -1186,10 +1344,11 @@ function buildLR3CopyDoc(
 
     doc.setFont('helvetica', 'bold');
     doc.setFontSize(7.8);
-    doc.text(`Total: Rs.${formatINR(cn.totalFreight)}`, c4 + 2, tblY + 13.5);
+    const hideFreight = cn.showFreightOnPrint === false;
+    doc.text(hideFreight ? 'Total: As Agreed' : `Total: Rs.${formatINR(cn.totalFreight)}`, c4 + 2, tblY + 13.5);
     doc.setFont('helvetica', 'normal');
-    doc.text(`Paid : Rs.${formatINR(cn.paidAmount || 0)}`, c4 + 2, tblY + 20);
-    doc.text(`ToPay: Rs.${formatINR(cn.toPayAmount || 0)}`, c4 + 2, tblY + 26.5);
+    doc.text(hideFreight ? 'Paid : As Agreed' : `Paid : Rs.${formatINR(cn.paidAmount || 0)}`, c4 + 2, tblY + 20);
+    doc.text(hideFreight ? 'ToPay: As Agreed' : `ToPay: Rs.${formatINR(cn.toPayAmount || 0)}`, c4 + 2, tblY + 26.5);
     doc.setFont('helvetica', 'bold');
     doc.setFontSize(6.6);
     doc.setTextColor(13, 71, 161);
@@ -2675,7 +2834,7 @@ function buildLogisticsInvoiceDoc(
     doc.setDrawColor(15, 23, 42);
     doc.setLineWidth(0.5);
     doc.rect(M, M, cw, ch);
-    drawTopLeftLogo(doc, assets, M + 2.5, M + 2, 18, 18);
+    drawInvoiceCircularRoadLogo(doc, M + 2.5, M + 2, 18, 18);
 
     doc.setFont('helvetica', 'bold');
     doc.setFontSize(13.5);
@@ -2832,6 +2991,213 @@ function buildLogisticsInvoiceDoc(
     buffer: doc.output('arraybuffer'),
     fileName: `Logistics_${sanitizeFileName(invoice.docType)}_${sanitizeFileName(invoice.docNo)}.pdf`,
     title: `${invoice.docType} - ${invoice.docNo}`,
+    orientation,
+  };
+}
+
+function buildAppFormatBlueprintDoc(
+  company: CompanySettings,
+  assets: PdfAssets,
+  orientation: PdfOrientation = 'p'
+) {
+  const doc = new jsPDF({
+    orientation: orientation === 'l' ? 'landscape' : 'portrait',
+    unit: 'mm',
+    format: 'a4',
+    compress: true,
+  });
+  const M = SAFE_MARGIN;
+  const pw = doc.internal.pageSize.getWidth();
+  const ph = doc.internal.pageSize.getHeight();
+  const cw = pw - M * 2;
+
+  const drawPageChrome = (pageTitle: string, pageTag: string) => {
+    doc.setFillColor(13, 71, 161);
+    doc.rect(M, M, cw, 16, 'F');
+    doc.setTextColor(255, 255, 255);
+    doc.setFont('helvetica', 'bold');
+    doc.setFontSize(11.5);
+    doc.text(company.companyName || 'DOLPHIN ROAD CARRIER', M + 3.5, M + 6.5);
+    doc.setFontSize(8.2);
+    doc.setFont('helvetica', 'normal');
+    doc.text(
+      `DRC APP ARCHITECTURE & DISASTER-RECOVERY BLUEPRINT  |  ${pageTag}`,
+      M + 3.5,
+      M + 12.2
+    );
+
+    doc.setFillColor(241, 245, 249);
+    doc.rect(M, M + 16, cw, 7.5, 'F');
+    doc.setDrawColor(148, 163, 184);
+    doc.setLineWidth(0.25);
+    doc.rect(M, M, cw, 23.5);
+    doc.setTextColor(15, 23, 42);
+    doc.setFont('helvetica', 'bold');
+    doc.setFontSize(8.5);
+    doc.text(pageTitle, M + 3, M + 21.2);
+  };
+
+  const drawSectionBox = (
+    y: number,
+    heading: string,
+    bullets: string[],
+    accentRgb: [number, number, number] = [13, 71, 161]
+  ): number => {
+    const lineHeight = 4.2;
+    const textWidth = cw - 8;
+    const wrappedBlocks = bullets.map((b) => doc.splitTextToSize(b, textWidth) as string[]);
+    const totalLines = wrappedBlocks.reduce((acc, lines) => acc + lines.length, 0);
+    const boxH = 8.5 + totalLines * lineHeight + Math.max(0, bullets.length - 1) * 1.1;
+
+    doc.setFillColor(accentRgb[0], accentRgb[1], accentRgb[2]);
+    doc.rect(M, y, cw, 6.2, 'F');
+    doc.setTextColor(255, 255, 255);
+    doc.setFont('helvetica', 'bold');
+    doc.setFontSize(8);
+    doc.text(heading, M + 3, y + 4.3);
+
+    doc.setDrawColor(203, 213, 225);
+    doc.setLineWidth(0.25);
+    doc.rect(M, y, cw, boxH);
+
+    doc.setTextColor(30, 41, 59);
+    doc.setFont('helvetica', 'normal');
+    doc.setFontSize(7.6);
+    let cy = y + 10.2;
+    wrappedBlocks.forEach((lines) => {
+      lines.forEach((ln) => {
+        doc.text(ln, M + 3.5, cy);
+        cy += lineHeight;
+      });
+      cy += 1.1;
+    });
+    return y + boxH + 3.5;
+  };
+
+  // ---------------- PAGE 1: TECH STACK, EMAILS, DRIVE SANDBOX & 4 DIVISIONS ----------------
+  drawPageChrome('PAGE 1 OF 3 — TECH STACK, CLOUD SYNC, EMAIL LOCK & 4-BUSINESS ARCHITECTURE', 'PAGE 1/3');
+  let y = M + 27;
+
+  y = drawSectionBox(
+    y,
+    '1. CORE TECH STACK, HOSTING & CROSS-PLATFORM PWA RUNTIME',
+    [
+      '• Frontend Engine: React 19 + TypeScript + Tailwind CSS v4 + Vite 6 + Workbox PWA (sw.js + sw-notifications.js).',
+      '• Cross-Device Support: Single installable codebase runs cleanly on Windows PC (Desktop/Chrome/Edge), Android Tablets, and Android Phones (auto-rotate + offline IndexedDB multi-MB cache).',
+      '• Real-Time 2-Way Sync: Express JSON/SSE live stream (/api/erp/state, /api/erp/stream) + timestamped 2-way conflict merge + offlineSyncQueue + optional Firestore real-time mirror.',
+      '• Production Origin Guard: Allowlisted Vercel & Firebase domains (dolphin-road-carrier.vercel.app) with instant silent version check (version.json).',
+    ],
+    [13, 71, 161]
+  );
+
+  y = drawSectionBox(
+    y,
+    '2. OFFICIAL COMMUNICATION EMAIL vs ISOLATED DRIVE BACKUP SANDBOX',
+    [
+      `• Official Party & Statutory Email: drc.kolkata1@gmail.com (printed on Tax Invoices, LRs, 194C Declarations & Quotation email-only acceptance clause).`,
+      `• Isolated Google Drive App Sandbox: Target backup account drc.kolkata2015@gmail.com uses strictly app-scoped OAuth permissions (drive.file + drive.appdata) — ZERO access to personal photos or unrelated files.`,
+      '• Visible Drive Root (DOLPHIN_ROAD_CARRIERS_MASTER): Stores 5 cleanly separated JSON files (DRC_FTL_BUSINESS_<FY>, DRC_LOGISTICS_BUSINESS_<FY>, DRC_PTL_BUSINESS_<FY>, DRC_COURIER_PARCEL_<FY>, DRC_MASTERS_AND_KYC_VAULT), DRC_APP_INSTALLER_VAULT, plus Compliance PDFs.',
+      '• Hidden App Sandbox (appDataFolder): Mirrors DRC_APP_FORMAT_BLUEPRINT.pdf & recovery snapshots securely inside Google Drive hidden app space.',
+    ],
+    [15, 118, 110]
+  );
+
+  y = drawSectionBox(
+    y,
+    '3. 4-BUSINESS DIVISION ISOLATION & UNIFIED WORKFLOW',
+    [
+      '• Switcher Buttons: [ FTL ] Full Truck Load  |  [ LOGISTICS ] Express Line-Haul  |  [ PTL ] Part-Truck Load  |  [ COURIER ] Parcel Express.',
+      '• Unified 4-Pillar Workspace: (A) Bilty & Lorry Master Sheet (CN/LR + Lorry Hire + PAY 1-12 + Staff), (B) Party Tax Invoice (FoxPro BILL ENTRY + Quotations + 194C), (C) Masters & Tally Ledgers + Bank Credit Reader, (D) GST Filing Hub, KYC Vault & Bilingual Operating Book.',
+      `• Company Identity: ${company.companyName} | GSTIN: ${company.gstin || '19DOTPS3540M1ZZ'} | PAN: ${company.pan || 'DOTPS3540M'} | Branch Network: HQ Kolkata + 50+ All-India Branches.`,
+    ],
+    [30, 64, 175]
+  );
+
+  // ---------------- PAGE 2: DATABASE SCHEMAS, FOXPRO RULES & FORMULAS ----------------
+  doc.addPage();
+  drawPageChrome('PAGE 2 OF 3 — DATABASE SCHEMAS, FOXPRO .DBF MAPPING & STATUTORY FORMULAS', 'PAGE 2/3');
+  y = M + 27;
+
+  y = drawSectionBox(
+    y,
+    '4. DATABASE COLLECTIONS & MASTER REGISTERS',
+    [
+      '• FTL & Core Ledgers: parties (Customer / Consignor / Consignee / Broker / TruckOwner), vehicles (RC/Fitness/Ins/Permit/PUC), drivers (DL + Expiry), consignments (CN/LR), invoices (Tax Bill/CDNR), quotations, lorry_hires (PAY 1-12 & POD Lock), transactions, declarations (194C), bank_receipts, staff_accounts, staff_commissions.',
+      '• Logistics / PTL / Courier Isolation: Separate logistics_parties, logistics_vehicles, logistics_drivers, logistics_dockets, logistics_manifests, logistics_invoices, logistics_ledgers scoped by division ID prefix.',
+      '• Duplicate-Safe Pickers: Every Party, Broker, Owner, Vehicle & Driver picker renders full KYC details (GSTIN / PAN / City / Phone / DL / Vehicle Type) + instant Entity Quick-Preview Card.',
+    ],
+    [13, 71, 161]
+  );
+
+  y = drawSectionBox(
+    y,
+    '5. FOXPRO (.DBF) AUTO-COLLECTOR & PARTY HYGIENE RULES',
+    [
+      '• Mapped Tables: HEAD / CUST*.DBF -> Customer Master | BRKRMAST -> Brokers | OWNER* / OWNMAST* -> Lorry Owners | VEHMAST* / COURVHL / LORRY* -> Lorry Register | DRVRMAST -> Drivers | DESMAST -> Destinations | COURTRAN / CHALLANT -> Bilty, Invoices & Challans.',
+      '• Strict Exclusions: scrap*.dbf and temporary junk files are automatically ignored; Cleanup tool separates Brokers/Owners/Drivers out of Billing Party Customer pickers.',
+      '• Classic Shortcuts & Print Controls: Keyboard-friendly Bilts/Bill Entry + Credit/Debit Note adjustment + Strict Print/Finalize Lock on finalized GST bills.',
+    ],
+    [180, 83, 9]
+  );
+
+  y = drawSectionBox(
+    y,
+    '6. VERIFIED ACCOUNTING, GST & STATUTORY FORMULAS',
+    [
+      '• Indian GSTIN Mod-36 Checksum: Every 15-char GSTIN is mathematically verified (2-digit State + 10-char PAN + Entity + Z + weighted mod-36 check digit) with direct GST Portal online search link.',
+      '• GST GTA Rules: 5% RCM (Tax payable by Consignee/Consignor), 12% Forward Charge (CGST 6% + SGST 6% intra-state WB 19, or IGST 12% inter-state), 0% Export Exempt (Nepal / Bangladesh / Bhutan, PAN mandatory).',
+      '• TDS u/s 194C & Banking: Tracks 1%/2% TDS deductions cleanly; Smart Bank Credit Reader parses SMS/Email alerts & PNB/Excel statements with exact Indian paise precision (e.g. 1,01,150.50).',
+      '• 2-Day Free Detention: Calculates detention charges strictly beyond 2 free unloading days; POD balance payment stays locked until POD scan + delivery verification are saved.',
+    ],
+    [5, 150, 105]
+  );
+
+  // ---------------- PAGE 3: SECURITY SHIELD, ALARMS & RECOVERY STEPS ----------------
+  doc.addPage();
+  drawPageChrome('PAGE 3 OF 3 — 5-LAYER SECURITY SHIELD, BACKGROUND ALARMS & RECOVERY GUIDE', 'PAGE 3/3');
+  y = M + 27;
+
+  y = drawSectionBox(
+    y,
+    '7. ANTI-SCREENSHOT PRIVACY SHIELD & 5-LAYER SECURITY ARCHITECTURE',
+    [
+      '• Anti-Screenshot Curtain: Blocks PrintScreen, Win+Shift+S / Cmd+Shift+S, unauthorized Copy/Right-Click, and getDisplayMedia screen recording with immediate black Privacy Curtain + alert beep (Admin PIN unlock available for audits).',
+      '• Dynamic Staff Watermark: Non-admin staff logins display subtle Staff Code + Name + Branch + Live Timestamp watermark overlay across sensitive financial ledgers.',
+      '• 5-Layer Shield: (1) Allowlisted HTTPS/OAuth Origin Lock, (2) Strict Safe File Upload Allowlist (.jpg/.png/.pdf/.xlsx/.csv/.dbf only — blocks scripts/executables), (3) Permanent Admin-PIN No-Auto-Delete Shield when live data exists, (4) Silent Auto-Update polling, (5) Daily & 90-Day Self-Healing Formula & Junk Cache Cleaner.',
+    ],
+    [185, 28, 28]
+  );
+
+  y = drawSectionBox(
+    y,
+    '8. CONTINUOUS E-WAY BILL 8H COUNTDOWN & BACKGROUND PHONE ALARMS',
+    [
+      '• Continuous 8h-to-1h EWB Alarm: Monitors every active CN with E-Way Bill validity <= 8 hours; fires persistent alert banner, beep & PWA background notification until Unloading Date or Delivered POD is recorded.',
+      '• Monthly GST & KYC Alarms: Alerts from 7th/8th (GSTR-1 due 11th) & 15th (GSTR-3B due 20th) + 10/5/2-day pre-expiry reminders for Vehicle Fitness, Insurance, Permit, Road Tax, PUC, WB Trade License & P-Tax.',
+      '• Phone Alarm Control: Click [Phone Alarm] in top header to grant Android/Windows tray notification permissions handled by sw-notifications.js.',
+    ],
+    [67, 56, 202]
+  );
+
+  y = drawSectionBox(
+    y,
+    '9. STEP-BY-STEP DISASTER RECOVERY & FUTURE REBUILD PROTOCOL',
+    [
+      '• Step 1 (Device Reset / New PC or Android): Open https://dolphin-road-carrier.vercel.app in Chrome/Edge and tap Install App for instant PWA icon & offline database.',
+      '• Step 2 (Connect Backup Sandbox): Open C. Settings -> Backup / Restore -> Switch Gmail to drc.kolkata2015@gmail.com (protected by Master Admin PIN).',
+      '• Step 3 (Restore All 4 Businesses): Click "Restore from Google Drive" (Master_Backup_DRC.json.gz) or restore each isolated division file individually (FTL, LOGISTICS, PTL, COURIER, MASTERS_AND_KYC_VAULT).',
+      '• Step 4 (Verify Health & GST): Click Header "100% Health" badge -> Run Formula Guard scan; open Tax Invoice & GSTR-1/3B Hub to confirm FY closing balances match 100%.',
+    ],
+    [15, 23, 42]
+  );
+
+  drawBottomRightStampAndSign(doc, assets, pw - M - 2, ph - M - 22, 24, 13);
+  stampAllPageNumbers(doc, 'DRC_APP_FORMAT_BLUEPRINT.pdf — Confidential Architecture & Recovery Blueprint', M, 3.8);
+
+  return {
+    buffer: doc.output('arraybuffer'),
+    fileName: 'DRC_APP_FORMAT_BLUEPRINT.pdf',
+    title: 'DRC App Format Blueprint (2-3 Page Low-KB Guide)',
     orientation,
   };
 }

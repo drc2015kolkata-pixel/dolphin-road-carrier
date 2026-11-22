@@ -173,6 +173,51 @@ export interface ExtraInsuranceItem {
   amount: number;
 }
 
+export interface EwbExtensionLog {
+  extNo: number;
+  extendedDate: string;
+  validUpto: string;
+  reason?: string;
+}
+
+export interface PayInstallmentRow {
+  slot: number;
+  date: string;
+  refNo: string;
+  amount: number;
+}
+
+export interface BankApiConfig {
+  enabled?: boolean;
+  providerName?: string;
+  apiKey?: string;
+  clientId?: string;
+  webhookSecret?: string;
+}
+
+export type KycDocType =
+  | 'WB_TRADE_LICENSE'
+  | 'WB_PTAX'
+  | 'UDYAM_MSME'
+  | 'PAN_CARD'
+  | 'AADHAAR_CARD'
+  | 'GST_CERTIFICATE'
+  | 'VEHICLE_PAPERS'
+  | 'OTHER';
+
+export interface KycVaultItem {
+  id: string;
+  docType: KycDocType | string;
+  label: string;
+  docNumber?: string;
+  issueDate?: string;
+  expiryDate?: string;
+  portalUrl?: string;
+  localStorageKey?: string;
+  driveFileName?: string;
+  updatedAt?: string;
+}
+
 export type ExtraWeightRow = MultiWeightRow;
 export type MultiGoodsRow = MultiGoodsItem;
 export type ExtraInsurancePolicy = ExtraInsuranceItem;
@@ -183,6 +228,12 @@ export interface ConsignmentNote {
   cnDate: string;
   financialYear?: string;
   division?: 'FTL' | 'LOGISTICS' | string;
+  branchShort?: string;
+  lastCnNo?: string;
+  refCnNo?: string;
+  transportMode?: 'Road' | 'Rail' | 'Air' | string;
+  bookingBasis?: 'Party' | 'Franchise' | 'Cash' | string;
+  payBasis?: 'TBB' | 'Paid' | 'To-Pay' | string;
   billedAtBranch?: string;
   hasVehicleNo?: boolean;
   deliveryOffice?: string;
@@ -193,9 +244,13 @@ export interface ConsignmentNote {
   consignorName: string;
   consignorAddress?: string;
   consignorGstin?: string;
+  consignorHsn?: string;
   consigneeName: string;
   consigneeAddress?: string;
   consigneeGstin?: string;
+  consigneeHsn?: string;
+  deliverAt?: string;
+  isChallanAttached?: boolean;
   packages?: string;
   packageMode?: string;
   particulars?: string;
@@ -212,6 +267,7 @@ export interface ConsignmentNote {
   sttCharge?: number;
   otherCharge?: number;
   totalFreight: number;
+  showFreightOnPrint?: boolean;
   paidAmount?: number;
   toPayAmount?: number;
   hasTaxInvoice?: boolean;
@@ -222,6 +278,7 @@ export interface ConsignmentNote {
   ewayBillNo?: string;
   ewayBillDate?: string;
   ewayBillValidUpto?: string;
+  ewbExtensions?: EwbExtensionLog[];
   extraTaxInvoices?: ExtraTaxInvoice[];
   extraEwayBills?: ExtraEwayBill[];
   extraVehicles?: string[];
@@ -246,10 +303,14 @@ export interface ConsignmentNote {
   gstPaidByCode?: 'R' | 'E' | 'T' | string;
   riskTakenBy?: 'O' | 'C' | 'I' | string;
   insuranceStatus?: string;
+  insuranceCo?: string;
   insurancePolicyNo?: string;
   insurancePolicyDate?: string;
   insuranceAmount?: number;
   extraInsurances?: ExtraInsuranceItem[];
+  multiInsurances?: ExtraInsuranceItem[];
+  billAdjustmentDetails?: string;
+  addlDetailsEnabled?: boolean;
   remarks?: string;
   scannedLrDataUrl?: string;
   billed: boolean;
@@ -292,6 +353,14 @@ export interface Invoice {
   division?: 'FTL' | 'LOGISTICS' | string;
   billedByCode?: 'B' | 'P' | string;
   billedAtBranch?: string;
+  poWorkOrderNo?: string;
+  creditDays?: number;
+  docKind?: 'Tax Invoice' | 'Credit Note' | 'Debit Note' | string;
+  againstInvoiceId?: string;
+  againstInvoiceNo?: string;
+  finalized?: boolean;
+  narrationText?: string;
+  roundOffAmt?: number;
   partyName: string;
   partyAddress?: string;
   partyGstin?: string;
@@ -413,6 +482,9 @@ export interface LorryHire {
   kataCharge?: number;
   detentionCharge?: number;
   detentionDays?: number;
+  detentionFromDate?: string;
+  detentionToDate?: string;
+  unloadingDate?: string;
   shortageCharge?: number;
   damageCharge?: number;
   tdsRatePct?: number;
@@ -421,6 +493,10 @@ export interface LorryHire {
   receiptChallanDate?: string;
   balancePayable: number;
   balancePaidAmt?: number;
+  payInstallments?: PayInstallmentRow[];
+  paymentDueAmt?: number;
+  advExDate?: string;
+  payTdsAmt?: number;
   podReceived: boolean;
   podReceiveDate?: string;
   podImageDataUrl?: string;
@@ -562,10 +638,14 @@ export interface StaffCommissionEntry {
     | string;
   entryType: 'Commission' | 'Advance Taken' | 'Paid';
   commissionRate?: number;
+  challanAmt?: number;
   travellingAmt?: number;
   miscAmt?: number;
   amount: number;
   paymentMode?: string;
+  advanceDate?: string;
+  monthlyPaidDate?: string;
+  settledZeroFlag?: boolean;
   remarks?: string;
   multiAdvances?: StaffMultiAdvanceLog[];
   multiPaidReturns?: StaffMultiPaidReturnLog[];
@@ -664,6 +744,9 @@ export interface CompanySettings {
     accessToken?: string;
     templateName?: string;
   };
+  bankApiConfig?: BankApiConfig;
+  kycVault?: KycVaultItem[];
+  kycVaultPinEnabled?: boolean;
   currentFy: string;
   availableFys?: string[];
   fyOpeningBalances?: Record<string, Record<string, FyOpeningBalanceEntry>>;

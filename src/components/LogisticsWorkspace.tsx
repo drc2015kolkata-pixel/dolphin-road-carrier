@@ -288,12 +288,12 @@ export const LogisticsWorkspace: React.FC<LogisticsWorkspaceProps> = ({
                 onClick={() => setActiveLogiTab('allInOne')}
                 className="p-4 rounded-xl bg-amber-50 border-2 border-amber-400 hover:border-amber-600 text-left shadow-sm cursor-pointer transition-all"
               >
-                <ClipboardList className="w-6 h-6 text-amber-700 mb-2" />
+                <ClipboardList className="w-6 h-6 text-amber-600 mb-2" />
                 <div className="text-sm font-extrabold text-slate-900">
-                  All-in-One Entry Sheet
+                  A. Bilty &amp; Lorry Master Sheet
                 </div>
                 <div className="text-xs text-slate-700 mt-0.5">
-                  Single-sheet Docket + Lorry Hire + Staff Ledger + Party Bill &amp; Live Register
+                  Unified Docket/LR + Lorry Hire + Broker + Staff Chart + Pay 1–12 Tracker
                 </div>
               </button>
               <button
@@ -301,9 +301,9 @@ export const LogisticsWorkspace: React.FC<LogisticsWorkspaceProps> = ({
                 onClick={() => setActiveLogiTab('docket')}
                 className="p-4 rounded-xl bg-white border-2 border-teal-200 hover:border-[#0F766E] text-left shadow-sm cursor-pointer transition-all"
               >
-                <Package className="w-6 h-6 text-[#0F766E] mb-2" />
+                <Package className="w-6 h-6 text-teal-600 mb-2" />
                 <div className="text-sm font-extrabold text-slate-900">
-                  + Book {divisionMode === 'COURIER' ? 'Courier Docket / AWB' : 'Parcel Docket / LR'}
+                  {divisionMode === 'COURIER' ? 'Courier Docket / AWB' : 'Parcel Docket / LR'}
                 </div>
                 <div className="text-xs text-slate-600 mt-0.5">
                   Per Kg / Per Pkg booking, EWB QR scan &amp; Verify QR A4 Docket PDF
@@ -314,7 +314,7 @@ export const LogisticsWorkspace: React.FC<LogisticsWorkspaceProps> = ({
                 onClick={() => setActiveLogiTab('manifest')}
                 className="p-4 rounded-xl bg-white border-2 border-blue-200 hover:border-[#0D47A1] text-left shadow-sm cursor-pointer transition-all"
               >
-                <Truck className="w-6 h-6 text-[#0D47A1] mb-2" />
+                <Truck className="w-6 h-6 text-blue-600 mb-2" />
                 <div className="text-sm font-extrabold text-slate-900">Line-Haul Dispatch Manifest</div>
                 <div className="text-xs text-slate-600 mt-0.5">
                   Bundle hub dockets into tempo/truck challans &amp; mark Arrival Unload
@@ -323,9 +323,9 @@ export const LogisticsWorkspace: React.FC<LogisticsWorkspaceProps> = ({
               <button
                 type="button"
                 onClick={() => setActiveLogiTab('godown')}
-                className="p-4 rounded-xl bg-white border-2 border-amber-200 hover:border-amber-600 text-left shadow-sm cursor-pointer transition-all"
+                className="p-4 rounded-xl bg-white border-2 border-purple-200 hover:border-purple-600 text-left shadow-sm cursor-pointer transition-all"
               >
-                <Warehouse className="w-6 h-6 text-amber-700 mb-2" />
+                <Warehouse className="w-6 h-6 text-purple-600 mb-2" />
                 <div className="text-sm font-extrabold text-slate-900">Branch Godown Stock &amp; POD</div>
                 <div className="text-xs text-slate-600 mt-0.5">
                   Live bay stock register, To-Pay COD gate-pass &amp; camera POD capture
@@ -336,9 +336,9 @@ export const LogisticsWorkspace: React.FC<LogisticsWorkspaceProps> = ({
                 onClick={() => setActiveLogiTab('billing')}
                 className="p-4 rounded-xl bg-white border-2 border-emerald-200 hover:border-emerald-700 text-left shadow-sm cursor-pointer transition-all"
               >
-                <FileText className="w-6 h-6 text-emerald-700 mb-2" />
+                <FileText className="w-6 h-6 text-emerald-600 mb-2" />
                 <div className="text-sm font-extrabold text-slate-900">
-                  {divisionMeta.shortLabel} Bills, CN &amp; DN
+                  B. {divisionMeta.shortLabel} Tax Invoice, CN &amp; DN
                 </div>
                 <div className="text-xs text-slate-600 mt-0.5">
                   Monthly TBB Tax Invoices, Credit Notes &amp; Debit Notes with Bank QR

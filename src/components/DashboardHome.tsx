@@ -1,6 +1,8 @@
 import React, { useEffect, useMemo, useRef, useState } from 'react';
 import {
   ArrowLeftRight,
+  Banknote,
+  BookOpen,
   ChevronDown,
   ChevronUp,
   ClipboardList,
@@ -8,14 +10,13 @@ import {
   Eraser,
   FileBarChart2,
   FileSpreadsheet,
-  FolderSync,
   Landmark,
   Lock,
   Printer,
   Save,
-  ScanLine,
   Search,
   Settings,
+  ShieldCheck,
   Star,
   Trash2,
   Truck,
@@ -778,32 +779,32 @@ const DashboardHomeInner: React.FC<DashboardHomeProps> = ({
 
           <div className="relative z-10 p-3 bg-slate-900 text-white flex flex-wrap items-center justify-between gap-2">
             <span className="text-xs font-medium text-blue-100">
-              Scan Physical LR or Build GST Invoice
+              A. Bilty &amp; Lorry Sheet · B. Party Tax Invoice · D. GST &amp; KYC Vault
             </span>
-            <div className="flex items-center gap-2">
+            <div className="flex flex-wrap items-center gap-1.5">
               <button
                 type="button"
                 onClick={() => onOpenTab('allInOne')}
                 className="inline-flex items-center gap-1.5 px-2.5 py-1.5 rounded bg-amber-500 hover:bg-amber-400 text-slate-950 text-xs font-extrabold transition-colors cursor-pointer whitespace-nowrap"
               >
-                <ClipboardList className="w-3.5 h-3.5" />
-                All-in-One Sheet
-              </button>
-              <button
-                type="button"
-                onClick={() => onOpenTab('lr')}
-                className="inline-flex items-center gap-1.5 px-2.5 py-1.5 rounded bg-emerald-600 hover:bg-emerald-700 text-white text-xs font-semibold transition-colors cursor-pointer whitespace-nowrap"
-              >
-                <ScanLine className="w-3.5 h-3.5" />
-                Scan LR
+                <ClipboardList className="w-3.5 h-3.5 text-slate-950" />
+                A. Bilty &amp; Lorry Sheet
               </button>
               <button
                 type="button"
                 onClick={() => onOpenTab('billing')}
-                className="inline-flex items-center gap-1.5 px-2.5 py-1.5 rounded bg-blue-600 hover:bg-blue-700 text-white text-xs font-semibold transition-colors cursor-pointer whitespace-nowrap"
+                className="inline-flex items-center gap-1.5 px-2.5 py-1.5 rounded bg-blue-600 hover:bg-blue-700 text-white text-xs font-bold transition-colors cursor-pointer whitespace-nowrap"
               >
-                <FileSpreadsheet className="w-3.5 h-3.5" />
-                Tax Invoice
+                <FileSpreadsheet className="w-3.5 h-3.5 text-white" />
+                B. Party Tax Invoice
+              </button>
+              <button
+                type="button"
+                onClick={() => onOpenTab('reports')}
+                className="inline-flex items-center gap-1.5 px-2.5 py-1.5 rounded bg-emerald-600 hover:bg-emerald-700 text-white text-xs font-bold transition-colors cursor-pointer whitespace-nowrap"
+              >
+                <ShieldCheck className="w-3.5 h-3.5 text-white" />
+                D. GST &amp; KYC Vault
               </button>
             </div>
           </div>
@@ -877,55 +878,71 @@ const DashboardHomeInner: React.FC<DashboardHomeProps> = ({
               </span>
               <ChevronUp className="w-4 h-4" />
             </button>
-            <div className="p-2.5 space-y-2 text-xs">
+            <div className="p-2.5 space-y-1.5 text-xs">
               <button
                 type="button"
                 onClick={() => onOpenTab('allInOne')}
                 className="w-full flex items-center gap-2.5 px-3 py-2 rounded-lg border border-amber-300 bg-amber-50 hover:bg-amber-100 text-slate-900 font-extrabold transition-colors cursor-pointer"
               >
-                <ClipboardList className="w-4 h-4 text-amber-700" />
-                <span>All-in-One Master Sheet</span>
+                <ClipboardList className="w-4 h-4 text-amber-600 shrink-0" />
+                <span>A. Bilty &amp; Lorry Master Sheet</span>
+              </button>
+              <button
+                type="button"
+                onClick={() => onOpenTab('billing')}
+                className="w-full flex items-center gap-2.5 px-3 py-2 rounded-lg border border-blue-200 bg-blue-50/70 hover:bg-blue-100 text-slate-900 font-bold transition-colors cursor-pointer"
+              >
+                <FileSpreadsheet className="w-4 h-4 text-blue-600 shrink-0" />
+                <span>B. Party Tax Invoice (Billing)</span>
               </button>
               <button
                 type="button"
                 onClick={() => onOpenTab('master')}
-                className="w-full flex items-center gap-2.5 px-3 py-2 rounded-lg border border-slate-200 bg-slate-50 hover:bg-blue-50 hover:border-blue-300 text-slate-800 font-semibold transition-colors cursor-pointer"
+                className="w-full flex items-center gap-2.5 px-3 py-2 rounded-lg border border-slate-200 bg-slate-50 hover:bg-indigo-50 hover:border-indigo-300 text-slate-800 font-semibold transition-colors cursor-pointer"
               >
-                <Users className="w-4 h-4 text-blue-700" />
-                <span>Ledger Account &amp; Parties</span>
+                <Users className="w-4 h-4 text-indigo-600 shrink-0" />
+                <span>C. Masters &amp; Party Ledgers</span>
               </button>
               <button
                 type="button"
                 onClick={() => onOpenTab('reports')}
-                className="w-full flex items-center gap-2.5 px-3 py-2 rounded-lg border border-slate-200 bg-slate-50 hover:bg-blue-50 hover:border-blue-300 text-slate-800 font-semibold transition-colors cursor-pointer"
+                className="w-full flex items-center gap-2.5 px-3 py-2 rounded-lg border border-slate-200 bg-slate-50 hover:bg-emerald-50 hover:border-emerald-300 text-slate-800 font-semibold transition-colors cursor-pointer"
               >
-                <FileBarChart2 className="w-4 h-4 text-emerald-700" />
-                <span>View Reports</span>
+                <FileBarChart2 className="w-4 h-4 text-emerald-600 shrink-0" />
+                <span>D. GST Hub, ITR &amp; KYC Vault</span>
+              </button>
+              <button
+                type="button"
+                onClick={() => onOpenTab('bankImport')}
+                className="w-full flex items-center gap-2.5 px-3 py-2 rounded-lg border border-slate-200 bg-slate-50 hover:bg-cyan-50 hover:border-cyan-300 text-slate-800 font-semibold transition-colors cursor-pointer"
+              >
+                <Banknote className="w-4 h-4 text-cyan-700 shrink-0" />
+                <span>Smart Bank Credit Reader</span>
+              </button>
+              <button
+                type="button"
+                onClick={() => onOpenTab('guide')}
+                className="w-full flex items-center gap-2.5 px-3 py-2 rounded-lg border border-slate-200 bg-slate-50 hover:bg-purple-50 hover:border-purple-300 text-slate-800 font-semibold transition-colors cursor-pointer"
+              >
+                <BookOpen className="w-4 h-4 text-purple-600 shrink-0" />
+                <span>Bilingual Operating Book</span>
               </button>
               <button
                 type="button"
                 onClick={() => onOpenTab('backup')}
                 className="w-full flex items-center gap-2.5 px-3 py-2 rounded-lg border border-slate-200 bg-slate-50 hover:bg-blue-50 hover:border-blue-300 text-slate-800 font-semibold transition-colors cursor-pointer"
               >
-                <DatabaseBackup className="w-4 h-4 text-blue-700" />
-                <span>Backup Database</span>
-              </button>
-              <button
-                type="button"
-                onClick={() => onOpenTab('backup')}
-                className="w-full flex items-center gap-2.5 px-3 py-2 rounded-lg border border-slate-200 bg-slate-50 hover:bg-blue-50 hover:border-blue-300 text-slate-800 font-semibold transition-colors cursor-pointer"
-              >
-                <FolderSync className="w-4 h-4 text-emerald-700" />
-                <span>Restore Database</span>
+                <DatabaseBackup className="w-4 h-4 text-sky-600 shrink-0" />
+                <span>Backup / Restore &amp; Clean</span>
               </button>
               {isMasterAdmin && (
                 <button
                   type="button"
                   onClick={() => onOpenTab('settings')}
-                  className="w-full flex items-center gap-2.5 px-3 py-2 rounded-lg border border-slate-200 bg-slate-50 hover:bg-blue-50 hover:border-blue-300 text-slate-800 font-semibold transition-colors cursor-pointer"
+                  className="w-full flex items-center gap-2.5 px-3 py-2 rounded-lg border border-slate-200 bg-slate-50 hover:bg-rose-50 hover:border-rose-300 text-slate-800 font-semibold transition-colors cursor-pointer"
                 >
-                  <Settings className="w-4 h-4 text-purple-700" />
-                  <span>Settings &amp; Staff</span>
+                  <Settings className="w-4 h-4 text-rose-600 shrink-0" />
+                  <span>Admin Settings &amp; API Key</span>
                 </button>
               )}
             </div>

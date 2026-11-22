@@ -50,7 +50,9 @@ import {
   DEFAULT_PACKAGE_MODES,
   getEffectiveDropdownList,
 } from '../lib/dropdownMasterStore';
-import { playVerifiedBeep } from '../lib/audioFeedback';
+import { playAlertBeep, playVerifiedBeep } from '../lib/audioFeedback';
+import { validateIndianGstin } from '../lib/gstinValidator';
+import { GstinInputField } from './GstinInputField';
 
 interface LogisticsDocketManifestPanelProps {
   divisionMode?: LogisticsDivisionCode;
@@ -169,6 +171,7 @@ export const LogisticsDocketManifestPanel: React.FC<LogisticsDocketManifestPanel
   const [remarks, setRemarks] = useState('');
   const [docketSearch, setDocketSearch] = useState('');
   const [docketSaving, setDocketSaving] = useState(false);
+  const [docketError, setDocketError] = useState<string | null>(null);
 
   // Camera & QR Scanner modal
   const [scannerOpen, setScannerOpen] = useState(false);
@@ -314,7 +317,24 @@ export const LogisticsDocketManifestPanel: React.FC<LogisticsDocketManifestPanel
 
   const handleSaveDocket = async (e: React.FormEvent) => {
     e.preventDefault();
+    setDocketError(null);
     if (!consignorName.trim() || !consigneeName.trim() || !docketNo.trim()) return;
+    if (consignorGstin.trim()) {
+      const res = validateIndianGstin(consignorGstin);
+      if (!res.valid) {
+        playAlertBeep();
+        setDocketError(`Consignor GSTIN Invalid: ${res.error}`);
+        return;
+      }
+    }
+    if (consigneeGstin.trim()) {
+      const res = validateIndianGstin(consigneeGstin);
+      if (!res.valid) {
+        playAlertBeep();
+        setDocketError(`Consignee GSTIN Invalid: ${res.error}`);
+        return;
+      }
+    }
     setDocketSaving(true);
     try {
       const existing = editingDocketId ? dockets.find((d) => d.id === editingDocketId) : undefined;
@@ -720,6 +740,12 @@ export const LogisticsDocketManifestPanel: React.FC<LogisticsDocketManifestPanel
                 </div>
               </div>
 
+              {docketError && (
+                <div className="px-3 py-2 rounded-lg bg-red-50 border border-red-200 text-red-700 text-xs font-bold">
+                  {docketError}
+                </div>
+              )}
+
               <div className="grid grid-cols-1 sm:grid-cols-2 gap-2 p-2.5 rounded-lg bg-slate-50 border border-slate-200">
                 <div>
                   <label className="block text-[11px] font-bold text-slate-700 mb-0.5">Consignor Name*</label>
@@ -762,12 +788,15 @@ export const LogisticsDocketManifestPanel: React.FC<LogisticsDocketManifestPanel
                       );
                     })()}
                   />
-                  <input
-                    value={consignorGstin}
-                    onChange={(e) => setConsignorGstin(e.target.value)}
-                    placeholder="Consignor GSTIN"
-                    className="w-full px-2 py-1 mt-1 rounded border border-slate-200 bg-white text-[11px] font-mono-num"
-                  />
+                  <div className="mt-1">
+                    <GstinInputField
+                      label="Consignor GSTIN"
+                      value={consignorGstin}
+                      onChange={setConsignorGstin}
+                      compact
+                      placeholder="Consignor GSTIN"
+                    />
+                  </div>
                 </div>
                 <div>
                   <label className="block text-[11px] font-bold text-slate-700 mb-0.5">Consignee Name*</label>
@@ -810,12 +839,15 @@ export const LogisticsDocketManifestPanel: React.FC<LogisticsDocketManifestPanel
                       );
                     })()}
                   />
-                  <input
-                    value={consigneeGstin}
-                    onChange={(e) => setConsigneeGstin(e.target.value)}
-                    placeholder="Consignee GSTIN"
-                    className="w-full px-2 py-1 mt-1 rounded border border-slate-200 bg-white text-[11px] font-mono-num"
-                  />
+                  <div className="mt-1">
+                    <GstinInputField
+                      label="Consignee GSTIN"
+                      value={consigneeGstin}
+                      onChange={setConsigneeGstin}
+                      compact
+                      placeholder="Consignee GSTIN"
+                    />
+                  </div>
                 </div>
               </div>
 

@@ -161,27 +161,18 @@ service cloud.firestore {
         data.updatedAt is timestamp;
     }
 
-    function isValidConsignment(data) {
-      return data.keys().hasAll(['cnNo', 'cnDate', 'consignorName', 'consigneeName', 'truckNo', 'fromCity', 'toCity', 'totalFreight', 'billed', 'ownerUid', 'createdAt', 'updatedAt']) &&
-        data.keys().hasOnly([
-          'id', 'cnNo', 'cnDate', 'financialYear', 'division', 'billedAtBranch', 'hasVehicleNo', 'deliveryOffice', 'stockTransfer', 'billingPartyName', 'billToPartyFlag', 'creditDays',
-          'consignorName', 'consignorAddress', 'consignorGstin',
-          'consigneeName', 'consigneeAddress', 'consigneeGstin', 'packages', 'packageMode', 'particulars', 'multiGoodsItems',
-          'rateMode', 'ratePerUnit', 'nettWeight', 'grossWeight', 'chargedWeight', 'multiWeights', 'loadingCharge', 'unloadingCharge',
-          'returnLorryCharge', 'sttCharge', 'otherCharge', 'totalFreight', 'paidAmount', 'toPayAmount',
-          'hasTaxInvoice', 'hasMultiEwayBill', 'hasMultiVehicle', 'taxInvNo', 'taxInvDate', 'ewayBillNo', 'ewayBillDate', 'ewayBillValidUpto',
-          'extraTaxInvoices', 'extraEwayBills', 'extraVehicles',
-          'valueOfGoods', 'truckNo', 'fromState', 'fromDistrict', 'fromCity', 'toState', 'toDistrict', 'toCity',
-          'engineNo', 'chassisNo', 'ownerName', 'brokerName', 'driverName', 'driverDlNo', 'driverDlExpiry', 'driverMobile',
-          'deliveryModeCode', 'gstPaidBy', 'gstPaidByCode', 'riskTakenBy', 'insuranceStatus', 'extraInsurances',
-          'remarks', 'scannedLrDataUrl', 'billed', 'invoiceId',
-          'branchCode', 'createdByStaff', 'ownerUid', 'createdAt', 'updatedAt'
-        ]) &&
-        isValidOptStr(data, 'id', 128) &&
+    function isValidConsignmentPartA(data) {
+      return isValidOptStr(data, 'id', 128) &&
         data.cnNo is string && data.cnNo.size() >= 2 && data.cnNo.size() <= 40 &&
         data.cnDate is string && data.cnDate.size() >= 8 && data.cnDate.size() <= 20 &&
         isValidOptStr(data, 'financialYear', 16) &&
         isValidOptStr(data, 'division', 20) &&
+        isValidOptStr(data, 'branchShort', 30) &&
+        isValidOptStr(data, 'lastCnNo', 40) &&
+        isValidOptStr(data, 'refCnNo', 40) &&
+        isValidOptStr(data, 'transportMode', 30) &&
+        isValidOptStr(data, 'bookingBasis', 30) &&
+        isValidOptStr(data, 'payBasis', 30) &&
         isValidOptStr(data, 'billedAtBranch', 80) &&
         isValidOptBool(data, 'hasVehicleNo') &&
         isValidOptStr(data, 'deliveryOffice', 200) &&
@@ -192,9 +183,13 @@ service cloud.firestore {
         data.consignorName is string && data.consignorName.size() <= 180 &&
         isValidOptStr(data, 'consignorAddress', 350) &&
         isValidOptStr(data, 'consignorGstin', 24) &&
+        isValidOptStr(data, 'consignorHsn', 20) &&
         data.consigneeName is string && data.consigneeName.size() <= 180 &&
         isValidOptStr(data, 'consigneeAddress', 350) &&
         isValidOptStr(data, 'consigneeGstin', 24) &&
+        isValidOptStr(data, 'consigneeHsn', 20) &&
+        isValidOptStr(data, 'deliverAt', 180) &&
+        isValidOptBool(data, 'isChallanAttached') &&
         isValidOptStr(data, 'packages', 40) &&
         isValidOptStr(data, 'packageMode', 60) &&
         isValidOptStr(data, 'particulars', 400) &&
@@ -211,9 +206,13 @@ service cloud.firestore {
         isValidOptNum(data, 'sttCharge') &&
         isValidOptNum(data, 'otherCharge') &&
         (data.totalFreight is int || data.totalFreight is float) &&
+        isValidOptBool(data, 'showFreightOnPrint') &&
         isValidOptNum(data, 'paidAmount') &&
-        isValidOptNum(data, 'toPayAmount') &&
-        isValidOptBool(data, 'hasTaxInvoice') &&
+        isValidOptNum(data, 'toPayAmount');
+    }
+
+    function isValidConsignmentPartB(data) {
+      return isValidOptBool(data, 'hasTaxInvoice') &&
         isValidOptBool(data, 'hasMultiEwayBill') &&
         isValidOptBool(data, 'hasMultiVehicle') &&
         isValidOptStr(data, 'taxInvNo', 80) &&
@@ -221,6 +220,7 @@ service cloud.firestore {
         isValidOptStr(data, 'ewayBillNo', 60) &&
         isValidOptStr(data, 'ewayBillDate', 20) &&
         isValidOptStr(data, 'ewayBillValidUpto', 30) &&
+        isValidOptList(data, 'ewbExtensions', 15) &&
         isValidOptList(data, 'extraTaxInvoices', 50) &&
         isValidOptList(data, 'extraEwayBills', 50) &&
         isValidOptList(data, 'extraVehicles', 30) &&
@@ -245,7 +245,14 @@ service cloud.firestore {
         isValidOptStr(data, 'gstPaidByCode', 10) &&
         isValidOptStr(data, 'riskTakenBy', 10) &&
         isValidOptStr(data, 'insuranceStatus', 80) &&
+        isValidOptStr(data, 'insuranceCo', 120) &&
+        isValidOptStr(data, 'insurancePolicyNo', 80) &&
+        isValidOptStr(data, 'insurancePolicyDate', 20) &&
+        isValidOptNum(data, 'insuranceAmount') &&
         isValidOptList(data, 'extraInsurances', 50) &&
+        isValidOptList(data, 'multiInsurances', 50) &&
+        isValidOptStr(data, 'billAdjustmentDetails', 500) &&
+        isValidOptBool(data, 'addlDetailsEnabled') &&
         isValidOptStr(data, 'remarks', 1200) &&
         isValidOptStr(data, 'scannedLrDataUrl', 450000) &&
         data.billed is bool &&
@@ -257,18 +264,33 @@ service cloud.firestore {
         data.updatedAt is timestamp;
     }
 
-    function isValidInvoice(data) {
-      return data.keys().hasAll(['invoiceNo', 'invoiceDate', 'partyName', 'grandTotal', 'paidAmount', 'status', 'consignmentRows', 'ownerUid', 'createdAt', 'updatedAt']) &&
+    function isValidConsignment(data) {
+      return data.keys().hasAll(['cnNo', 'cnDate', 'consignorName', 'consigneeName', 'truckNo', 'fromCity', 'toCity', 'totalFreight', 'billed', 'ownerUid', 'createdAt', 'updatedAt']) &&
         data.keys().hasOnly([
-          'id', 'billId', 'invoiceNo', 'invoiceDate', 'dueDate', 'financialYear', 'division', 'billedByCode', 'billedAtBranch',
-          'partyName', 'partyAddress', 'partyGstin', 'partyPan',
-          'billingCountry', 'sac', 'reverseCharge', 'interstate', 'gstPaidBy', 'gstRate', 'cgstAmt', 'sgstAmt', 'igstAmt', 'totalTax',
-          'freightCharges', 'insuranceCharge', 'collCharge', 'loadingCharge', 'detentionCharges', 'unloadingCharges', 'surchargeAmt',
-          'stCharges', 'fumigationCharge', 'extraCharge', 'grossBillAmount', 'advanceReceived', 'advanceMode', 'fullPaymentMode', 'grandTotal',
-          'paidAmount', 'status', 'remarks', 'billFootnote', 'additionalNotes', 'copyCount', 'consignmentRows', 'annexureLorries',
-          'selectedBankId', 'branchOfficeId', 'branchCode', 'createdByStaff', 'ownerUid', 'createdAt', 'updatedAt'
+          'id', 'cnNo', 'cnDate', 'financialYear', 'division', 'branchShort', 'lastCnNo', 'refCnNo',
+          'transportMode', 'bookingBasis', 'payBasis', 'billedAtBranch', 'hasVehicleNo', 'deliveryOffice',
+          'stockTransfer', 'billingPartyName', 'billToPartyFlag', 'creditDays',
+          'consignorName', 'consignorAddress', 'consignorGstin', 'consignorHsn',
+          'consigneeName', 'consigneeAddress', 'consigneeGstin', 'consigneeHsn', 'deliverAt', 'isChallanAttached',
+          'packages', 'packageMode', 'particulars', 'multiGoodsItems',
+          'rateMode', 'ratePerUnit', 'nettWeight', 'grossWeight', 'chargedWeight', 'multiWeights', 'loadingCharge', 'unloadingCharge',
+          'returnLorryCharge', 'sttCharge', 'otherCharge', 'totalFreight', 'showFreightOnPrint', 'paidAmount', 'toPayAmount',
+          'hasTaxInvoice', 'hasMultiEwayBill', 'hasMultiVehicle', 'taxInvNo', 'taxInvDate', 'ewayBillNo', 'ewayBillDate', 'ewayBillValidUpto',
+          'ewbExtensions', 'extraTaxInvoices', 'extraEwayBills', 'extraVehicles',
+          'valueOfGoods', 'truckNo', 'fromState', 'fromDistrict', 'fromCity', 'toState', 'toDistrict', 'toCity',
+          'engineNo', 'chassisNo', 'ownerName', 'brokerName', 'driverName', 'driverDlNo', 'driverDlExpiry', 'driverMobile',
+          'deliveryModeCode', 'gstPaidBy', 'gstPaidByCode', 'riskTakenBy', 'insuranceStatus', 'insuranceCo',
+          'insurancePolicyNo', 'insurancePolicyDate', 'insuranceAmount', 'extraInsurances', 'multiInsurances',
+          'billAdjustmentDetails', 'addlDetailsEnabled',
+          'remarks', 'scannedLrDataUrl', 'billed', 'invoiceId',
+          'branchCode', 'createdByStaff', 'ownerUid', 'createdAt', 'updatedAt'
         ]) &&
-        isValidOptStr(data, 'id', 128) &&
+        isValidConsignmentPartA(data) &&
+        isValidConsignmentPartB(data);
+    }
+
+    function isValidInvoicePartA(data) {
+      return isValidOptStr(data, 'id', 128) &&
         isValidOptStr(data, 'billId', 40) &&
         data.invoiceNo is string && data.invoiceNo.size() >= 2 && data.invoiceNo.size() <= 40 &&
         data.invoiceDate is string && data.invoiceDate.size() >= 8 && data.invoiceDate.size() <= 20 &&
@@ -277,6 +299,14 @@ service cloud.firestore {
         isValidOptStr(data, 'division', 20) &&
         isValidOptStr(data, 'billedByCode', 10) &&
         isValidOptStr(data, 'billedAtBranch', 80) &&
+        isValidOptStr(data, 'poWorkOrderNo', 80) &&
+        isValidOptNum(data, 'creditDays') &&
+        isValidOptStr(data, 'docKind', 30) &&
+        isValidOptStr(data, 'againstInvoiceId', 128) &&
+        isValidOptStr(data, 'againstInvoiceNo', 40) &&
+        isValidOptBool(data, 'finalized') &&
+        isValidOptStr(data, 'narrationText', 500) &&
+        isValidOptNum(data, 'roundOffAmt') &&
         data.partyName is string && data.partyName.size() >= 1 && data.partyName.size() <= 180 &&
         isValidOptStr(data, 'partyAddress', 350) &&
         isValidOptStr(data, 'partyGstin', 24) &&
@@ -285,8 +315,11 @@ service cloud.firestore {
         isValidOptStr(data, 'sac', 20) &&
         isValidOptBool(data, 'reverseCharge') &&
         isValidOptBool(data, 'interstate') &&
-        isValidOptStr(data, 'gstPaidBy', 40) &&
-        isValidOptNum(data, 'gstRate') &&
+        isValidOptStr(data, 'gstPaidBy', 40);
+    }
+
+    function isValidInvoicePartB(data) {
+      return isValidOptNum(data, 'gstRate') &&
         isValidOptNum(data, 'cgstAmt') &&
         isValidOptNum(data, 'sgstAmt') &&
         isValidOptNum(data, 'igstAmt') &&
@@ -322,6 +355,22 @@ service cloud.firestore {
         data.ownerUid is string && data.ownerUid.size() >= 6 && data.ownerUid.size() <= 128 &&
         data.createdAt is timestamp &&
         data.updatedAt is timestamp;
+    }
+
+    function isValidInvoice(data) {
+      return data.keys().hasAll(['invoiceNo', 'invoiceDate', 'partyName', 'grandTotal', 'paidAmount', 'status', 'consignmentRows', 'ownerUid', 'createdAt', 'updatedAt']) &&
+        data.keys().hasOnly([
+          'id', 'billId', 'invoiceNo', 'invoiceDate', 'dueDate', 'financialYear', 'division', 'billedByCode', 'billedAtBranch',
+          'poWorkOrderNo', 'creditDays', 'docKind', 'againstInvoiceId', 'againstInvoiceNo', 'finalized', 'narrationText', 'roundOffAmt',
+          'partyName', 'partyAddress', 'partyGstin', 'partyPan',
+          'billingCountry', 'sac', 'reverseCharge', 'interstate', 'gstPaidBy', 'gstRate', 'cgstAmt', 'sgstAmt', 'igstAmt', 'totalTax',
+          'freightCharges', 'insuranceCharge', 'collCharge', 'loadingCharge', 'detentionCharges', 'unloadingCharges', 'surchargeAmt',
+          'stCharges', 'fumigationCharge', 'extraCharge', 'grossBillAmount', 'advanceReceived', 'advanceMode', 'fullPaymentMode', 'grandTotal',
+          'paidAmount', 'status', 'remarks', 'billFootnote', 'additionalNotes', 'copyCount', 'consignmentRows', 'annexureLorries',
+          'selectedBankId', 'branchOfficeId', 'branchCode', 'createdByStaff', 'ownerUid', 'createdAt', 'updatedAt'
+        ]) &&
+        isValidInvoicePartA(data) &&
+        isValidInvoicePartB(data);
     }
 
     function isValidQuotation(data) {
@@ -374,8 +423,11 @@ service cloud.firestore {
           'id', 'cnNo', 'cnDate', 'financialYear', 'division', 'truckNo', 'ownerName', 'brokerName', 'fromCity', 'toCity',
           'weightMt', 'ratePerUnit', 'rateMode', 'bookedPkgs', 'deliveredPkgs', 'shortageDamagePkgs', 'hasMultiAdvance', 'advances',
           'hireAmount', 'advancePaid', 'extraAdvanceAmt', 'loadingCharge', 'unloadingCharge', 'parkingCharge', 'kataCharge',
-          'detentionCharge', 'detentionDays', 'shortageCharge', 'damageCharge', 'tdsRatePct', 'tdsAmount',
-          'receiptChallanNo', 'receiptChallanDate', 'balancePayable', 'balancePaidAmt', 'podReceived', 'podReceiveDate',
+          'detentionCharge', 'detentionDays', 'detentionFromDate', 'detentionToDate', 'unloadingDate',
+          'shortageCharge', 'damageCharge', 'tdsRatePct', 'tdsAmount',
+          'receiptChallanNo', 'receiptChallanDate', 'balancePayable', 'balancePaidAmt',
+          'payInstallments', 'paymentDueAmt', 'advExDate', 'payTdsAmt',
+          'podReceived', 'podReceiveDate',
           'podImageDataUrl', 'podFileName', 'podRemarks', 'balancePaid', 'balancePaidDate',
           'paymentMode', 'paymentRef', 'remarks', 'branchCode', 'createdByStaff', 'ownerUid', 'createdAt', 'updatedAt'
         ]) &&
@@ -406,6 +458,9 @@ service cloud.firestore {
         isValidOptNum(data, 'kataCharge') &&
         isValidOptNum(data, 'detentionCharge') &&
         isValidOptNum(data, 'detentionDays') &&
+        isValidOptStr(data, 'detentionFromDate', 20) &&
+        isValidOptStr(data, 'detentionToDate', 20) &&
+        isValidOptStr(data, 'unloadingDate', 20) &&
         isValidOptNum(data, 'shortageCharge') &&
         isValidOptNum(data, 'damageCharge') &&
         isValidOptNum(data, 'tdsRatePct') &&
@@ -414,6 +469,10 @@ service cloud.firestore {
         isValidOptStr(data, 'receiptChallanDate', 20) &&
         (data.balancePayable is int || data.balancePayable is float) &&
         isValidOptNum(data, 'balancePaidAmt') &&
+        isValidOptList(data, 'payInstallments', 12) &&
+        isValidOptNum(data, 'paymentDueAmt') &&
+        isValidOptStr(data, 'advExDate', 20) &&
+        isValidOptNum(data, 'payTdsAmt') &&
         data.podReceived is bool &&
         isValidOptStr(data, 'podReceiveDate', 20) &&
         isValidOptStr(data, 'podImageDataUrl', 450000) &&
@@ -509,7 +568,8 @@ service cloud.firestore {
       return data.keys().hasAll(['entryDate', 'staffName', 'wheelType', 'entryType', 'amount', 'ownerUid', 'createdAt', 'updatedAt']) &&
         data.keys().hasOnly([
           'id', 'entryDate', 'financialYear', 'division', 'staffName', 'staffBankAccount', 'staffUpiId', 'challanNo', 'truckNo',
-          'wheelType', 'entryType', 'commissionRate', 'travellingAmt', 'miscAmt', 'amount', 'paymentMode', 'remarks',
+          'wheelType', 'entryType', 'commissionRate', 'challanAmt', 'travellingAmt', 'miscAmt', 'amount', 'paymentMode',
+          'advanceDate', 'monthlyPaidDate', 'settledZeroFlag', 'remarks',
           'multiAdvances', 'multiPaidReturns', 'multiBalanceDates',
           'branchCode', 'createdByStaff', 'ownerUid', 'createdAt', 'updatedAt'
         ]) &&
@@ -525,10 +585,14 @@ service cloud.firestore {
         data.wheelType is string && data.wheelType.size() <= 40 &&
         data.entryType in ['Commission', 'Advance Taken', 'Paid'] &&
         isValidOptNum(data, 'commissionRate') &&
+        isValidOptNum(data, 'challanAmt') &&
         isValidOptNum(data, 'travellingAmt') &&
         isValidOptNum(data, 'miscAmt') &&
         (data.amount is int || data.amount is float) &&
         isValidOptStr(data, 'paymentMode', 40) &&
+        isValidOptStr(data, 'advanceDate', 20) &&
+        isValidOptStr(data, 'monthlyPaidDate', 20) &&
+        isValidOptBool(data, 'settledZeroFlag') &&
         isValidOptStr(data, 'remarks', 300) &&
         isValidOptList(data, 'multiAdvances', 50) &&
         isValidOptList(data, 'multiPaidReturns', 50) &&
@@ -565,7 +629,7 @@ service cloud.firestore {
         data.keys().hasOnly([
           'id', 'companyName', 'tagline', 'address', 'pan', 'gstin', 'msme', 'hsn',
           'phones', 'email', 'bankName', 'bankBranch', 'accountNo', 'ifsc', 'swift', 'upiId',
-          'bankAccounts', 'branches', 'whatsappCloud',
+          'bankAccounts', 'branches', 'whatsappCloud', 'bankApiConfig', 'kycVault', 'kycVaultPinEnabled',
           'currentFy', 'availableFys', 'fyOpeningBalances', 'dropdownMaster',
           'customStampDataUrl', 'panCardPhotoDataUrl', 'bholeBabaPhotoDataUrl', 'khatuShyamPhotoDataUrl',
           'autoLockMinutes', 'lockSourceInspection', 'last90DayAutoFixAt',
@@ -590,6 +654,9 @@ service cloud.firestore {
         isValidOptList(data, 'bankAccounts', 30) &&
         isValidOptList(data, 'branches', 50) &&
         isValidOptMap(data, 'whatsappCloud', 10) &&
+        isValidOptMap(data, 'bankApiConfig', 10) &&
+        isValidOptList(data, 'kycVault', 25) &&
+        isValidOptBool(data, 'kycVaultPinEnabled') &&
         isValidOptStr(data, 'currentFy', 16) &&
         isValidOptList(data, 'availableFys', 20) &&
         isValidOptMap(data, 'fyOpeningBalances', 50) &&
@@ -984,16 +1051,21 @@ service cloud.firestore {
         incoming().updatedAt == request.time && (
           isAdmin() ||
           incoming().diff(existing()).affectedKeys().hasOnly([
-            'cnNo', 'cnDate', 'financialYear', 'division', 'billedAtBranch', 'hasVehicleNo', 'deliveryOffice', 'stockTransfer', 'billingPartyName', 'billToPartyFlag', 'creditDays',
-            'consignorName', 'consignorAddress', 'consignorGstin',
-            'consigneeName', 'consigneeAddress', 'consigneeGstin', 'packages', 'packageMode', 'particulars', 'multiGoodsItems',
+            'cnNo', 'cnDate', 'financialYear', 'division', 'branchShort', 'lastCnNo', 'refCnNo',
+            'transportMode', 'bookingBasis', 'payBasis', 'billedAtBranch', 'hasVehicleNo', 'deliveryOffice',
+            'stockTransfer', 'billingPartyName', 'billToPartyFlag', 'creditDays',
+            'consignorName', 'consignorAddress', 'consignorGstin', 'consignorHsn',
+            'consigneeName', 'consigneeAddress', 'consigneeGstin', 'consigneeHsn', 'deliverAt', 'isChallanAttached',
+            'packages', 'packageMode', 'particulars', 'multiGoodsItems',
             'rateMode', 'ratePerUnit', 'nettWeight', 'grossWeight', 'chargedWeight', 'multiWeights', 'loadingCharge', 'unloadingCharge',
-            'returnLorryCharge', 'sttCharge', 'otherCharge', 'totalFreight', 'paidAmount', 'toPayAmount',
+            'returnLorryCharge', 'sttCharge', 'otherCharge', 'totalFreight', 'showFreightOnPrint', 'paidAmount', 'toPayAmount',
             'hasTaxInvoice', 'hasMultiEwayBill', 'hasMultiVehicle', 'taxInvNo', 'taxInvDate', 'ewayBillNo', 'ewayBillDate', 'ewayBillValidUpto',
-            'extraTaxInvoices', 'extraEwayBills', 'extraVehicles',
+            'ewbExtensions', 'extraTaxInvoices', 'extraEwayBills', 'extraVehicles',
             'valueOfGoods', 'truckNo', 'fromState', 'fromDistrict', 'fromCity', 'toState', 'toDistrict', 'toCity',
             'engineNo', 'chassisNo', 'ownerName', 'brokerName', 'driverName', 'driverDlNo', 'driverDlExpiry', 'driverMobile',
-            'deliveryModeCode', 'gstPaidBy', 'gstPaidByCode', 'riskTakenBy', 'insuranceStatus', 'extraInsurances',
+            'deliveryModeCode', 'gstPaidBy', 'gstPaidByCode', 'riskTakenBy', 'insuranceStatus', 'insuranceCo',
+            'insurancePolicyNo', 'insurancePolicyDate', 'insuranceAmount', 'extraInsurances', 'multiInsurances',
+            'billAdjustmentDetails', 'addlDetailsEnabled',
             'remarks', 'scannedLrDataUrl', 'billed', 'invoiceId', 'branchCode', 'updatedAt'
           ])
         );
@@ -1015,6 +1087,7 @@ service cloud.firestore {
           (incoming().diff(existing()).affectedKeys().hasOnly(['paidAmount', 'status', 'fullPaymentMode', 'updatedAt'])) ||
           (existing().status != 'Paid' && incoming().diff(existing()).affectedKeys().hasOnly([
             'billId', 'invoiceNo', 'invoiceDate', 'dueDate', 'financialYear', 'division', 'billedByCode', 'billedAtBranch',
+            'poWorkOrderNo', 'creditDays', 'docKind', 'againstInvoiceId', 'againstInvoiceNo', 'finalized', 'narrationText', 'roundOffAmt',
             'partyName', 'partyAddress', 'partyGstin', 'partyPan',
             'billingCountry', 'sac', 'reverseCharge', 'interstate', 'gstPaidBy', 'gstRate', 'cgstAmt', 'sgstAmt', 'igstAmt', 'totalTax',
             'freightCharges', 'insuranceCharge', 'collCharge', 'loadingCharge', 'detentionCharges', 'unloadingCharges', 'surchargeAmt',
@@ -1071,8 +1144,10 @@ service cloud.firestore {
             'weightMt', 'ratePerUnit', 'rateMode', 'bookedPkgs', 'deliveredPkgs', 'shortageDamagePkgs',
             'hasMultiAdvance', 'advances', 'hireAmount', 'advancePaid', 'extraAdvanceAmt',
             'loadingCharge', 'unloadingCharge', 'parkingCharge', 'kataCharge', 'detentionCharge', 'detentionDays',
+            'detentionFromDate', 'detentionToDate', 'unloadingDate',
             'shortageCharge', 'damageCharge', 'tdsRatePct', 'tdsAmount', 'receiptChallanNo', 'receiptChallanDate',
-            'balancePayable', 'balancePaidAmt', 'podRemarks', 'balancePaid', 'balancePaidDate',
+            'balancePayable', 'balancePaidAmt', 'payInstallments', 'paymentDueAmt', 'advExDate', 'payTdsAmt',
+            'podRemarks', 'balancePaid', 'balancePaidDate',
             'paymentMode', 'paymentRef', 'remarks', 'updatedAt'
           ]))
         );
@@ -1135,7 +1210,8 @@ service cloud.firestore {
           isAdmin() ||
           incoming().diff(existing()).affectedKeys().hasOnly([
             'entryDate', 'financialYear', 'division', 'staffName', 'staffBankAccount', 'staffUpiId', 'challanNo', 'truckNo',
-            'wheelType', 'entryType', 'commissionRate', 'travellingAmt', 'miscAmt', 'amount', 'paymentMode', 'remarks',
+            'wheelType', 'entryType', 'commissionRate', 'challanAmt', 'travellingAmt', 'miscAmt', 'amount', 'paymentMode',
+            'advanceDate', 'monthlyPaidDate', 'settledZeroFlag', 'remarks',
             'multiAdvances', 'multiPaidReturns', 'multiBalanceDates', 'updatedAt'
           ])
         );

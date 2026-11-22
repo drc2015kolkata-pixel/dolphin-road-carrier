@@ -12,7 +12,7 @@ import { makeSafeDocId, normalizeFyLabel, resolveFinancialYearFromDate, todayISO
 import { sheetToObjectsSmartHeader } from './excelImport';
 import { buildAutomaticNarration, extractPaymentMetadata } from './paymentNarration';
 import { extractCreditReceiptsFromRows } from '../components/BankReceiptImportModule';
-import { analyzeAndSeparateMisclassifiedParties } from './partySeparation';
+import { analyzeAndSeparateMisclassifiedParties, isKnownTransportBrokerName } from './partySeparation';
 
 export interface DbfFieldDescriptor {
   name: string;
@@ -314,8 +314,10 @@ export async function autoCollectOldDataFiles(params: {
           'headtype',
         ]);
         const combinedGroupAndName = `${groupRaw} ${name}`;
+        const rawGstin = pickStr(row, ['gstin', 'gstno', 'gst', 'tin']).toUpperCase();
         const partyType: Party['partyType'] =
-          /broker|\bbrk\b|commission\s*agent|dalal/i.test(combinedGroupAndName)
+          /broker|\bbrk\b|commission\s*agent|dalal/i.test(combinedGroupAndName) ||
+          (!rawGstin && isKnownTransportBrokerName(name))
             ? 'Broker'
             : /lorry\s*owner|truck\s*owner|vehicle\s*owner|owner|\bvhl\b/i.test(groupRaw)
             ? 'TruckOwner'

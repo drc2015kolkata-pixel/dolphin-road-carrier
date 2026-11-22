@@ -48,6 +48,7 @@ import {
 import { SearchableSelect } from './SearchableSelect';
 import { PAYMENT_MODE_OPTIONS, sortAlphaList } from '../lib/dropdownMasterStore';
 import { playAlertBeep, playVerifiedBeep } from '../lib/audioFeedback';
+import { validateSafeUploadFile } from '../lib/gstinValidator';
 
 interface LorryHirePodModuleProps {
   ownerUid: string;
@@ -570,6 +571,12 @@ const LorryHirePodModuleInner: React.FC<LorryHirePodModuleProps> = ({
 
   const handlePodScanUpload = async (file: File | undefined) => {
     if (!file || !activePodTarget) return;
+    const uploadCheck = validateSafeUploadFile(file, 'image_only');
+    if (!uploadCheck.valid) {
+      playAlertBeep();
+      setPodScanStatus(uploadCheck.reason || 'Blocked unsupported file.');
+      return;
+    }
     setPodScanStatus('Compressing & scanning POD in background worker...');
     setPodShortageAlert(false);
     try {

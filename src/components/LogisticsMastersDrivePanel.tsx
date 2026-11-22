@@ -40,6 +40,9 @@ import {
   VEHICLE_COLOR_OPTIONS,
   VEHICLE_MAKE_OPTIONS,
 } from '../lib/dropdownMasterStore';
+import { validateIndianGstin, validateSafeUploadFile } from '../lib/gstinValidator';
+import { GstinInputField } from './GstinInputField';
+import { playAlertBeep, playVerifiedBeep } from '../lib/audioFeedback';
 
 interface LogisticsMastersDrivePanelProps {
   divisionMode?: LogisticsDivisionCode;
@@ -123,6 +126,14 @@ export const LogisticsMastersDrivePanel: React.FC<LogisticsMastersDrivePanelProp
   const handleSaveParty = async (e: React.FormEvent) => {
     e.preventDefault();
     if (!pName.trim()) return;
+    if (pGstin.trim()) {
+      const gstCheck = validateIndianGstin(pGstin);
+      if (!gstCheck.valid) {
+        playAlertBeep();
+        setDriveStatus(`Blocked Save: Party GSTIN invalid — ${gstCheck.error}`);
+        return;
+      }
+    }
     const id = `lpty_${Date.now()}_${Math.random().toString(36).slice(2, 6)}`;
     await upsertDocument(
       'logistics_parties',
@@ -277,10 +288,17 @@ export const LogisticsMastersDrivePanel: React.FC<LogisticsMastersDrivePanelProp
 
   const handleLocalJsonImport = async (file: File | undefined) => {
     if (!file) return;
+    const uploadCheck = validateSafeUploadFile(file, 'json_backup');
+    if (!uploadCheck.valid) {
+      playAlertBeep();
+      setDriveStatus(uploadCheck.reason || 'Blocked unsupported backup file.');
+      return;
+    }
     try {
       const text = await file.text();
       const parsed = JSON.parse(text) as Record<string, unknown>;
       await restoreLogisticsBackupBundle(parsed);
+      playVerifiedBeep();
       setDriveStatus(`Imported Logistics backup file "${file.name}" successfully.`);
     } catch (err) {
       setDriveStatus(err instanceof Error ? err.message : 'Invalid Logistics JSON backup file.');
@@ -352,11 +370,12 @@ export const LogisticsMastersDrivePanel: React.FC<LogisticsMastersDrivePanelProp
                     className="w-full px-2.5 py-1.5 rounded border border-slate-300 font-mono-num"
                   />
                 </div>
-                <input
+                <GstinInputField
+                  label="GSTIN (optional)"
                   value={pGstin}
-                  onChange={(e) => setPGstin(e.target.value)}
-                  placeholder="GSTIN (optional)"
-                  className="w-full px-2.5 py-1.5 rounded border border-slate-300 font-mono-num"
+                  onChange={setPGstin}
+                  placeholder="15-char GSTIN (optional)"
+                  compact
                 />
                 <input
                   value={pEmail}

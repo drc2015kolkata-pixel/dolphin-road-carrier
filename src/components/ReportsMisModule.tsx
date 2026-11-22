@@ -23,6 +23,7 @@ import {
   Driver,
   DriveFolderName,
   Invoice,
+  LogisticsInvoice,
   LorryHire,
   Party,
   TransactionRecord,
@@ -64,6 +65,7 @@ interface ReportsMisModuleProps {
   isMasterAdmin: boolean;
   readOnly?: boolean;
   invoices: Invoice[];
+  logisticsInvoices?: LogisticsInvoice[];
   lorryHires: LorryHire[];
   consignments: ConsignmentNote[];
   transactions: TransactionRecord[];
@@ -71,6 +73,8 @@ interface ReportsMisModuleProps {
   parties: Party[];
   drivers?: Driver[];
   company: CompanySettings;
+  driveAccessToken?: string | null;
+  onConnectDrive?: () => Promise<void>;
   initialSubTab?: ReportTab;
   onPreviewPdf: (pdf: GeneratedPdfResult, folder: DriveFolderName) => void;
   onShowConfirm: (opts: {
@@ -105,10 +109,12 @@ type FoxproStatementKind =
   | 'logisticsBill';
 
 const ReportsMisModuleInner: React.FC<ReportsMisModuleProps> = ({
+  ownerUid,
   activeFy,
   isMasterAdmin,
   readOnly = false,
   invoices,
+  logisticsInvoices = [],
   lorryHires,
   consignments,
   transactions,
@@ -116,6 +122,8 @@ const ReportsMisModuleInner: React.FC<ReportsMisModuleProps> = ({
   parties,
   drivers = [],
   company,
+  driveAccessToken = null,
+  onConnectDrive,
   initialSubTab = 'gstRegister',
   onPreviewPdf,
   onShowConfirm,
@@ -1864,9 +1872,14 @@ const ReportsMisModuleInner: React.FC<ReportsMisModuleProps> = ({
       {tab === 'gstFilingHub' && (
         <GstFilingHubModule
           invoices={invoices}
+          logisticsInvoices={logisticsInvoices}
           consignments={consignments}
+          transactions={transactions}
           company={company}
           activeFy={activeFy}
+          ownerUid={ownerUid}
+          driveAccessToken={driveAccessToken}
+          onConnectDrive={onConnectDrive}
           onPreviewPdf={onPreviewPdf}
         />
       )}

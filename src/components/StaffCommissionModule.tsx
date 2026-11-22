@@ -4,16 +4,23 @@ import {
   Edit3,
   Keyboard,
   Landmark,
+  Lock,
+  MessageCircle,
   Plus,
   Printer,
   Search,
+  Settings2,
+  Smartphone,
   Trash2,
+  Unlock,
   Wallet,
+  X,
 } from 'lucide-react';
 import { logBranchActivity, removeDocument, upsertDocument } from '../lib/firestoreStore';
-import { formatDateDDMMYYYY, formatINR } from '../lib/formatters';
-import { GeneratedPdfResult, generateFoxproStatementPDF } from '../lib/pdfEngine';
+import { formatDateDDMMYYYY, formatINR, todayISO } from '../lib/formatters';
+import { GeneratedPdfResult, generateFoxproStatementPDF, printPdfDirect } from '../lib/pdfEngine';
 import { playVerifiedBeep } from '../lib/audioFeedback';
+import { buildWhatsAppShareHref, triggerExternalShareLink } from '../lib/shareUtils';
 import {
   BUSINESS_MODE_META,
   BusinessMode,
@@ -99,9 +106,13 @@ export const StaffCommissionModule: React.FC<StaffCommissionModuleProps> = ({
   const [wheelType, setWheelType] = useState<string>('10-Wheeler');
   const [entryType, setEntryType] = useState<'Commission' | 'Advance Taken' | 'Paid'>('Commission');
   const [amount, setAmount] = useState<string>(() => String(DEFAULT_WHEEL_RATES['10-Wheeler']));
+  const [challanAmt, setChallanAmt] = useState<string>('0');
   const [travellingAmt, setTravellingAmt] = useState<string>('0');
   const [miscAmt, setMiscAmt] = useState<string>('0');
   const [paymentMode, setPaymentMode] = useState('Cash');
+  const [advanceDate, setAdvanceDate] = useState('');
+  const [monthlyPaidDate, setMonthlyPaidDate] = useState('');
+  const [settledZeroFlag, setSettledZeroFlag] = useState(false);
   const [remarks, setRemarks] = useState('');
   const [showMultiLogs, setShowMultiLogs] = useState(false);
   const [multiAdvances, setMultiAdvances] = useState<StaffMultiAdvanceLog[]>([]);
@@ -110,6 +121,13 @@ export const StaffCommissionModule: React.FC<StaffCommissionModuleProps> = ({
   const [saving, setSaving] = useState(false);
   const [bannerMsg, setBannerMsg] = useState<string | null>(null);
   const [deleteTarget, setDeleteTarget] = useState<StaffCommissionEntry | null>(null);
+  const [bankUpiModalOpen, setBankUpiModalOpen] = useState(false);
+  const [bankUpiUnlocked, setBankUpiUnlocked] = useState(false);
+  const [wheelRateModalOpen, setWheelRateModalOpen] = useState(false);
+  const [draftWheelRates, setDraftWheelRates] = useState<Record<string, number>>(() => ({
+    ...DEFAULT_WHEEL_RATES,
+    ...(company.dropdownMaster?.wheelCommissionRates || {}),
+  }));
 
   const matchedStaffProfile = useMemo(
     () =>
@@ -211,9 +229,17 @@ export const StaffCommissionModule: React.FC<StaffCommissionModuleProps> = ({
     let totalAdvanceTaken = 0;
     let totalPaid = 0;
 
+    let dayTotal = 0;
+    let monthTotal = 0;
+    const activeDay = entryDate || todayISO();
+    const activeMonth = activeDay.slice(0, 7);
+
     const rows = fyFiltered.map((entry) => {
       const rawAmt = Number(entry.amount);
       const amt = Number.isFinite(rawAmt) ? Math.max(0, rawAmt) : 0;
+      const extras = Number(entry.challanAmt || 0) + Number(entry.travellingAmt || 0) + Number(entry.miscAmt || 0);
+      if (entry.entryDate === activeDay) dayTotal += amt + extras;
+      if ((entry.entryDate || '').startsWith(activeMonth)) monthTotal += amt + extras;
       if (entry.entryType === 'Commission') {
         totalCommission += amt;
         runningBalance += amt;
@@ -237,8 +263,12 @@ export const StaffCommissionModule: React.FC<StaffCommissionModuleProps> = ({
       totalAdvanceTaken,
       totalPaid,
       netBalance: runningBalance,
+      dayTotal,
+      monthTotal,
+      activeDay,
+      activeMonth,
     };
-  }, [fyFiltered]);
+  }, [fyFiltered, entryDate]);
 
   const resetForm = () => {
     setEditingId(null);
@@ -249,9 +279,13 @@ export const StaffCommissionModule: React.FC<StaffCommissionModuleProps> = ({
     setEntryType('Commission');
     setWheelType('10-Wheeler');
     setAmount(String(wheelRates['10-Wheeler'] ?? 600));
+    setChallanAmt('0');
     setTravellingAmt('0');
     setMiscAmt('0');
     setPaymentMode('Cash');
+    setAdvanceDate('');
+    setMonthlyPaidDate('');
+    setSettledZeroFlag(false);
     setRemarks('');
     setMultiAdvances([]);
     setMultiPaidReturns([]);
@@ -266,9 +300,10 @@ export const StaffCommissionModule: React.FC<StaffCommissionModuleProps> = ({
       return;
     }
     const numAmount = Math.max(0, Number(amount || 0));
+    const numChallanAmt = Math.max(0, Number(challanAmt || 0));
     const numTrav = Math.max(0, Number(travellingAmt || 0));
     const numMisc = Math.max(0, Number(miscAmt || 0));
-    if (numAmount <= 0 && numTrav <= 0 && numMisc <= 0) {
+    if (numAmount <= 0 && numChallanAmt <= 0 && numTrav <= 0 && numMisc <= 0) {
       setBannerMsg('Please enter an amount greater than 0.');
       return;
     }
@@ -320,10 +355,14 @@ export const StaffCommissionModule: React.FC<StaffCommissionModuleProps> = ({
           wheelType,
           entryType,
           commissionRate: wheelRates[wheelType] ?? 0,
+          challanAmt: numChallanAmt,
           travellingAmt: numTrav,
           miscAmt: numMisc,
           amount: numAmount,
           paymentMode,
+          advanceDate: advanceDate || '',
+          monthlyPaidDate: monthlyPaidDate || '',
+          settledZeroFlag: Boolean(settledZeroFlag || monthlyPaidDate),
           remarks: remarks.trim(),
           multiAdvances: cleanAdvances,
           multiPaidReturns: cleanReturns,
@@ -357,6 +396,26 @@ export const StaffCommissionModule: React.FC<StaffCommissionModuleProps> = ({
     }
   };
 
+  const handleSaveWheelRates = async () => {
+    await upsertDocument(
+      'settings',
+      'company',
+      {
+        dropdownMaster: {
+          ...(company.dropdownMaster || {}),
+          wheelCommissionRates: draftWheelRates,
+        },
+      },
+      false
+    );
+    if (entryType === 'Commission' && draftWheelRates[wheelType] !== undefined) {
+      setAmount(String(draftWheelRates[wheelType]));
+    }
+    setWheelRateModalOpen(false);
+    playVerifiedBeep();
+    setBannerMsg('Updated Wheel Commission Rate Master cleanly.');
+  };
+
   const handleEditRow = (row: StaffCommissionEntry) => {
     if (readOnly) return;
     setEditingId(row.id);
@@ -370,9 +429,13 @@ export const StaffCommissionModule: React.FC<StaffCommissionModuleProps> = ({
     setWheelType(row.wheelType || '10-Wheeler');
     setEntryType(row.entryType);
     setAmount(String(row.amount || 0));
+    setChallanAmt(String(row.challanAmt ?? 0));
     setTravellingAmt(String(row.travellingAmt ?? 0));
     setMiscAmt(String(row.miscAmt ?? 0));
     setPaymentMode(row.paymentMode || 'Cash');
+    setAdvanceDate(row.advanceDate || '');
+    setMonthlyPaidDate(row.monthlyPaidDate || '');
+    setSettledZeroFlag(Boolean(row.settledZeroFlag || row.monthlyPaidDate));
     setRemarks(row.remarks || '');
     setMultiAdvances(Array.isArray(row.multiAdvances) ? row.multiAdvances : []);
     setMultiPaidReturns(Array.isArray(row.multiPaidReturns) ? row.multiPaidReturns : []);
@@ -478,12 +541,88 @@ export const StaffCommissionModule: React.FC<StaffCommissionModuleProps> = ({
             </div>
             <button
               type="button"
+              onClick={() => setWheelRateModalOpen(true)}
+              className="inline-flex items-center gap-1.5 px-3 py-1.5 rounded-lg bg-slate-100 hover:bg-slate-200 text-slate-800 text-xs font-bold border border-slate-300 cursor-pointer"
+            >
+              <Settings2 className="w-3.5 h-3.5 text-[#0D47A1]" />
+              Edit Wheel Rates
+            </button>
+            <button
+              type="button"
               onClick={() => void handlePrintPdf()}
               className="inline-flex items-center gap-1.5 px-3 py-1.5 rounded-lg bg-[#0D47A1] hover:bg-blue-900 text-white text-xs font-bold cursor-pointer"
             >
               <Printer className="w-3.5 h-3.5" />
-              Print / PDF / Share
+              Preview / Low-MB PDF
             </button>
+            <button
+              type="button"
+              onClick={() =>
+                void generateFoxproStatementPDF(
+                  {
+                    title: 'STAFF COMMISSION & ADVANCE LEDGER',
+                    subtitle: `Staff: ${staffFilter === 'ALL' ? 'All Booking Staff' : staffFilter} | FY: ${activeFy}`,
+                    fileName: `Staff_Commission_${activeFy.replace(/\s+/g, '_')}.pdf`,
+                    orientation: 'l',
+                    columns: [
+                      { label: 'DATE', widthPct: 12 },
+                      { label: 'STAFF NAME', widthPct: 22 },
+                      { label: 'CHALLAN / TRUCK', widthPct: 18 },
+                      { label: 'TYPE / WHEELS', widthPct: 18 },
+                      { label: 'COMMISSION (+)', widthPct: 10, align: 'right' },
+                      { label: 'ADV / PAID (-)', widthPct: 10, align: 'right' },
+                      { label: 'BALANCE', widthPct: 10, align: 'right' },
+                    ],
+                    rows: ledgerRows.rows.map((r) => ({
+                      line1: [
+                        formatDateDDMMYYYY(r.entryDate),
+                        r.staffName,
+                        `${r.challanNo || '-'} ${r.truckNo ? `/ ${r.truckNo}` : ''}`,
+                        `${r.wheelType} (${r.entryType})`,
+                        r.entryType === 'Commission' ? formatINR(r.amount) : '-',
+                        r.entryType !== 'Commission' ? formatINR(r.amount) : '-',
+                        formatINR(r.runningBalance),
+                      ],
+                    })),
+                  },
+                  company
+                ).then((pdf) => printPdfDirect(pdf))
+              }
+              className="inline-flex items-center gap-1.5 px-3 py-1.5 rounded-lg bg-amber-400 hover:bg-amber-300 text-slate-950 text-xs font-extrabold cursor-pointer"
+            >
+              <Printer className="w-3.5 h-3.5" />
+              Print
+            </button>
+            <button
+              type="button"
+              onClick={() =>
+                triggerExternalShareLink(
+                  buildWhatsAppShareHref({
+                    message: `DRC Staff Ledger (${staffFilter} · ${activeFy})\nDay Total: Rs. ${formatINR(ledgerRows.dayTotal)}\nMonth Total: Rs. ${formatINR(ledgerRows.monthTotal)}\nClosing Balance: Rs. ${formatINR(ledgerRows.netBalance)}`,
+                  })
+                )
+              }
+              className="inline-flex items-center gap-1.5 px-3 py-1.5 rounded-lg bg-green-600 hover:bg-green-700 text-white text-xs font-bold cursor-pointer"
+            >
+              <MessageCircle className="w-3.5 h-3.5" />
+              Share
+            </button>
+          </div>
+        </div>
+
+        {/* Date-Wise + Monthly + Yearly Summary Strip */}
+        <div className="grid grid-cols-1 sm:grid-cols-3 gap-2.5 mt-3 text-xs font-mono-num">
+          <div className="px-3 py-2 rounded-lg bg-slate-50 border border-slate-200 flex justify-between">
+            <span className="font-sans font-bold text-slate-600">Date-Wise ({formatDateDDMMYYYY(ledgerRows.activeDay)}):</span>
+            <span className="font-extrabold text-[#0D47A1]">Rs. {formatINR(ledgerRows.dayTotal)}</span>
+          </div>
+          <div className="px-3 py-2 rounded-lg bg-slate-50 border border-slate-200 flex justify-between">
+            <span className="font-sans font-bold text-slate-600">Monthly ({ledgerRows.activeMonth}):</span>
+            <span className="font-extrabold text-indigo-800">Rs. {formatINR(ledgerRows.monthTotal)}</span>
+          </div>
+          <div className="px-3 py-2 rounded-lg bg-indigo-50 border border-indigo-200 flex justify-between">
+            <span className="font-sans font-bold text-indigo-900">Yearly Total ({activeFy}):</span>
+            <span className="font-extrabold text-indigo-950">Rs. {formatINR(ledgerRows.totalCommission + ledgerRows.totalPaid)}</span>
           </div>
         </div>
 
@@ -696,6 +835,20 @@ export const StaffCommissionModule: React.FC<StaffCommissionModuleProps> = ({
 
             <div>
               <label className="block text-[11px] font-bold text-slate-700 mb-1">
+                Challan Amt (Rs.)
+              </label>
+              <input
+                type="number"
+                min="0"
+                step="0.01"
+                value={challanAmt}
+                onChange={(e) => setChallanAmt(e.target.value)}
+                className="w-full px-2.5 py-2 rounded-lg border border-slate-300 text-xs bg-white font-mono-num"
+              />
+            </div>
+
+            <div>
+              <label className="block text-[11px] font-bold text-slate-700 mb-1">
                 Travelling Expense (Rs.)
               </label>
               <input
@@ -722,35 +875,69 @@ export const StaffCommissionModule: React.FC<StaffCommissionModuleProps> = ({
               />
             </div>
 
-            <div className="sm:col-span-2">
+            <div>
               <label className="block text-[11px] font-bold text-slate-700 mb-1">
-                Staff Bank A/c &amp; UPI (Auto-Fetched)
+                Advance Date / Monthly Paid Date
               </label>
-              <div className="grid grid-cols-1 sm:grid-cols-2 gap-1.5">
+              <div className="grid grid-cols-2 gap-1.5">
                 <input
-                  type="text"
-                  value={staffBankAccount}
-                  onChange={(e) => setStaffBankAccount(e.target.value)}
-                  placeholder="Bank Name & Account No / IFSC"
-                  className="w-full px-2.5 py-2 rounded-lg border border-slate-300 text-xs bg-slate-50 font-mono-num"
+                  type="date"
+                  value={advanceDate}
+                  onChange={(e) => setAdvanceDate(e.target.value)}
+                  title="Advance Date"
+                  className="w-full px-2 py-2 rounded-lg border border-slate-300 text-xs bg-white font-mono-num"
                 />
                 <input
-                  type="text"
-                  value={staffUpiId}
-                  onChange={(e) => setStaffUpiId(e.target.value)}
-                  placeholder="Staff UPI ID"
-                  className="w-full px-2.5 py-2 rounded-lg border border-slate-300 text-xs bg-slate-50 font-mono-num"
+                  type="date"
+                  value={monthlyPaidDate}
+                  onChange={(e) => {
+                    setMonthlyPaidDate(e.target.value);
+                    if (e.target.value) setSettledZeroFlag(true);
+                  }}
+                  title="Monthly Paid Date"
+                  className="w-full px-2 py-2 rounded-lg border border-slate-300 text-xs bg-white font-mono-num"
                 />
               </div>
-              {matchedStaffProfile && (
-                <div className="mt-1 inline-flex items-center gap-1 text-[10px] font-semibold text-emerald-700">
-                  <Landmark className="w-3 h-3" />
-                  <span>
-                    Verified Staff Profile ({matchedStaffProfile.staffCode}) · Bank:{' '}
-                    {matchedStaffProfile.bankName || 'N/A'} {matchedStaffProfile.bankAccountNo || ''}
+              <div className="mt-1 flex items-center gap-2">
+                <label className="inline-flex items-center gap-1 text-[11px] font-bold text-slate-700 cursor-pointer">
+                  <input
+                    type="checkbox"
+                    checked={settledZeroFlag}
+                    onChange={(e) => setSettledZeroFlag(e.target.checked)}
+                  />
+                  Mark Settled
+                </label>
+                {(settledZeroFlag || monthlyPaidDate) && (
+                  <span className="px-2 py-0.5 rounded bg-emerald-100 border border-emerald-400 text-emerald-900 text-[10px] font-extrabold">
+                    ✅ PAID (No Balance Due)
                   </span>
+                )}
+              </div>
+            </div>
+
+            <div className="sm:col-span-2">
+              <label className="block text-[11px] font-bold text-slate-700 mb-1">
+                Staff Bank A/c &amp; UPI (Edit-Lock Protected)
+              </label>
+              <div className="flex gap-1.5">
+                <button
+                  type="button"
+                  onClick={() => setBankUpiModalOpen(true)}
+                  className="inline-flex items-center gap-1 px-3 py-2 rounded-lg border border-indigo-300 bg-indigo-50 hover:bg-indigo-100 text-indigo-900 text-xs font-bold cursor-pointer"
+                >
+                  <Landmark className="w-3.5 h-3.5" /> 🏦 Bank A/c
+                </button>
+                <button
+                  type="button"
+                  onClick={() => setBankUpiModalOpen(true)}
+                  className="inline-flex items-center gap-1 px-3 py-2 rounded-lg border border-emerald-300 bg-emerald-50 hover:bg-emerald-100 text-emerald-900 text-xs font-bold cursor-pointer"
+                >
+                  <Smartphone className="w-3.5 h-3.5" /> 📱 UPI ID
+                </button>
+                <div className="flex-1 px-2.5 py-2 rounded-lg border border-slate-200 bg-slate-50 text-xs font-mono-num truncate">
+                  {staffBankAccount || staffUpiId || 'Auto-loaded from Master'}
                 </div>
-              )}
+              </div>
             </div>
 
             <div className="sm:col-span-2 lg:col-span-4">
@@ -1138,6 +1325,108 @@ export const StaffCommissionModule: React.FC<StaffCommissionModuleProps> = ({
         onCancel={() => setDeleteTarget(null)}
         onConfirm={() => void handleConfirmDelete()}
       />
+
+      {bankUpiModalOpen && (
+        <div className="fixed inset-0 z-50 bg-slate-900/60 flex items-center justify-center p-4">
+          <div className="bg-white rounded-xl border border-slate-300 shadow-2xl max-w-md w-full overflow-hidden">
+            <div className="bg-[#0D47A1] text-white px-4 py-3 flex items-center justify-between">
+              <span className="text-sm font-extrabold">Bank &amp; UPI Modal — {staffName}</span>
+              <button type="button" onClick={() => setBankUpiModalOpen(false)} className="cursor-pointer">
+                <X className="w-4 h-4" />
+              </button>
+            </div>
+            <div className="p-4 space-y-3 text-xs">
+              <div className="flex items-center justify-between bg-slate-100 px-3 py-2 rounded-lg">
+                <span className="font-bold">Edit Unlock [YES / NO]:</span>
+                <button
+                  type="button"
+                  onClick={() => setBankUpiUnlocked((v) => !v)}
+                  className={`inline-flex items-center gap-1 px-2.5 py-1 rounded font-extrabold cursor-pointer ${
+                    bankUpiUnlocked ? 'bg-amber-400 text-slate-950' : 'bg-slate-800 text-white'
+                  }`}
+                >
+                  {bankUpiUnlocked ? <Unlock className="w-3.5 h-3.5" /> : <Lock className="w-3.5 h-3.5" />}
+                  {bankUpiUnlocked ? 'YES (Editable)' : 'NO (Locked)'}
+                </button>
+              </div>
+              <div>
+                <label className="block font-bold mb-1">Bank A/c &amp; IFSC</label>
+                <input
+                  type="text"
+                  value={staffBankAccount}
+                  disabled={!bankUpiUnlocked}
+                  onChange={(e) => setStaffBankAccount(e.target.value)}
+                  className="w-full px-2.5 py-2 rounded border border-slate-300 font-mono-num disabled:bg-slate-100"
+                />
+              </div>
+              <div>
+                <label className="block font-bold mb-1">UPI ID</label>
+                <input
+                  type="text"
+                  value={staffUpiId}
+                  disabled={!bankUpiUnlocked}
+                  onChange={(e) => setStaffUpiId(e.target.value)}
+                  className="w-full px-2.5 py-2 rounded border border-slate-300 font-mono-num disabled:bg-slate-100"
+                />
+              </div>
+            </div>
+            <div className="px-4 py-2.5 bg-slate-50 border-t flex justify-end">
+              <button
+                type="button"
+                onClick={() => setBankUpiModalOpen(false)}
+                className="px-4 py-1.5 rounded bg-[#0D47A1] text-white text-xs font-bold cursor-pointer"
+              >
+                Done
+              </button>
+            </div>
+          </div>
+        </div>
+      )}
+
+      {wheelRateModalOpen && (
+        <div className="fixed inset-0 z-50 bg-slate-900/60 flex items-center justify-center p-4">
+          <div className="bg-white rounded-xl border border-slate-300 shadow-2xl max-w-md w-full overflow-hidden">
+            <div className="bg-[#0D47A1] text-white px-4 py-3 flex items-center justify-between">
+              <span className="text-sm font-extrabold">Wheel Commission Rate Master (Rs.)</span>
+              <button type="button" onClick={() => setWheelRateModalOpen(false)} className="cursor-pointer">
+                <X className="w-4 h-4" />
+              </button>
+            </div>
+            <div className="p-4 space-y-2 text-xs">
+              {WHEEL_TYPES.map((wt) => (
+                <div key={wt} className="flex items-center justify-between gap-2">
+                  <span className="font-bold text-slate-800">{wt}</span>
+                  <input
+                    type="number"
+                    step="1"
+                    value={draftWheelRates[wt] ?? DEFAULT_WHEEL_RATES[wt]}
+                    onChange={(e) =>
+                      setDraftWheelRates((p) => ({ ...p, [wt]: Math.max(0, Number(e.target.value || 0)) }))
+                    }
+                    className="w-28 px-2 py-1 rounded border border-slate-300 text-right font-mono-num font-bold"
+                  />
+                </div>
+              ))}
+            </div>
+            <div className="px-4 py-2.5 bg-slate-50 border-t flex justify-end gap-2">
+              <button
+                type="button"
+                onClick={() => setWheelRateModalOpen(false)}
+                className="px-3 py-1.5 rounded border border-slate-300 bg-white text-xs font-bold cursor-pointer"
+              >
+                Cancel
+              </button>
+              <button
+                type="button"
+                onClick={() => void handleSaveWheelRates()}
+                className="px-4 py-1.5 rounded bg-emerald-600 text-white text-xs font-bold cursor-pointer"
+              >
+                Save Rate Master
+              </button>
+            </div>
+          </div>
+        </div>
+      )}
     </div>
   );
 };

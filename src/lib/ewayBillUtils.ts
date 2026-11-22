@@ -1,4 +1,4 @@
-import { CompanySettings, ConsignmentNote } from '../types/erp';
+import { CompanySettings, ConsignmentNote, LorryHire } from '../types/erp';
 
 export interface ParsedQrPayload {
   kind: 'drc_invoice' | 'drc_lr' | 'nic_ewb' | 'generic';
@@ -18,6 +18,19 @@ export interface EwayBillExpiryState {
   status: 'expired' | 'expiringSoon' | 'valid' | 'unset';
   hoursLeft: number | null;
   label: string;
+}
+
+export interface Eway8HourAlarm {
+  cnId: string;
+  cnNo: string;
+  ewbNo: string;
+  truckNo: string;
+  consignorName: string;
+  validUpto: string;
+  hoursLeft: number;
+  severity: 'critical' | 'urgent';
+  title: string;
+  message: string;
 }
 
 function normalizeDdMmYyyyToIsoDateTime(str: string): { date: string; dateTimeLocal: string } {
@@ -186,6 +199,73 @@ export function getEwayBillExpiryState(validUpto?: string): EwayBillExpiryState 
     hoursLeft: roundedHours,
     label: `Valid (${daysLeft}d ${Math.round(diffHours % 24)}h left)`,
   };
+}
+
+/**
+ * Evaluates active 8-hour to 1-hour E-Way Bill countdown alarms.
+ * Automatically stops once Unloading Date (or Delivered POD) is recorded for the LR.
+ */
+export function evaluateEway8HourAlarms(
+  consignments: ConsignmentNote[],
+  lorryHires: LorryHire[]
+): Eway8HourAlarm[] {
+  const lhByCnNo = new Map<string, LorryHire[]>();
+  for (const lh of lorryHires || []) {
+    const key = String(lh.cnNo || '').trim().toUpperCase();
+    if (!key) continue;
+    const list = lhByCnNo.get(key) || [];
+    list.push(lh);
+    lhByCnNo.set(key, list);
+  }
+
+  const alarms: Eway8HourAlarm[] = [];
+  for (const cn of consignments || []) {
+    const key = String(cn.cnNo || '').trim().toUpperCase();
+    const linkedHires = key ? lhByCnNo.get(key) || [] : [];
+    const hasUnloadingRecorded =
+      linkedHires.some((lh) => Boolean(lh.unloadingDate && lh.unloadingDate.trim())) ||
+      linkedHires.some((lh) => Boolean(lh.podReceived));
+
+    if (hasUnloadingRecorded) continue;
+
+    const ewbCandidates: Array<{ ewbNo: string; validUpto?: string }> = [
+      ...(cn.ewayBillValidUpto
+        ? [{ ewbNo: cn.ewayBillNo || cn.cnNo, validUpto: cn.ewayBillValidUpto }]
+        : []),
+      ...(cn.extraEwayBills || []).map((e) => ({
+        ewbNo: e.no || cn.ewayBillNo || cn.cnNo,
+        validUpto: e.validUpto,
+      })),
+    ];
+
+    for (const item of ewbCandidates) {
+      const st = getEwayBillExpiryState(item.validUpto);
+      if (st.hoursLeft === null) continue;
+      if (st.hoursLeft <= 8) {
+        const isCritical = st.hoursLeft <= 1;
+        const hrsText =
+          st.hoursLeft <= 0
+            ? `EXPIRED ${Math.abs(st.hoursLeft).toFixed(1)}h ago`
+            : `${st.hoursLeft.toFixed(1)}h remaining`;
+        alarms.push({
+          cnId: cn.id,
+          cnNo: cn.cnNo,
+          ewbNo: item.ewbNo,
+          truckNo: cn.truckNo || 'Unassigned',
+          consignorName: cn.consignorName || '-',
+          validUpto: item.validUpto || '',
+          hoursLeft: st.hoursLeft,
+          severity: isCritical ? 'critical' : 'urgent',
+          title: isCritical
+            ? `CRITICAL E-WAY BILL EXPIRY (<=1h): ${item.ewbNo}`
+            : `E-WAY BILL COUNTDOWN (<=8h): ${item.ewbNo}`,
+          message: `CN ${cn.cnNo} · EWB ${item.ewbNo} (${cn.truckNo || 'Truck'}): ${hrsText} — Extend EWB or enter Unloading Date!`,
+        });
+      }
+    }
+  }
+
+  return alarms.sort((a, b) => a.hoursLeft - b.hoursLeft);
 }
 
 const STATE_GST_CODES: Record<string, number> = {

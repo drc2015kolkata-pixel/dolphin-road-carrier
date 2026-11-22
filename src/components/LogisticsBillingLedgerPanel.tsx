@@ -33,6 +33,9 @@ import {
 } from './RichEntityPicker';
 import { SearchableSelect } from './SearchableSelect';
 import { COMMON_REMARK_PRESETS, PAYMENT_MODE_OPTIONS } from '../lib/dropdownMasterStore';
+import { validateIndianGstin } from '../lib/gstinValidator';
+import { GstinInputField } from './GstinInputField';
+import { playAlertBeep } from '../lib/audioFeedback';
 
 interface LogisticsBillingLedgerPanelProps {
   divisionMode?: LogisticsDivisionCode;
@@ -193,6 +196,13 @@ export const LogisticsBillingLedgerPanel: React.FC<LogisticsBillingLedgerPanelPr
   const handleSaveBillingDoc = async (e: React.FormEvent) => {
     e.preventDefault();
     if (!partyName.trim() || !docNo.trim()) return;
+    if (partyGstin.trim()) {
+      const gstCheck = validateIndianGstin(partyGstin);
+      if (!gstCheck.valid) {
+        playAlertBeep();
+        return;
+      }
+    }
     setSavingDoc(true);
     try {
       const id = makeDivisionDocId(divisionMode, 'linv');
@@ -555,11 +565,11 @@ export const LogisticsBillingLedgerPanel: React.FC<LogisticsBillingLedgerPanelPr
                   />
                 </div>
                 <div>
-                  <label className="block text-[11px] font-bold text-slate-600 mb-0.5">Party GSTIN</label>
-                  <input
+                  <GstinInputField
+                    label="Party GSTIN"
                     value={partyGstin}
-                    onChange={(e) => setPartyGstin(e.target.value)}
-                    className="w-full px-2.5 py-1.5 rounded border border-slate-300 font-mono-num"
+                    onChange={setPartyGstin}
+                    compact
                   />
                 </div>
               </div>

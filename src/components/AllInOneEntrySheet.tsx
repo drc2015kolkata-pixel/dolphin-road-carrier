@@ -1,21 +1,31 @@
-import React, { useEffect, useMemo, useRef, useState } from 'react';
+import React, { useCallback, useEffect, useMemo, useRef, useState } from 'react';
 import {
   AlertTriangle,
   ArrowLeft,
+  Camera,
   CheckCircle2,
+  ChevronDown,
+  ChevronUp,
   ClipboardList,
   Edit3,
   Eye,
   FileSpreadsheet,
   Keyboard,
+  Landmark,
   Layers,
+  Lock,
+  Mail,
+  MessageCircle,
   Plus,
   Printer,
   RotateCcw,
   Save,
   Search,
+  Settings2,
+  Smartphone,
   Trash2,
   Truck,
+  Unlock,
   Users,
   Wallet,
   X,
@@ -27,8 +37,10 @@ import {
   CompanySettings,
   ConsignmentNote,
   Driver,
+  EwbExtensionLog,
   ExtraEwayBill,
   ExtraInsuranceItem,
+  ExtraTaxInvoice,
   Invoice,
   LogisticsDocket,
   LogisticsDriver,
@@ -40,6 +52,7 @@ import {
   MultiGoodsItem,
   MultiWeightRow,
   Party,
+  PayInstallmentRow,
   StaffAccount,
   StaffCommissionEntry,
   StaffMultiAdvanceLog,
@@ -58,8 +71,6 @@ import { logBranchActivity, upsertDocument } from '../lib/firestoreStore';
 import {
   ALL_INDIA_BRANCH_OPTIONS,
   ALL_INDIA_STATES_DISTRICTS,
-  BILL_FOOTNOTE_PRESETS,
-  BILL_REMARK_PRESETS,
   DEFAULT_RATE_MODES,
   DELIVERY_MODE_CODES,
   getEffectiveCreditDayPresets,
@@ -74,7 +85,6 @@ import {
 import {
   filterBillingCustomerParties,
   normalizePartyMatchKey,
-  resolveGstStateCode,
 } from '../lib/partySeparation';
 import {
   AnyPartyEntity,
@@ -91,12 +101,19 @@ import { DEFAULT_WHEEL_RATES, WHEEL_TYPES } from './StaffCommissionModule';
 import { playAlertBeep, playVerifiedBeep } from '../lib/audioFeedback';
 import {
   GeneratedPdfResult,
-  generateInvoicePDF,
+  generateFoxproStatementPDF,
   generateLogisticsDocketPDF,
-  generateLogisticsInvoicePDF,
   generateLR3CopyPDF,
   printPdfDirect,
 } from '../lib/pdfEngine';
+import { compressComplianceFileToDataUrl } from '../lib/kycVaultStorage';
+import { validateIndianGstin, validateSafeUploadFile } from '../lib/gstinValidator';
+import { GstinInputField } from './GstinInputField';
+import {
+  buildEmailShareHref,
+  buildWhatsAppShareHref,
+  triggerExternalShareLink,
+} from '../lib/shareUtils';
 
 interface AllInOneEntrySheetProps {
   divisionMode: BusinessMode;
@@ -144,11 +161,13 @@ interface UnifiedRegisterRow {
   truckNo: string;
   driverName: string;
   cnFreight: number;
+  showFreightOnPrint: boolean;
   hireGross: number;
   hireBalance: number;
   podReceived: boolean;
   staffName: string;
   staffAmount: number;
+  staffSettledZero: boolean;
   billNo: string;
   billTotal: number;
   billBalance: number;
@@ -172,11 +191,38 @@ const DEFAULT_ADV_ROW = (): LorryAdvanceRow => ({
   amount: 0,
 });
 
-function addDaysISO(dateStr: string, days: number): string {
-  const base = dateStr ? new Date(dateStr) : new Date();
-  if (Number.isNaN(base.getTime())) return todayISO();
-  base.setDate(base.getDate() + Math.max(0, days));
-  return base.toISOString().slice(0, 10);
+const EMPTY_PAY_12 = (): PayInstallmentRow[] =>
+  Array.from({ length: 12 }, (_, idx) => ({
+    slot: idx + 1,
+    date: '',
+    refNo: '',
+    amount: 0,
+  }));
+
+function mergePay12Rows(existing?: PayInstallmentRow[]): PayInstallmentRow[] {
+  const base = EMPTY_PAY_12();
+  if (!Array.isArray(existing)) return base;
+  existing.forEach((row, idx) => {
+    const slotIdx = row.slot >= 1 && row.slot <= 12 ? row.slot - 1 : idx;
+    if (slotIdx >= 0 && slotIdx < 12) {
+      base[slotIdx] = {
+        slot: slotIdx + 1,
+        date: row.date || '',
+        refNo: row.refNo || '',
+        amount: Number(row.amount || 0),
+      };
+    }
+  });
+  return base;
+}
+
+function diffDaysInclusive(fromDate: string, toDate: string): number {
+  if (!fromDate || !toDate) return 0;
+  const a = new Date(fromDate);
+  const b = new Date(toDate);
+  if (Number.isNaN(a.getTime()) || Number.isNaN(b.getTime())) return 0;
+  const diff = Math.round((b.getTime() - a.getTime()) / (1000 * 60 * 60 * 24));
+  return Math.max(0, diff);
 }
 
 export const AllInOneEntrySheet: React.FC<AllInOneEntrySheetProps> = ({
@@ -186,6 +232,7 @@ export const AllInOneEntrySheet: React.FC<AllInOneEntrySheetProps> = ({
   activeStaffName,
   activeBranchCode,
   activeFy,
+  isMasterAdmin,
   readOnly = false,
   parties,
   vehicles,
@@ -207,20 +254,36 @@ export const AllInOneEntrySheet: React.FC<AllInOneEntrySheetProps> = ({
   const divisionMeta = BUSINESS_MODE_META[divisionMode];
   const isFtl = divisionMode === 'FTL';
   const topFormRef = useRef<HTMLDivElement | null>(null);
+  const scanFileInputRef = useRef<HTMLInputElement | null>(null);
 
-  // Linked edit IDs
+  // Linked edit IDs (Strictly CN/Docket + Lorry Hire + Staff — NO Tax Invoice inside Sheet A)
   const [editingCnId, setEditingCnId] = useState<string | null>(null);
   const [editingDocketId, setEditingDocketId] = useState<string | null>(null);
   const [editingHireId, setEditingHireId] = useState<string | null>(null);
   const [editingStaffId, setEditingStaffId] = useState<string | null>(null);
-  const [editingInvoiceId, setEditingInvoiceId] = useState<string | null>(null);
 
-  // Section Toggles (Section 1 CN/Docket is always active; Sections 2, 3, 4 can be toggled seamlessly)
+  // Find CN/LR Instant Search
+  const [findCnQuery, setFindCnQuery] = useState('');
+  const [findCnFocused, setFindCnFocused] = useState(false);
+
+  // Section Toggles (Band 1 Lorry Hire & Band 2 Staff)
   const [includeHireSection, setIncludeHireSection] = useState(true);
   const [includeStaffSection, setIncludeStaffSection] = useState(true);
-  const [includeBillSection, setIncludeBillSection] = useState(true);
 
-  // Section 1: CN / LR or Docket Fields
+  const computedLastCnNo = useMemo(() => {
+    if (isFtl) {
+      if (consignments.length === 0) return 'None';
+      const sorted = [...consignments].sort((a, b) => (b.cnDate || '').localeCompare(a.cnDate || ''));
+      return sorted[0]?.cnNo || 'None';
+    }
+    if (logisticsDockets.length === 0) return 'None';
+    const sorted = [...logisticsDockets].sort((a, b) => (b.docketDate || '').localeCompare(a.docketDate || ''));
+    return sorted[0]?.docketNo || 'None';
+  }, [isFtl, consignments, logisticsDockets]);
+
+  // SECTION 1: CLASSIC FOXPRO BILTY RECORDS ENTRY FIELDS
+  const [branchShort, setBranchShort] = useState(() => (isFtl ? 'KOL' : divisionMeta.docPrefix));
+  const [refCnNo, setRefCnNo] = useState('');
   const [docNo, setDocNo] = useState(() => {
     const prefix = isFtl ? 'KOL' : divisionMeta.docPrefix;
     const count = isFtl ? consignments.length : logisticsDockets.length;
@@ -228,19 +291,32 @@ export const AllInOneEntrySheet: React.FC<AllInOneEntrySheetProps> = ({
   });
   const [docDate, setDocDate] = useState(todayISO());
   const [billedAtBranch, setBilledAtBranch] = useState('Kolkata');
+  const [transportMode, setTransportMode] = useState<'Road' | 'Rail' | 'Air'>('Road');
+  const [bookingBasis, setBookingBasis] = useState<'Party' | 'Franchise' | 'Cash'>('Party');
+  const [payBasis, setPayBasis] = useState<'TBB' | 'Paid' | 'To-Pay'>('TBB');
+  const [deliverAt, setDeliverAt] = useState('');
+  const [isChallanAttached, setIsChallanAttached] = useState(false);
   const [creditDays, setCreditDays] = useState(15);
+
+  const [billingPartyName, setBillingPartyName] = useState('');
+  const [selectedBillingPartyId, setSelectedBillingPartyId] = useState('');
+
   const [consignorName, setConsignorName] = useState('');
   const [selectedConsignorId, setSelectedConsignorId] = useState('');
   const [consignorAddress, setConsignorAddress] = useState('');
   const [consignorGstin, setConsignorGstin] = useState('');
+  const [consignorHsn, setConsignorHsn] = useState('');
+
   const [consigneeName, setConsigneeName] = useState('');
   const [selectedConsigneeId, setSelectedConsigneeId] = useState('');
   const [consigneeAddress, setConsigneeAddress] = useState('');
   const [consigneeGstin, setConsigneeGstin] = useState('');
+  const [consigneeHsn, setConsigneeHsn] = useState('');
+
   const [fromCity, setFromCity] = useState('Kolkata');
   const [toCity, setToCity] = useState('');
 
-  // Dynamic Vehicle & Driver
+  // Vehicle & Driver + Multi Lorry [Y/N]
   const [hasVehicleNo, setHasVehicleNo] = useState(true);
   const [hasMultiVehicle, setHasMultiVehicle] = useState(false);
   const [truckNo, setTruckNo] = useState('');
@@ -255,32 +331,60 @@ export const AllInOneEntrySheet: React.FC<AllInOneEntrySheetProps> = ({
   const [driverDlExpiry, setDriverDlExpiry] = useState('');
   const [driverMobile, setDriverMobile] = useState('');
 
-  // Packages, Goods, Weight & Freight
+  // Packages & Goods + Multi Package/Goods [Y/N]
   const [packages, setPackages] = useState('1');
   const [packageMode, setPackageMode] = useState('PACKAGES');
   const [particulars, setParticulars] = useState('MS Steel Pipes & Tubes');
+  const [hasMultiGoods, setHasMultiGoods] = useState(false);
+  const [multiGoodsItems, setMultiGoodsItems] = useState<MultiGoodsItem[]>([]);
+
+  // Supplier Tax Invoice + Multi Invoice [Y/N]
+  const [taxInvNo, setTaxInvNo] = useState('');
+  const [taxInvDate, setTaxInvDate] = useState('');
+  const [valueOfGoods, setValueOfGoods] = useState('0');
+  const [hasMultiTaxInv, setHasMultiTaxInv] = useState(false);
+  const [extraTaxInvoices, setExtraTaxInvoices] = useState<ExtraTaxInvoice[]>([]);
+
+  // E-Way Bill + Multi EWB [Y/N] + Extension Log (1st/2nd/3rd)
+  const [ewayBillNo, setEwayBillNo] = useState('');
+  const [ewayBillDate, setEwayBillDate] = useState('');
+  const [ewayBillValidUpto, setEwayBillValidUpto] = useState('');
+  const [hasMultiEwb, setHasMultiEwb] = useState(false);
+  const [extraEwayBills, setExtraEwayBills] = useState<ExtraEwayBill[]>([]);
+  const [ewbExtensions, setEwbExtensions] = useState<EwbExtensionLog[]>([]);
+
+  // Unlocked Weights + Multi Weight [Y/N] + Editable Total Freight + Print Toggle
   const [nettWeight, setNettWeight] = useState('15');
   const [grossWeight, setGrossWeight] = useState('15.5');
   const [chargedWeight, setChargedWeight] = useState('15');
+  const [hasMultiWeight, setHasMultiWeight] = useState(false);
+  const [multiWeights, setMultiWeights] = useState<MultiWeightRow[]>([]);
   const [rateMode, setRateMode] = useState('Fixed');
   const [ratePerUnit, setRatePerUnit] = useState('0');
   const [baseFreight, setBaseFreight] = useState('0');
   const [otherCharge, setOtherCharge] = useState('0');
+  const [manualFreightOverride, setManualFreightOverride] = useState<string | null>(null);
+  const [showFreightOnPrint, setShowFreightOnPrint] = useState(true);
+
+  // Insurance + Multi Insurance [Y/N]
+  const [insuranceCo, setInsuranceCo] = useState('');
+  const [insurancePolicyNo, setInsurancePolicyNo] = useState('');
+  const [insurancePolicyDate, setInsurancePolicyDate] = useState('');
+  const [insuranceAmount, setInsuranceAmount] = useState('0');
+  const [hasMultiInsurance, setHasMultiInsurance] = useState(false);
+  const [extraInsurances, setExtraInsurances] = useState<ExtraInsuranceItem[]>([]);
+
+  // Codes, Adjustments, Additional Details, Scan
   const [deliveryModeCode, setDeliveryModeCode] = useState('P');
   const [gstPaidByCode, setGstPaidByCode] = useState('E');
   const [riskTakenBy, setRiskTakenBy] = useState('O');
+  const [billAdjustmentDetails, setBillAdjustmentDetails] = useState('');
+  const [addlDetailsEnabled, setAddlDetailsEnabled] = useState(false);
   const [cnRemarks, setCnRemarks] = useState('');
-  const [multiGoodsOpen, setMultiGoodsOpen] = useState(false);
-  const [multiGoodsItems, setMultiGoodsItems] = useState<MultiGoodsItem[]>([]);
-  const [multiWeights, setMultiWeights] = useState<MultiWeightRow[]>([]);
-  const [extraEwayBills, setExtraEwayBills] = useState<ExtraEwayBill[]>([]);
-  const [extraInsurances, setExtraInsurances] = useState<ExtraInsuranceItem[]>([]);
-
-  // Logistics Docket specifics (when division !== 'FTL')
+  const [scannedLrDataUrl, setScannedLrDataUrl] = useState('');
   const [docketDeliveryMode, setDocketDeliveryMode] = useState<'Door Delivery' | 'Godown Delivery'>('Door Delivery');
-  const [docketPayMode, setDocketPayMode] = useState<'Paid' | 'To-Pay' | 'TBB'>('TBB');
 
-  // Section 2: Lorry Hire Challan
+  // BAND 1: LORRY HIRE + BROKER + 2-DAY FREE DETENTION + MULTI ADV [Y/N] (4-50 rows)
   const [brokerName, setBrokerName] = useState('');
   const [selectedBrokerId, setSelectedBrokerId] = useState('');
   const [ownerName, setOwnerName] = useState('');
@@ -289,6 +393,8 @@ export const AllInOneEntrySheet: React.FC<AllInOneEntrySheetProps> = ({
   const [hireRateMode, setHireRateMode] = useState<'Fixed' | 'Per MT'>('Fixed');
   const [hireRatePerUnit, setHireRatePerUnit] = useState('0');
   const [hireAmount, setHireAmount] = useState('0');
+  const [detentionFromDate, setDetentionFromDate] = useState('');
+  const [detentionToDate, setDetentionToDate] = useState('');
   const [detentionDays, setDetentionDays] = useState('0');
   const [detentionRatePerDay, setDetentionRatePerDay] = useState('1500');
   const [hireLoadingCharge, setHireLoadingCharge] = useState('0');
@@ -302,58 +408,48 @@ export const AllInOneEntrySheet: React.FC<AllInOneEntrySheetProps> = ({
   const [receiptChallanNo, setReceiptChallanNo] = useState('');
   const [receiptChallanDate, setReceiptChallanDate] = useState('');
   const [hireRemarks, setHireRemarks] = useState('');
+  const [hasMultiAdvance, setHasMultiAdvance] = useState(false);
   const [hireAdvances, setHireAdvances] = useState<LorryAdvanceRow[]>([DEFAULT_ADV_ROW()]);
   const [podReceived, setPodReceived] = useState(false);
   const [podReceiveDate, setPodReceiveDate] = useState('');
   const [podRemarks, setPodRemarks] = useState('');
   const [podAlertActive, setPodAlertActive] = useState(false);
 
-  // Section 3: Staff Ledger & Multi Logs
+  // BAND 2: STAFF DETAILS + WHEEL RATE MASTER + BANK/UPI EDIT-LOCK MODAL + LIVE CHART
   const [staffName, setStaffName] = useState(() => staffAccounts[0]?.displayName || 'Field Booking Staff');
   const [staffBankAccount, setStaffBankAccount] = useState('');
   const [staffUpiId, setStaffUpiId] = useState('');
+  const [bankUpiModalOpen, setBankUpiModalOpen] = useState(false);
+  const [bankUpiEditUnlocked, setBankUpiEditUnlocked] = useState(false);
   const [staffEntryType, setStaffEntryType] = useState<'Commission' | 'Advance Taken' | 'Paid'>('Commission');
   const [wheelType, setWheelType] = useState<string>('10-Wheeler');
   const [staffAmount, setStaffAmount] = useState(() => String(DEFAULT_WHEEL_RATES['10-Wheeler']));
+  const [challanAmt, setChallanAmt] = useState('0');
   const [travellingAmt, setTravellingAmt] = useState('0');
   const [miscAmt, setMiscAmt] = useState('0');
   const [staffPayMode, setStaffPayMode] = useState('Cash');
+  const [staffAdvanceDate, setStaffAdvanceDate] = useState('');
+  const [staffMonthlyPaidDate, setStaffMonthlyPaidDate] = useState('');
+  const [staffSettledZero, setStaffSettledZero] = useState(false);
   const [staffRemarks, setStaffRemarks] = useState('');
   const [showMultiLogs, setShowMultiLogs] = useState(false);
   const [multiAdvances, setMultiAdvances] = useState<StaffMultiAdvanceLog[]>([]);
   const [multiPaidReturns, setMultiPaidReturns] = useState<StaffMultiPaidReturnLog[]>([]);
   const [multiBalanceDates, setMultiBalanceDates] = useState<StaffMultiBalanceDateLog[]>([]);
+  const [wheelRatesModalOpen, setWheelRatesModalOpen] = useState(false);
+  const [draftWheelRates, setDraftWheelRates] = useState<Record<string, number>>(() => ({
+    ...DEFAULT_WHEEL_RATES,
+    ...(company.dropdownMaster?.wheelCommissionRates || {}),
+  }));
+  const [staffChartFilter, setStaffChartFilter] = useState<'ALL' | 'Commission' | 'Advance Taken' | 'Paid'>('ALL');
+  const [staffChartExpanded, setStaffChartExpanded] = useState(true);
 
-  // Section 4: Party Bill / Tax Invoice
-  const [billId, setBillId] = useState(() => `B-${100 + invoices.length + 1}`);
-  const [invoiceNo, setInvoiceNo] = useState(() => `${divisionMeta.docPrefix}/${105 + invoices.length}/26-27`);
-  const [billedByCode, setBilledByCode] = useState<'B' | 'P'>('B');
-  const [billDate, setBillDate] = useState(todayISO());
-  const [dueDate, setDueDate] = useState(() => addDaysISO(todayISO(), 15));
-  const [billingCountry, setBillingCountry] = useState<'India' | 'Nepal' | 'Bangladesh' | 'Bhutan'>('India');
-  const [billPartyName, setBillPartyName] = useState('');
-  const [selectedBillPartyId, setSelectedBillPartyId] = useState('');
-  const [billPartyGstin, setBillPartyGstin] = useState('');
-  const [billPartyPan, setBillPartyPan] = useState('');
-  const [billPartyAddress, setBillPartyAddress] = useState('');
-  const [gstPaidByBill, setGstPaidByBill] = useState<'Consignor' | 'Consignee' | 'Transporter'>('Consignee');
-  const [interstateBill, setInterstateBill] = useState(false);
-  const [insuranceCharge, setInsuranceCharge] = useState('0');
-  const [collCharge, setCollCharge] = useState('0');
-  const [billLoadingCharge, setBillLoadingCharge] = useState('0');
-  const [billUnloadingCharge, setBillUnloadingCharge] = useState('0');
-  const [surchargeAmt, setSurchargeAmt] = useState('0');
-  const [detentionBillCharge, setDetentionBillCharge] = useState('0');
-  const [stCharge, setStCharge] = useState('0');
-  const [fumigationCharge, setFumigationCharge] = useState('0');
-  const [extraBillCharge, setExtraBillCharge] = useState('0');
-  const [advanceReceived, setAdvanceReceived] = useState('0');
-  const [advanceMode, setAdvanceMode] = useState('NEFT');
-  const [fullPaymentReceived, setFullPaymentReceived] = useState(false);
-  const [fullPaymentMode, setFullPaymentMode] = useState('NEFT');
-  const [billRemarks, setBillRemarks] = useState('');
-  const [billFootnote, setBillFootnote] = useState('');
-  const [additionalNotes, setAdditionalNotes] = useState('');
+  // BAND 3: PAY 1 TO PAY 12 INSTALLMENT TRACKER + ADV EX DATE + TDS + SAVE [Y/N]
+  const [payInstallments, setPayInstallments] = useState<PayInstallmentRow[]>(EMPTY_PAY_12);
+  const [showAllPay12, setShowAllPay12] = useState(false);
+  const [advExDate, setAdvExDate] = useState('');
+  const [payTdsOverride, setPayTdsOverride] = useState('');
+  const [saveConfirmYN, setSaveConfirmYN] = useState<'Y' | 'N'>('Y');
 
   // Register & UI State
   const [saving, setSaving] = useState(false);
@@ -361,7 +457,7 @@ export const AllInOneEntrySheet: React.FC<AllInOneEntrySheetProps> = ({
   const [registerSearch, setRegisterSearch] = useState('');
   const [viewModalRow, setViewModalRow] = useState<UnifiedRegisterRow | null>(null);
 
-  // Merged Master Data Lists (supports FTL and Logistics/PTL/Courier seamlessly)
+  // Master Data Lists
   const combinedParties = useMemo<AnyPartyEntity[]>(() => {
     if (isFtl) return parties;
     return logisticsParties.length > 0 ? [...logisticsParties, ...parties] : parties;
@@ -377,15 +473,17 @@ export const AllInOneEntrySheet: React.FC<AllInOneEntrySheetProps> = ({
     return logisticsDrivers.length > 0 ? [...logisticsDrivers, ...drivers] : drivers;
   }, [isFtl, drivers, logisticsDrivers]);
 
-  const billingCustomerParties = useMemo(() => {
-    return filterBillingCustomerParties({
-      parties,
-      drivers,
-      lorryHires,
-      invoices,
-      consignments,
-    });
-  }, [parties, drivers, lorryHires, invoices, consignments]);
+  const billingCustomerParties = useMemo(
+    () =>
+      filterBillingCustomerParties({
+        parties,
+        drivers,
+        lorryHires,
+        invoices,
+        consignments,
+      }),
+    [parties, drivers, lorryHires, invoices, consignments]
+  );
 
   const brokerParties = useMemo(
     () => combinedParties.filter((p) => p.partyType === 'Broker'),
@@ -402,9 +500,25 @@ export const AllInOneEntrySheet: React.FC<AllInOneEntrySheetProps> = ({
 
   const goodsOptions = useMemo(() => getEffectiveDropdownList(company, 'goodsTypes'), [company]);
   const pkgModeOptions = useMemo(() => getEffectiveDropdownList(company, 'packageModes'), [company]);
+  const rateModeOptions = useMemo(
+    () => Array.from(new Set([...DEFAULT_RATE_MODES, ...(company.dropdownMaster?.rateModes || [])])),
+    [company.dropdownMaster?.rateModes]
+  );
   const creditDayPresets = useMemo(() => getEffectiveCreditDayPresets(company), [company]);
   const allCities = useMemo(() => {
-    const set = new Set<string>(['Kolkata', 'Howrah', 'Siliguri', 'Patna', 'Guwahati', 'Varanasi', 'Delhi', 'Mumbai', 'Ranchi', 'Durgapur']);
+    const set = new Set<string>([
+      'Kolkata',
+      'Howrah',
+      'Siliguri',
+      'Patna',
+      'Guwahati',
+      'Varanasi',
+      'Delhi',
+      'Mumbai',
+      'Ranchi',
+      'Durgapur',
+      'Jamshedpur',
+    ]);
     ALL_INDIA_STATES_DISTRICTS.forEach((s) => s.districts.forEach((d) => set.add(d.split('(')[0].trim())));
     return Array.from(set).sort((a, b) => a.localeCompare(b));
   }, []);
@@ -414,18 +528,34 @@ export const AllInOneEntrySheet: React.FC<AllInOneEntrySheetProps> = ({
     [company.dropdownMaster?.wheelCommissionRates]
   );
 
-  // Sync Staff Bank & UPI on staff change
   useEffect(() => {
+    setDraftWheelRates({ ...DEFAULT_WHEEL_RATES, ...(company.dropdownMaster?.wheelCommissionRates || {}) });
+  }, [company.dropdownMaster?.wheelCommissionRates]);
+
+  // Sync Staff Bank & UPI on staff change (locked by default)
+  useEffect(() => {
+    if (bankUpiEditUnlocked || editingStaffId) return;
     const matched = staffAccounts.find(
       (s) => s.displayName.trim().toLowerCase() === staffName.trim().toLowerCase()
     );
     if (matched) {
-      if (matched.bankAccountNo) setStaffBankAccount(`${matched.bankName ? `${matched.bankName} ` : ''}${matched.bankAccountNo}`);
-      if (matched.upiId) setStaffUpiId(matched.upiId);
+      setStaffBankAccount(
+        matched.bankAccountNo
+          ? `${matched.bankName ? `${matched.bankName} ` : ''}${matched.bankAccountNo}${matched.bankIfsc ? ` (${matched.bankIfsc})` : ''}`
+          : ''
+      );
+      setStaffUpiId(matched.upiId || '');
     }
-  }, [staffName, staffAccounts]);
+  }, [staffName, staffAccounts, bankUpiEditUnlocked, editingStaffId]);
 
-  // Global 'M' shortcut for Staff Multi-Logs (only outside inputs)
+  // Auto compute detention days when DETN FROM & DETN TO both entered
+  useEffect(() => {
+    if (detentionFromDate && detentionToDate) {
+      setDetentionDays(String(diffDaysInclusive(detentionFromDate, detentionToDate)));
+    }
+  }, [detentionFromDate, detentionToDate]);
+
+  // Global 'M' shortcut for Staff Multi-Logs (outside inputs)
   useEffect(() => {
     const onKeyDown = (e: KeyboardEvent) => {
       const target = e.target as HTMLElement | null;
@@ -450,8 +580,21 @@ export const AllInOneEntrySheet: React.FC<AllInOneEntrySheetProps> = ({
     return () => window.removeEventListener('keydown', onKeyDown);
   }, []);
 
-  // Auto Freight Calculation
-  const computedCnFreight = useMemo(() => {
+  // Toggle Multi ADV to auto-expand to 4 rows when turned YES
+  const handleToggleMultiAdvance = () => {
+    const next = !hasMultiAdvance;
+    setHasMultiAdvance(next);
+    if (next && hireAdvances.length < 4) {
+      setHireAdvances((prev) => {
+        const copy = [...prev];
+        while (copy.length < 4) copy.push(DEFAULT_ADV_ROW());
+        return copy;
+      });
+    }
+  };
+
+  // Total Freight (Unlocked — auto calculates unless manually overridden in Total Freight input)
+  const autoComputedCnFreight = useMemo(() => {
     const base = Number(baseFreight || 0);
     const rate = Number(ratePerUnit || 0);
     const wt = Number(chargedWeight || nettWeight || 0);
@@ -460,11 +603,21 @@ export const AllInOneEntrySheet: React.FC<AllInOneEntrySheetProps> = ({
         ? Math.round(rate * wt * 100) / 100
         : rateMode === 'Per Package'
         ? Math.round(rate * Number(packages || 0) * 100) / 100
+        : rateMode === 'Per Kg'
+        ? Math.round(rate * wt * 1000 * 100) / 100
         : base;
     return Math.round(((calcBase || base) + Number(otherCharge || 0)) * 100) / 100;
   }, [baseFreight, ratePerUnit, rateMode, chargedWeight, nettWeight, packages, otherCharge]);
 
-  // Lorry Hire Calculations (2-day free detention rule + TDS 194C + 50-row multi-advance)
+  const computedCnFreight = useMemo(() => {
+    if (manualFreightOverride !== null && manualFreightOverride !== '') {
+      const n = Number(manualFreightOverride);
+      if (Number.isFinite(n) && n >= 0) return Math.round(n * 100) / 100;
+    }
+    return autoComputedCnFreight;
+  }, [manualFreightOverride, autoComputedCnFreight]);
+
+  // Lorry Hire Calculations (2-day free detention + TDS 194C + Multi Advances + Pay 1-12)
   const effectiveDetentionCharge = useMemo(() => {
     const days = Number(detentionDays || 0);
     const chargeableDays = Math.max(0, days - 2);
@@ -479,17 +632,23 @@ export const AllInOneEntrySheet: React.FC<AllInOneEntrySheetProps> = ({
   }, [hireRateMode, hireRatePerUnit, hireWeightMt, hireAmount]);
 
   const effectiveTdsAmt = useMemo(() => {
+    if (payTdsOverride.trim() !== '') {
+      const ov = Number(payTdsOverride);
+      if (Number.isFinite(ov) && ov >= 0) return Math.round(ov * 100) / 100;
+    }
     const pct = Number(tdsRatePct || 0);
     if (pct <= 0) return 0;
-    return Math.round((effectiveHireGross * pct) / 100 * 100) / 100;
-  }, [effectiveHireGross, tdsRatePct]);
+    return Math.round(((effectiveHireGross * pct) / 100) * 100) / 100;
+  }, [effectiveHireGross, tdsRatePct, payTdsOverride]);
 
   const totalMultiAdvancePaid = useMemo(
-    () =>
-      Math.round(
-        hireAdvances.reduce((s, r) => s + Number(r.amount || 0), 0) * 100
-      ) / 100,
+    () => Math.round(hireAdvances.reduce((s, r) => s + Number(r.amount || 0), 0) * 100) / 100,
     [hireAdvances]
+  );
+
+  const totalPay1To12Paid = useMemo(
+    () => Math.round(payInstallments.reduce((s, r) => s + Number(r.amount || 0), 0) * 100) / 100,
+    [payInstallments]
   );
 
   const hireNetSummary = useMemo(
@@ -522,10 +681,14 @@ export const AllInOneEntrySheet: React.FC<AllInOneEntrySheetProps> = ({
     ]
   );
 
+  const netPaymentDueAfterPay12 = useMemo(
+    () => Math.max(0, Math.round((hireNetSummary.balancePayable - totalPay1To12Paid) * 100) / 100),
+    [hireNetSummary.balancePayable, totalPay1To12Paid]
+  );
+
   // POD Shortage/Breakage/Leakage Red Alert check
   useEffect(() => {
-    const hasDeduction =
-      Number(hireShortageCharge || 0) > 0 || Number(hireDamageCharge || 0) > 0;
+    const hasDeduction = Number(hireShortageCharge || 0) > 0 || Number(hireDamageCharge || 0) > 0;
     const hasKeyword = /(short|damage|break|leak|wet|broken)/i.test(podRemarks || '');
     const active = hasDeduction || hasKeyword;
     if (active && !podAlertActive) {
@@ -534,67 +697,15 @@ export const AllInOneEntrySheet: React.FC<AllInOneEntrySheetProps> = ({
     setPodAlertActive(active);
   }, [hireShortageCharge, hireDamageCharge, podRemarks, podAlertActive]);
 
-  // Party Bill GST & Grand Total Calculation
-  const billSummary = useMemo(() => {
-    const freightSub = computedCnFreight;
-    const extras =
-      Number(insuranceCharge || 0) +
-      Number(collCharge || 0) +
-      Number(billLoadingCharge || 0) +
-      Number(billUnloadingCharge || 0) +
-      Number(surchargeAmt || 0) +
-      Number(detentionBillCharge || 0) +
-      Number(stCharge || 0) +
-      Number(fumigationCharge || 0) +
-      Number(extraBillCharge || 0);
-    const taxableTotal = Math.round((freightSub + extras) * 100) / 100;
-    const isExport = billingCountry !== 'India';
-    const isRcm = gstPaidByBill === 'Consignor' || gstPaidByBill === 'Consignee';
-    const gstRate = isExport || isRcm ? 0 : 12;
-    const totalTax = Math.round(((taxableTotal * gstRate) / 100) * 100) / 100;
-    const cgstAmt = !interstateBill && gstRate > 0 ? Math.round((totalTax / 2) * 100) / 100 : 0;
-    const sgstAmt = !interstateBill && gstRate > 0 ? Math.round((totalTax / 2) * 100) / 100 : 0;
-    const igstAmt = interstateBill && gstRate > 0 ? totalTax : 0;
-    const grossBillAmount = Math.round((taxableTotal + totalTax) * 100) / 100;
-    const advPaid = Math.round(Number(advanceReceived || 0) * 100) / 100;
-    const paidAmount = fullPaymentReceived ? grossBillAmount : Math.min(grossBillAmount, advPaid);
-    const balanceDue = Math.max(0, Math.round((grossBillAmount - paidAmount) * 100) / 100);
-    const status: 'Unpaid' | 'Partial' | 'Paid' =
-      balanceDue <= 0 && grossBillAmount > 0 ? 'Paid' : paidAmount > 0 ? 'Partial' : 'Unpaid';
-    return {
-      freightSub,
-      extras,
-      taxableTotal,
-      gstRate,
-      cgstAmt,
-      sgstAmt,
-      igstAmt,
-      totalTax,
-      grossBillAmount,
-      paidAmount,
-      balanceDue,
-      status,
-    };
-  }, [
-    computedCnFreight,
-    insuranceCharge,
-    collCharge,
-    billLoadingCharge,
-    billUnloadingCharge,
-    surchargeAmt,
-    detentionBillCharge,
-    stCharge,
-    fumigationCharge,
-    extraBillCharge,
-    billingCountry,
-    gstPaidByBill,
-    interstateBill,
-    advanceReceived,
-    fullPaymentReceived,
-  ]);
-
   // Autofill Driver/Owner when Vehicle selected
-  const handleSelectVehicle = (v: { truckNo: string; ownerName?: string; vehicleMake?: string; bodyType?: string; vehicleColor?: string; id: string }) => {
+  const handleSelectVehicle = (v: {
+    truckNo: string;
+    ownerName?: string;
+    vehicleMake?: string;
+    bodyType?: string;
+    vehicleColor?: string;
+    id: string;
+  }) => {
     setTruckNo(v.truckNo);
     setSelectedVehicleId(v.id);
     if (v.ownerName) setOwnerName(v.ownerName);
@@ -602,7 +713,6 @@ export const AllInOneEntrySheet: React.FC<AllInOneEntrySheetProps> = ({
     if (v.bodyType) setBodyType(v.bodyType);
     if (v.vehicleColor) setVehicleColor(v.vehicleColor);
 
-    // Try matching most recent consignment with this truckNo to auto-fetch Driver
     const recentCn = consignments.find(
       (c) => (c.truckNo || '').trim().toUpperCase() === v.truckNo.trim().toUpperCase() && c.driverName
     );
@@ -625,438 +735,753 @@ export const AllInOneEntrySheet: React.FC<AllInOneEntrySheetProps> = ({
     }
   };
 
-  const handleSelectBillParty = (p: AnyPartyEntity) => {
-    setBillPartyName(p.name);
-    setSelectedBillPartyId(p.id);
-    setBillPartyGstin(p.gstin || '');
-    setBillPartyPan(p.pan || (p.gstin && p.gstin.length >= 12 ? p.gstin.slice(2, 12) : ''));
-    setBillPartyAddress(p.address || '');
-    const stateInfo = resolveGstStateCode(p.gstin, p.address, billingCountry);
-    if (stateInfo.code && stateInfo.code !== '19' && stateInfo.code !== '99') {
-      setInterstateBill(true);
-    } else if (stateInfo.code === '19') {
-      setInterstateBill(false);
-    }
-  };
-
-  const resetFormToBlank = () => {
+  const resetFormToBlank = useCallback(() => {
     setEditingCnId(null);
     setEditingDocketId(null);
     setEditingHireId(null);
     setEditingStaffId(null);
-    setEditingInvoiceId(null);
     const prefix = isFtl ? 'KOL' : divisionMeta.docPrefix;
     const count = isFtl ? consignments.length : logisticsDockets.length;
+    setBranchShort(prefix);
+    setRefCnNo('');
     setDocNo(`${prefix}-${151 + count}/26-27`);
     setDocDate(todayISO());
+    setBillingPartyName('');
+    setSelectedBillingPartyId('');
     setConsignorName('');
     setSelectedConsignorId('');
     setConsignorAddress('');
     setConsignorGstin('');
+    setConsignorHsn('');
     setConsigneeName('');
     setSelectedConsigneeId('');
     setConsigneeAddress('');
     setConsigneeGstin('');
+    setConsigneeHsn('');
+    setDeliverAt('');
+    setIsChallanAttached(false);
     setToCity('');
     setTruckNo('');
     setSelectedVehicleId('');
+    setExtraVehicles([]);
+    setHasMultiVehicle(false);
     setDriverName('');
     setSelectedDriverId('');
     setDriverDlNo('');
     setDriverDlExpiry('');
     setDriverMobile('');
+    setHasMultiGoods(false);
+    setMultiGoodsItems([]);
+    setTaxInvNo('');
+    setTaxInvDate('');
+    setValueOfGoods('0');
+    setHasMultiTaxInv(false);
+    setExtraTaxInvoices([]);
+    setEwayBillNo('');
+    setEwayBillDate('');
+    setEwayBillValidUpto('');
+    setHasMultiEwb(false);
+    setExtraEwayBills([]);
+    setEwbExtensions([]);
+    setHasMultiWeight(false);
+    setMultiWeights([]);
     setBaseFreight('0');
     setRatePerUnit('0');
     setOtherCharge('0');
+    setManualFreightOverride(null);
+    setShowFreightOnPrint(true);
+    setInsuranceCo('');
+    setInsurancePolicyNo('');
+    setInsurancePolicyDate('');
+    setInsuranceAmount('0');
+    setHasMultiInsurance(false);
+    setExtraInsurances([]);
+    setBillAdjustmentDetails('');
+    setAddlDetailsEnabled(false);
+    setCnRemarks('');
+    setScannedLrDataUrl('');
     setBrokerName('');
+    setSelectedBrokerId('');
     setOwnerName('');
+    setSelectedOwnerId('');
     setHireAmount('0');
     setHireRatePerUnit('0');
+    setDetentionFromDate('');
+    setDetentionToDate('');
+    setDetentionDays('0');
+    setHasMultiAdvance(false);
     setHireAdvances([DEFAULT_ADV_ROW()]);
+    setPayInstallments(EMPTY_PAY_12());
+    setAdvExDate('');
+    setPayTdsOverride('');
     setPodReceived(false);
     setPodRemarks('');
-    setBillId(`B-${100 + invoices.length + 2}`);
-    setInvoiceNo(`${divisionMeta.docPrefix}/${106 + invoices.length}/26-27`);
-    setBillPartyName('');
-    setSelectedBillPartyId('');
-    setBillPartyGstin('');
-    setBillPartyPan('');
-    setBillPartyAddress('');
-    setAdvanceReceived('0');
-    setFullPaymentReceived(false);
+    setChallanAmt('0');
+    setTravellingAmt('0');
+    setMiscAmt('0');
+    setStaffAdvanceDate('');
+    setStaffMonthlyPaidDate('');
+    setStaffSettledZero(false);
+    setStaffRemarks('');
+    setMultiAdvances([]);
+    setMultiPaidReturns([]);
+    setMultiBalanceDates([]);
+  }, [isFtl, divisionMeta.docPrefix, consignments.length, logisticsDockets.length]);
+
+  const buildCurrentCnSnapshot = useCallback((): ConsignmentNote => {
+    const cnTruckValue = hasVehicleNo ? truckNo.trim() || 'UNASSIGNED' : 'UNASSIGNED';
+    const gstPaidLabel = GST_PAID_BY_CODES.find((c) => c.code === gstPaidByCode)?.mapped || 'Consignee';
+    return {
+      id: editingCnId || 'preview_cn',
+      cnNo: docNo.trim() || 'DRAFT',
+      cnDate: docDate,
+      financialYear: normalizeFyLabel(activeFy),
+      division: 'FTL',
+      branchShort: branchShort.trim(),
+      lastCnNo: computedLastCnNo,
+      refCnNo: refCnNo.trim(),
+      transportMode,
+      bookingBasis,
+      payBasis,
+      billedAtBranch,
+      hasVehicleNo,
+      hasMultiVehicle,
+      billingPartyName: billingPartyName.trim() || consignorName.trim(),
+      creditDays: Number(creditDays || 15),
+      consignorName: consignorName.trim() || 'Consignor',
+      consignorAddress: consignorAddress.trim(),
+      consignorGstin: consignorGstin.trim().toUpperCase(),
+      consignorHsn: consignorHsn.trim(),
+      consigneeName: consigneeName.trim() || consignorName.trim() || 'Consignee',
+      consigneeAddress: consigneeAddress.trim(),
+      consigneeGstin: consigneeGstin.trim().toUpperCase(),
+      consigneeHsn: consigneeHsn.trim(),
+      deliverAt: deliverAt.trim(),
+      isChallanAttached,
+      packages: packages.trim(),
+      packageMode,
+      particulars: particulars.trim(),
+      multiGoodsItems: (hasMultiGoods ? multiGoodsItems : []).slice(0, 50),
+      rateMode,
+      ratePerUnit: Number(ratePerUnit || 0),
+      nettWeight: Number(nettWeight || 0),
+      grossWeight: Number(grossWeight || 0),
+      chargedWeight: Number(chargedWeight || 0),
+      multiWeights: (hasMultiWeight ? multiWeights : []).slice(0, 50),
+      otherCharge: Number(otherCharge || 0),
+      totalFreight: computedCnFreight,
+      showFreightOnPrint,
+      taxInvNo: taxInvNo.trim(),
+      taxInvDate: taxInvDate.trim(),
+      hasTaxInvoice: hasMultiTaxInv || Boolean(taxInvNo.trim()),
+      extraTaxInvoices: (hasMultiTaxInv ? extraTaxInvoices : []).slice(0, 50),
+      ewayBillNo: ewayBillNo.trim(),
+      ewayBillDate: ewayBillDate.trim(),
+      ewayBillValidUpto: ewayBillValidUpto.trim(),
+      hasMultiEwayBill: hasMultiEwb,
+      extraEwayBills: (hasMultiEwb ? extraEwayBills : []).slice(0, 50),
+      ewbExtensions: ewbExtensions.slice(0, 10),
+      valueOfGoods: Number(valueOfGoods || 0),
+      truckNo: cnTruckValue,
+      extraVehicles: (hasMultiVehicle ? extraVehicles : []).slice(0, 50),
+      fromCity: fromCity.trim() || 'Kolkata',
+      toCity: toCity.trim() || 'Destination',
+      ownerName: ownerName.trim(),
+      brokerName: brokerName.trim(),
+      driverName: hasVehicleNo ? driverName.trim() : '',
+      driverDlNo: hasVehicleNo ? driverDlNo.trim() : '',
+      driverDlExpiry: hasVehicleNo ? driverDlExpiry : '',
+      driverMobile: hasVehicleNo ? driverMobile.trim() : '',
+      deliveryModeCode,
+      gstPaidBy: gstPaidLabel,
+      gstPaidByCode,
+      riskTakenBy,
+      insuranceCo: insuranceCo.trim(),
+      insurancePolicyNo: insurancePolicyNo.trim(),
+      insurancePolicyDate: insurancePolicyDate.trim(),
+      insuranceAmount: Number(insuranceAmount || 0),
+      extraInsurances: (hasMultiInsurance ? extraInsurances : []).slice(0, 50),
+      billAdjustmentDetails: billAdjustmentDetails.trim(),
+      addlDetailsEnabled,
+      remarks: cnRemarks.trim(),
+      scannedLrDataUrl: scannedLrDataUrl || undefined,
+      billed: false,
+      branchCode: activeBranchCode,
+      createdByStaff: activeStaffCode,
+      ownerUid,
+    };
+  }, [
+    editingCnId,
+    docNo,
+    docDate,
+    activeFy,
+    branchShort,
+    computedLastCnNo,
+    refCnNo,
+    transportMode,
+    bookingBasis,
+    payBasis,
+    billedAtBranch,
+    hasVehicleNo,
+    hasMultiVehicle,
+    billingPartyName,
+    consignorName,
+    creditDays,
+    consignorAddress,
+    consignorGstin,
+    consignorHsn,
+    consigneeName,
+    consigneeAddress,
+    consigneeGstin,
+    consigneeHsn,
+    deliverAt,
+    isChallanAttached,
+    packages,
+    packageMode,
+    particulars,
+    hasMultiGoods,
+    multiGoodsItems,
+    rateMode,
+    ratePerUnit,
+    nettWeight,
+    grossWeight,
+    chargedWeight,
+    hasMultiWeight,
+    multiWeights,
+    otherCharge,
+    computedCnFreight,
+    showFreightOnPrint,
+    taxInvNo,
+    taxInvDate,
+    hasMultiTaxInv,
+    extraTaxInvoices,
+    ewayBillNo,
+    ewayBillDate,
+    ewayBillValidUpto,
+    hasMultiEwb,
+    extraEwayBills,
+    ewbExtensions,
+    valueOfGoods,
+    truckNo,
+    extraVehicles,
+    fromCity,
+    toCity,
+    ownerName,
+    brokerName,
+    driverName,
+    driverDlNo,
+    driverDlExpiry,
+    driverMobile,
+    deliveryModeCode,
+    gstPaidByCode,
+    riskTakenBy,
+    insuranceCo,
+    insurancePolicyNo,
+    insurancePolicyDate,
+    insuranceAmount,
+    hasMultiInsurance,
+    extraInsurances,
+    billAdjustmentDetails,
+    addlDetailsEnabled,
+    cnRemarks,
+    scannedLrDataUrl,
+    activeBranchCode,
+    activeStaffCode,
+    ownerUid,
+  ]);
+
+  const handleSaveWheelRates = async () => {
+    await upsertDocument(
+      'settings',
+      'company',
+      {
+        dropdownMaster: {
+          ...(company.dropdownMaster || {}),
+          wheelCommissionRates: draftWheelRates,
+        },
+      },
+      false
+    );
+    if (draftWheelRates[wheelType] !== undefined && staffEntryType === 'Commission') {
+      setStaffAmount(String(draftWheelRates[wheelType]));
+    }
+    setWheelRatesModalOpen(false);
+    playVerifiedBeep();
+    setStatusToast('Wheel Commission Rate Master saved & synced to cloud.');
   };
 
-  const saveCompleteSheet = async (afterAction: 'exit' | 'pdf') => {
-    if (readOnly) {
-      setStatusToast('View-Only permission: saving is restricted.');
-      return;
-    }
-    if (!docNo.trim() || !consignorName.trim() || !fromCity.trim() || !toCity.trim()) {
-      setStatusToast('Please fill C/N or Docket No, Consignor, From City, and To City.');
-      playAlertBeep();
-      return;
-    }
+  const handleSaveCompleteSheet = useCallback(
+    async (afterAction: 'exit' | 'pdf' | 'stay') => {
+      if (readOnly) {
+        setStatusToast('View-Only permission: saving is restricted.');
+        return;
+      }
+      if (saveConfirmYN !== 'Y') {
+        setStatusToast('SAVE switch is set to [N]. Flip SAVE [Y / N] to Y to save changes.');
+        playAlertBeep();
+        return;
+      }
+      if (!docNo.trim() || !consignorName.trim() || !fromCity.trim() || !toCity.trim()) {
+        setStatusToast('Please fill C/N or Docket No, Consignor, From City, and To City.');
+        playAlertBeep();
+        return;
+      }
+      if (consignorGstin.trim()) {
+        const res = validateIndianGstin(consignorGstin);
+        if (!res.valid) {
+          setStatusToast(`Consignor GSTIN Invalid: ${res.error}`);
+          playAlertBeep();
+          return;
+        }
+      }
+      if (consigneeGstin.trim()) {
+        const res = validateIndianGstin(consigneeGstin);
+        if (!res.valid) {
+          setStatusToast(`Consignee GSTIN Invalid: ${res.error}`);
+          playAlertBeep();
+          return;
+        }
+      }
 
-    setSaving(true);
-    setStatusToast(null);
-    try {
-      const fyNorm = normalizeFyLabel(activeFy);
-      const effectivePartyForBill = billPartyName.trim() || consignorName.trim();
-      const cnTruckValue = hasVehicleNo ? truckNo.trim() : 'UNASSIGNED';
+      setSaving(true);
+      setStatusToast(null);
+      try {
+        const fyNorm = normalizeFyLabel(activeFy);
+        const cnTruckValue = hasVehicleNo ? truckNo.trim() || 'UNASSIGNED' : 'UNASSIGNED';
 
-      let savedInvoiceId = editingInvoiceId || '';
-      let savedInvoiceObj: Invoice | null = null;
-      let savedLogiInvoiceObj: LogisticsInvoice | null = null;
-      let savedCnObj: ConsignmentNote | null = null;
-      let savedDocketObj: LogisticsDocket | null = null;
+        let savedCnObj: ConsignmentNote | null = null;
+        let savedDocketObj: LogisticsDocket | null = null;
 
-      // 1. Save Party Bill / Invoice first (if enabled and party selected) so CN/Docket gets invoiceId & billed: true
-      if (includeBillSection && effectivePartyForBill && billSummary.grossBillAmount > 0) {
+        // 1. Save CN/LR (FTL) or Logistics Docket (LOGISTICS / PTL / COURIER) — NO Invoice auto-creation
         if (isFtl) {
-          savedInvoiceId = editingInvoiceId || makeSafeDocId('inv');
-          const invPayload: Omit<Invoice, 'id' | 'createdAt' | 'updatedAt'> & Record<string, unknown> = {
-            billId: billId.trim(),
-            invoiceNo: invoiceNo.trim(),
-            invoiceDate: billDate,
-            dueDate,
-            financialYear: fyNorm,
-            division: 'FTL',
-            billedByCode,
-            billedAtBranch,
-            partyName: effectivePartyForBill,
-            partyAddress: billPartyAddress.trim(),
-            partyGstin: billPartyGstin.trim().toUpperCase(),
-            partyPan: billPartyPan.trim().toUpperCase(),
-            billingCountry,
-            sac: company.hsn || '996791',
-            reverseCharge: gstPaidByBill !== 'Transporter' && billingCountry === 'India',
-            interstate: interstateBill,
-            gstPaidBy: gstPaidByBill,
-            gstRate: billSummary.gstRate,
-            cgstAmt: billSummary.cgstAmt,
-            sgstAmt: billSummary.sgstAmt,
-            igstAmt: billSummary.igstAmt,
-            totalTax: billSummary.totalTax,
-            freightCharges: billSummary.freightSub,
-            insuranceCharge: Number(insuranceCharge || 0),
-            collCharge: Number(collCharge || 0),
-            loadingCharge: Number(billLoadingCharge || 0),
-            unloadingCharges: Number(billUnloadingCharge || 0),
-            surchargeAmt: Number(surchargeAmt || 0),
-            detentionCharges: Number(detentionBillCharge || 0),
-            stCharges: Number(stCharge || 0),
-            fumigationCharge: Number(fumigationCharge || 0),
-            extraCharge: Number(extraBillCharge || 0),
-            grossBillAmount: billSummary.grossBillAmount,
-            advanceReceived: Number(advanceReceived || 0),
-            advanceMode,
-            fullPaymentMode: fullPaymentReceived ? fullPaymentMode : '',
-            grandTotal: billSummary.grossBillAmount,
-            paidAmount: billSummary.paidAmount,
-            status: billSummary.status,
-            remarks: billRemarks.trim(),
-            billFootnote: billFootnote.trim(),
-            additionalNotes: additionalNotes.trim(),
-            copyCount: 1,
-            consignmentRows: [
-              {
-                cnNo: docNo.trim(),
-                cnDate: docDate,
-                vehicle: cnTruckValue,
-                from: fromCity.trim(),
-                to: toCity.trim(),
-                weight: Number(chargedWeight || nettWeight || 0),
-                packages: `${packages} ${packageMode}`.trim(),
-                rateType: rateMode,
-                ratePerMt: Number(ratePerUnit || 0),
-                freight: computedCnFreight,
-                description: particulars.trim(),
-              },
-            ],
-            annexureLorries: hasVehicleNo && truckNo ? [{ cnNo: docNo.trim(), lorryNumbers: [truckNo, ...extraVehicles].filter(Boolean).join(', ') }] : [],
-            branchCode: activeBranchCode,
-            createdByStaff: activeStaffCode,
-            ownerUid,
+          const cnId = editingCnId || makeSafeDocId('cn');
+          const snap = buildCurrentCnSnapshot();
+          const existingCn = editingCnId ? consignments.find((c) => c.id === editingCnId) : undefined;
+          const cnPayload: Record<string, unknown> = {
+            ...snap,
+            billed: existingCn?.billed || false,
+            invoiceId: existingCn?.invoiceId || '',
+            scannedLrDataUrl: snap.scannedLrDataUrl || '',
           };
-          await upsertDocument('invoices', savedInvoiceId, invPayload, !editingInvoiceId);
-          savedInvoiceObj = { id: savedInvoiceId, ...invPayload };
+          delete cnPayload.id;
+          await upsertDocument('consignments', cnId, cnPayload, !editingCnId);
+          savedCnObj = { ...snap, id: cnId, billed: existingCn?.billed || false, invoiceId: existingCn?.invoiceId || '' };
         } else {
-          savedInvoiceId = editingInvoiceId || makeSafeDocId(`${divisionMeta.idPrefix}inv`);
-          const logiInvPayload: Omit<LogisticsInvoice, 'id' | 'createdAt' | 'updatedAt'> & Record<string, unknown> = {
-            docType: 'Tax Invoice',
-            docNo: invoiceNo.trim(),
-            docDate: billDate,
+          const docketId = editingDocketId || makeSafeDocId(`${divisionMeta.idPrefix}dkt`);
+          const existingDk = editingDocketId
+            ? logisticsDockets.find((d) => d.id === editingDocketId)
+            : undefined;
+          const docketPayload: Omit<LogisticsDocket, 'id' | 'createdAt' | 'updatedAt'> & Record<string, unknown> = {
+            docketNo: docNo.trim(),
+            docketDate: docDate,
             financialYear: fyNorm,
-            linkedDocNo: docNo.trim(),
-            partyName: effectivePartyForBill,
-            partyAddress: billPartyAddress.trim(),
-            partyGstin: billPartyGstin.trim().toUpperCase(),
-            partyPan: billPartyPan.trim().toUpperCase(),
-            sac: company.hsn || '996791',
-            reverseCharge: gstPaidByBill !== 'Transporter' && billingCountry === 'India',
-            interstate: interstateBill,
-            gstRate: billSummary.gstRate,
-            taxableAmount: billSummary.taxableTotal,
-            cgstAmt: billSummary.cgstAmt,
-            sgstAmt: billSummary.sgstAmt,
-            igstAmt: billSummary.igstAmt,
-            grandTotal: billSummary.grossBillAmount,
-            paidAmount: billSummary.paidAmount,
-            status: billSummary.status,
-            docketRows: [
-              {
-                docketNo: docNo.trim(),
-                docketDate: docDate,
-                originBranch: fromCity.trim(),
-                destBranch: toCity.trim(),
-                packages: Number(packages || 0),
-                weightKg: Number(chargedWeight || nettWeight || 0),
-                goodsDesc: particulars.trim(),
-                freightAmt: computedCnFreight,
-              },
-            ],
-            remarks: [billRemarks, additionalNotes, billFootnote].filter(Boolean).join(' | '),
+            billedAtBranch,
+            originBranch: fromCity.trim() || billedAtBranch,
+            destBranch: toCity.trim() || billedAtBranch,
+            deliveryMode: docketDeliveryMode,
+            payMode: payBasis,
+            consignorName: consignorName.trim(),
+            consignorAddress: consignorAddress.trim(),
+            consignorGstin: consignorGstin.trim().toUpperCase(),
+            consigneeName: consigneeName.trim() || consignorName.trim(),
+            consigneeAddress: consigneeAddress.trim(),
+            consigneeGstin: consigneeGstin.trim().toUpperCase(),
+            billingPartyName: billingPartyName.trim() || consignorName.trim(),
+            packages: Number(packages || 1),
+            packingType: packageMode,
+            goodsDesc: particulars.trim(),
+            actualWeightKg: Number(nettWeight || 0),
+            chargedWeightKg: Number(chargedWeight || nettWeight || 0),
+            rateBasis: rateMode === 'Per Package' ? 'Per Package' : rateMode === 'Per Kg' ? 'Per Kg' : 'Fixed',
+            ratePerUnit: Number(ratePerUnit || 0),
+            baseFreight: Number(baseFreight || computedCnFreight),
+            fovCharge: 0,
+            docketCharge: Number(otherCharge || 0),
+            hamaliCharge: 0,
+            doorCharge: 0,
+            gstRate: 0,
+            cgstAmt: 0,
+            sgstAmt: 0,
+            igstAmt: 0,
+            reverseCharge: gstPaidByCode !== 'T',
+            totalAmount: computedCnFreight,
+            ewayBillNo: ewayBillNo.trim(),
+            ewayBillValidUpto: ewayBillValidUpto.trim(),
+            valueOfGoods: Number(valueOfGoods || 0),
+            stockStage: podReceived ? 'Delivered' : 'Origin Godown',
+            billed: existingDk?.billed || false,
+            invoiceId: existingDk?.invoiceId || '',
+            remarks: cnRemarks.trim(),
             branchCode: activeBranchCode,
             createdByStaff: activeStaffCode,
             ownerUid,
           };
-          await upsertDocument('logistics_invoices', savedInvoiceId, logiInvPayload, !editingInvoiceId);
-          savedLogiInvoiceObj = { id: savedInvoiceId, ...logiInvPayload };
+          await upsertDocument('logistics_dockets', docketId, docketPayload, !editingDocketId);
+          savedDocketObj = { id: docketId, ...docketPayload };
         }
-      }
 
-      // 2. Save CN/LR (FTL) or Logistics Docket (LOGISTICS / PTL / COURIER)
-      const isBilledNow = Boolean(savedInvoiceId);
-      if (isFtl) {
-        const cnId = editingCnId || makeSafeDocId('cn');
-        const gstPaidLabel =
-          GST_PAID_BY_CODES.find((c) => c.code === gstPaidByCode)?.mapped || 'Consignee';
-        const cnPayload: Omit<ConsignmentNote, 'id' | 'createdAt' | 'updatedAt'> & Record<string, unknown> = {
-          cnNo: docNo.trim(),
-          cnDate: docDate,
-          financialYear: fyNorm,
-          division: 'FTL',
-          billedAtBranch,
-          hasVehicleNo,
-          hasMultiVehicle,
-          billingPartyName: effectivePartyForBill,
-          creditDays: Number(creditDays || 15),
-          consignorName: consignorName.trim(),
-          consignorAddress: consignorAddress.trim(),
-          consignorGstin: consignorGstin.trim().toUpperCase(),
-          consigneeName: consigneeName.trim() || consignorName.trim(),
-          consigneeAddress: consigneeAddress.trim(),
-          consigneeGstin: consigneeGstin.trim().toUpperCase(),
-          packages: packages.trim(),
-          packageMode,
-          particulars: particulars.trim(),
-          multiGoodsItems: multiGoodsItems.slice(0, 50),
-          rateMode,
-          ratePerUnit: Number(ratePerUnit || 0),
-          nettWeight: Number(nettWeight || 0),
-          grossWeight: Number(grossWeight || 0),
-          chargedWeight: Number(chargedWeight || 0),
-          multiWeights: multiWeights.slice(0, 50),
-          otherCharge: Number(otherCharge || 0),
-          totalFreight: computedCnFreight,
-          truckNo: cnTruckValue,
-          extraVehicles: (hasMultiVehicle ? extraVehicles : []).slice(0, 50),
-          fromCity: fromCity.trim(),
-          toCity: toCity.trim(),
-          ownerName: ownerName.trim(),
-          brokerName: brokerName.trim(),
-          driverName: hasVehicleNo ? driverName.trim() : '',
-          driverDlNo: hasVehicleNo ? driverDlNo.trim() : '',
-          driverDlExpiry: hasVehicleNo ? driverDlExpiry : '',
-          driverMobile: hasVehicleNo ? driverMobile.trim() : '',
-          deliveryModeCode,
-          gstPaidBy: gstPaidLabel,
-          gstPaidByCode,
-          riskTakenBy,
-          extraEwayBills: extraEwayBills.slice(0, 50),
-          extraInsurances: extraInsurances.slice(0, 50),
-          remarks: cnRemarks.trim(),
-          billed: isBilledNow,
-          invoiceId: savedInvoiceId || '',
-          branchCode: activeBranchCode,
-          createdByStaff: activeStaffCode,
-          ownerUid,
-        };
-        await upsertDocument('consignments', cnId, cnPayload, !editingCnId);
-        savedCnObj = { id: cnId, ...cnPayload };
-      } else {
-        const docketId = editingDocketId || makeSafeDocId(`${divisionMeta.idPrefix}dkt`);
-        const docketPayload: Omit<LogisticsDocket, 'id' | 'createdAt' | 'updatedAt'> & Record<string, unknown> = {
-          docketNo: docNo.trim(),
-          docketDate: docDate,
-          financialYear: fyNorm,
-          billedAtBranch,
-          originBranch: fromCity.trim() || billedAtBranch,
-          destBranch: toCity.trim() || billedAtBranch,
-          deliveryMode: docketDeliveryMode,
-          payMode: docketPayMode,
-          consignorName: consignorName.trim(),
-          consignorAddress: consignorAddress.trim(),
-          consignorGstin: consignorGstin.trim().toUpperCase(),
-          consigneeName: consigneeName.trim() || consignorName.trim(),
-          consigneeAddress: consigneeAddress.trim(),
-          consigneeGstin: consigneeGstin.trim().toUpperCase(),
-          billingPartyName: effectivePartyForBill,
-          packages: Number(packages || 1),
-          packingType: packageMode,
-          goodsDesc: particulars.trim(),
-          actualWeightKg: Number(nettWeight || 0),
-          chargedWeightKg: Number(chargedWeight || nettWeight || 0),
-          rateBasis: rateMode === 'Per Package' ? 'Per Package' : rateMode === 'Per Kg' ? 'Per Kg' : 'Fixed',
-          ratePerUnit: Number(ratePerUnit || 0),
-          baseFreight: Number(baseFreight || computedCnFreight),
-          fovCharge: 0,
-          docketCharge: Number(otherCharge || 0),
-          hamaliCharge: 0,
-          doorCharge: 0,
-          gstRate: billSummary.gstRate,
-          cgstAmt: billSummary.cgstAmt,
-          sgstAmt: billSummary.sgstAmt,
-          igstAmt: billSummary.igstAmt,
-          reverseCharge: gstPaidByBill !== 'Transporter',
-          totalAmount: computedCnFreight,
-          stockStage: podReceived ? 'Delivered' : 'Origin Godown',
-          billed: isBilledNow,
-          invoiceId: savedInvoiceId || '',
-          remarks: cnRemarks.trim(),
-          branchCode: activeBranchCode,
-          createdByStaff: activeStaffCode,
-          ownerUid,
-        };
-        await upsertDocument('logistics_dockets', docketId, docketPayload, !editingDocketId);
-        savedDocketObj = { id: docketId, ...docketPayload };
-      }
+        // 2. Save Band 1 + Band 3 (Lorry Hire, Multi-Advance, Pay 1-12 Installments)
+        if (includeHireSection && (effectiveHireGross > 0 || totalMultiAdvancePaid > 0 || totalPay1To12Paid > 0)) {
+          const lhId = editingHireId || makeSafeDocId('lh');
+          const cappedAdvs = hireAdvances
+            .filter((a) => Number(a.amount || 0) > 0 || a.accountName.trim())
+            .slice(0, 50)
+            .map((a) => ({
+              payeeType: a.payeeType || 'Lorry Owner',
+              accountName: a.accountName || '',
+              holderName: a.holderName || '',
+              bankAccountNo: a.bankAccountNo || '',
+              upiId: a.upiId || '',
+              refNo: a.refNo || '',
+              advanceDate: a.advanceDate || docDate,
+              mode: a.mode || 'NEFT',
+              amount: Number(a.amount || 0),
+            }));
+          const activePay12 = payInstallments
+            .filter((p) => Number(p.amount || 0) > 0 || p.date || p.refNo)
+            .map((p) => ({
+              slot: p.slot,
+              date: p.date || '',
+              refNo: p.refNo || '',
+              amount: Number(p.amount || 0),
+            }));
+          const lhPayload: Record<string, unknown> = {
+            cnNo: docNo.trim(),
+            cnDate: docDate,
+            financialYear: fyNorm,
+            division: divisionMode,
+            truckNo: cnTruckValue,
+            ownerName: ownerName.trim(),
+            brokerName: brokerName.trim(),
+            fromCity: fromCity.trim(),
+            toCity: toCity.trim(),
+            weightMt: Number(hireWeightMt || nettWeight || 0),
+            ratePerUnit: Number(hireRatePerUnit || 0),
+            rateMode: hireRateMode,
+            hasMultiAdvance: hasMultiAdvance || cappedAdvs.length > 1,
+            advances: cappedAdvs,
+            hireAmount: effectiveHireGross,
+            advancePaid: totalMultiAdvancePaid,
+            extraAdvanceAmt: Number(extraAdvanceAmt || 0),
+            loadingCharge: Number(hireLoadingCharge || 0),
+            unloadingCharge: Number(hireUnloadingCharge || 0),
+            parkingCharge: Number(hireParkingCharge || 0),
+            kataCharge: Number(hireKataCharge || 0),
+            detentionFromDate: detentionFromDate || '',
+            detentionToDate: detentionToDate || '',
+            detentionDays: Number(detentionDays || 0),
+            detentionCharge: effectiveDetentionCharge,
+            shortageCharge: Number(hireShortageCharge || 0),
+            damageCharge: Number(hireDamageCharge || 0),
+            tdsRatePct: Number(tdsRatePct || 0),
+            tdsAmount: effectiveTdsAmt,
+            receiptChallanNo: receiptChallanNo.trim(),
+            receiptChallanDate: receiptChallanDate || '',
+            payInstallments: activePay12,
+            paymentDueAmt: netPaymentDueAfterPay12,
+            advExDate: advExDate || '',
+            payTdsAmt: effectiveTdsAmt,
+            balancePayable: netPaymentDueAfterPay12,
+            balancePaidAmt: totalPay1To12Paid,
+            podReceived,
+            podReceiveDate: podReceived ? podReceiveDate || todayISO() : '',
+            podRemarks: podRemarks.trim(),
+            balancePaid: netPaymentDueAfterPay12 <= 0 && effectiveHireGross > 0,
+            remarks: hireRemarks.trim(),
+            branchCode: activeBranchCode,
+            createdByStaff: activeStaffCode,
+            ownerUid,
+          };
+          await upsertDocument('lorry_hires', lhId, lhPayload, !editingHireId);
+        }
 
-      // 3. Save Lorry Hire (if enabled & hire > 0)
-      if (includeHireSection && (effectiveHireGross > 0 || totalMultiAdvancePaid > 0)) {
-        const lhId = editingHireId || makeSafeDocId('lh');
-        const cappedAdvs = hireAdvances
-          .filter((a) => Number(a.amount || 0) > 0 || a.accountName.trim())
-          .slice(0, 50)
-          .map((a) => ({
-            payeeType: a.payeeType || 'Lorry Owner',
-            accountName: a.accountName || '',
-            holderName: a.holderName || '',
-            bankAccountNo: a.bankAccountNo || '',
-            upiId: a.upiId || '',
-            refNo: a.refNo || '',
-            advanceDate: a.advanceDate || docDate,
-            mode: a.mode || 'NEFT',
-            amount: Number(a.amount || 0),
-          }));
-        const lhPayload: Record<string, unknown> = {
-          cnNo: docNo.trim(),
-          cnDate: docDate,
-          financialYear: fyNorm,
-          division: divisionMode,
-          truckNo: cnTruckValue,
-          ownerName: ownerName.trim(),
-          brokerName: brokerName.trim(),
-          fromCity: fromCity.trim(),
-          toCity: toCity.trim(),
-          weightMt: Number(hireWeightMt || nettWeight || 0),
-          ratePerUnit: Number(hireRatePerUnit || 0),
-          rateMode: hireRateMode,
-          hasMultiAdvance: cappedAdvs.length > 1,
-          advances: cappedAdvs,
-          hireAmount: effectiveHireGross,
-          advancePaid: totalMultiAdvancePaid,
-          extraAdvanceAmt: Number(extraAdvanceAmt || 0),
-          loadingCharge: Number(hireLoadingCharge || 0),
-          unloadingCharge: Number(hireUnloadingCharge || 0),
-          parkingCharge: Number(hireParkingCharge || 0),
-          kataCharge: Number(hireKataCharge || 0),
-          detentionDays: Number(detentionDays || 0),
-          detentionCharge: effectiveDetentionCharge,
-          shortageCharge: Number(hireShortageCharge || 0),
-          damageCharge: Number(hireDamageCharge || 0),
-          tdsRatePct: Number(tdsRatePct || 0),
-          tdsAmount: effectiveTdsAmt,
-          receiptChallanNo: receiptChallanNo.trim(),
-          receiptChallanDate: receiptChallanDate || '',
-          balancePayable: hireNetSummary.balancePayable,
-          podReceived,
-          podReceiveDate: podReceived ? podReceiveDate || todayISO() : '',
-          podRemarks: podRemarks.trim(),
-          balancePaid: false,
-          remarks: hireRemarks.trim(),
-          branchCode: activeBranchCode,
-          createdByStaff: activeStaffCode,
-          ownerUid,
-        };
-        await upsertDocument('lorry_hires', lhId, lhPayload, !editingHireId);
-      }
+        // 3. Save Band 2 (Staff Details)
+        if (
+          includeStaffSection &&
+          staffName.trim() &&
+          (Number(staffAmount || 0) > 0 || Number(challanAmt || 0) > 0 || Number(travellingAmt || 0) > 0 || Number(miscAmt || 0) > 0)
+        ) {
+          const scId = editingStaffId || makeSafeDocId('comm');
+          const scPayload: Record<string, unknown> = {
+            entryDate: docDate,
+            financialYear: fyNorm,
+            division: divisionMode,
+            staffName: staffName.trim(),
+            staffBankAccount: staffBankAccount.trim(),
+            staffUpiId: staffUpiId.trim(),
+            challanNo: docNo.trim(),
+            truckNo: cnTruckValue,
+            wheelType,
+            entryType: staffEntryType,
+            commissionRate: wheelRates[wheelType] || 0,
+            challanAmt: Number(challanAmt || 0),
+            travellingAmt: Number(travellingAmt || 0),
+            miscAmt: Number(miscAmt || 0),
+            amount: Number(staffAmount || 0),
+            paymentMode: staffPayMode,
+            advanceDate: staffAdvanceDate || '',
+            monthlyPaidDate: staffMonthlyPaidDate || '',
+            settledZeroFlag: Boolean(staffSettledZero || staffMonthlyPaidDate),
+            remarks: staffRemarks.trim(),
+            multiAdvances: multiAdvances.slice(0, 50),
+            multiPaidReturns: multiPaidReturns.slice(0, 50),
+            multiBalanceDates: multiBalanceDates.slice(0, 50),
+            branchCode: activeBranchCode,
+            createdByStaff: activeStaffCode,
+            ownerUid,
+          };
+          await upsertDocument('staff_commissions', scId, scPayload, !editingStaffId);
+        }
 
-      // 4. Save Staff Commission / Advance Ledger (if enabled & amount > 0)
-      if (includeStaffSection && staffName.trim() && Number(staffAmount || 0) > 0) {
-        const scId = editingStaffId || makeSafeDocId('comm');
-        const scPayload: Record<string, unknown> = {
-          entryDate: docDate,
-          financialYear: fyNorm,
-          division: divisionMode,
-          staffName: staffName.trim(),
-          staffBankAccount: staffBankAccount.trim(),
-          staffUpiId: staffUpiId.trim(),
-          challanNo: docNo.trim(),
-          truckNo: cnTruckValue,
-          wheelType,
-          entryType: staffEntryType,
-          commissionRate: wheelRates[wheelType] || 0,
-          travellingAmt: Number(travellingAmt || 0),
-          miscAmt: Number(miscAmt || 0),
-          amount: Number(staffAmount || 0),
-          paymentMode: staffPayMode,
-          remarks: staffRemarks.trim(),
-          multiAdvances: multiAdvances.slice(0, 50),
-          multiPaidReturns: multiPaidReturns.slice(0, 50),
-          multiBalanceDates: multiBalanceDates.slice(0, 50),
+        await logBranchActivity({
+          action: editingCnId || editingDocketId ? 'Updated Bilty & Lorry Sheet' : 'Saved Bilty & Lorry Sheet',
+          module: `Bilty Master (${divisionMode})`,
+          docRefCode: docNo.trim(),
+          summary: `${docNo.trim()} · ${consignorName.trim()} → ${toCity.trim()} · ${showFreightOnPrint ? `Freight ₹${formatINR(computedCnFreight)}` : 'As Agreed'}`,
+          staffCode: activeStaffCode,
+          staffName: activeStaffName,
           branchCode: activeBranchCode,
-          createdByStaff: activeStaffCode,
           ownerUid,
-        };
-        await upsertDocument('staff_commissions', scId, scPayload, !editingStaffId);
-      }
+        });
 
-      await logBranchActivity({
-        action: editingCnId || editingDocketId ? 'Updated Master Entry Sheet' : 'Saved Master Entry Sheet',
-        module: `All-in-One (${divisionMode})`,
-        docRefCode: docNo.trim(),
-        summary: `${docNo.trim()} · ${consignorName.trim()} -> ${effectivePartyForBill} · Freight ₹${formatINR(computedCnFreight)}`,
-        staffCode: activeStaffCode,
-        staffName: activeStaffName,
-        branchCode: activeBranchCode,
+        playVerifiedBeep();
+
+        if (afterAction === 'pdf') {
+          if (savedCnObj) {
+            const pdf = await generateLR3CopyPDF(savedCnObj, company, 'l');
+            onPreviewPdf(pdf, 'LR Copy');
+          } else if (savedDocketObj) {
+            const pdf = await generateLogisticsDocketPDF(savedDocketObj, company, 'l');
+            onPreviewPdf(pdf, 'Docket_LR');
+          }
+          resetFormToBlank();
+          setStatusToast('Bilty & Lorry Master Sheet saved & LR PDF opened.');
+        } else if (afterAction === 'stay') {
+          setStatusToast(`Saved ${docNo.trim()} & linked Lorry Hire / Staff records cleanly.`);
+        } else {
+          resetFormToBlank();
+          onExitToDashboard();
+        }
+      } finally {
+        setSaving(false);
+      }
+    },
+    [
+      readOnly,
+      saveConfirmYN,
+      docNo,
+      consignorName,
+      fromCity,
+      toCity,
+      activeFy,
+      hasVehicleNo,
+      truckNo,
+      isFtl,
+      editingCnId,
+      buildCurrentCnSnapshot,
+      consignments,
+      editingDocketId,
+      divisionMeta.idPrefix,
+      logisticsDockets,
+      docDate,
+      billedAtBranch,
+      docketDeliveryMode,
+      payBasis,
+      consignorAddress,
+      consignorGstin,
+      consigneeName,
+      consigneeAddress,
+      consigneeGstin,
+      billingPartyName,
+      packages,
+      packageMode,
+      particulars,
+      nettWeight,
+      chargedWeight,
+      rateMode,
+      ratePerUnit,
+      baseFreight,
+      computedCnFreight,
+      otherCharge,
+      gstPaidByCode,
+      ewayBillNo,
+      ewayBillValidUpto,
+      valueOfGoods,
+      podReceived,
+      cnRemarks,
+      activeBranchCode,
+      activeStaffCode,
+      ownerUid,
+      includeHireSection,
+      effectiveHireGross,
+      totalMultiAdvancePaid,
+      totalPay1To12Paid,
+      editingHireId,
+      hireAdvances,
+      payInstallments,
+      divisionMode,
+      ownerName,
+      brokerName,
+      hireWeightMt,
+      hireRatePerUnit,
+      hireRateMode,
+      hasMultiAdvance,
+      extraAdvanceAmt,
+      hireLoadingCharge,
+      hireUnloadingCharge,
+      hireParkingCharge,
+      hireKataCharge,
+      detentionFromDate,
+      detentionToDate,
+      detentionDays,
+      effectiveDetentionCharge,
+      hireShortageCharge,
+      hireDamageCharge,
+      tdsRatePct,
+      effectiveTdsAmt,
+      receiptChallanNo,
+      receiptChallanDate,
+      netPaymentDueAfterPay12,
+      advExDate,
+      podReceiveDate,
+      podRemarks,
+      hireRemarks,
+      includeStaffSection,
+      staffName,
+      staffAmount,
+      challanAmt,
+      travellingAmt,
+      miscAmt,
+      editingStaffId,
+      staffBankAccount,
+      staffUpiId,
+      wheelType,
+      staffEntryType,
+      wheelRates,
+      staffPayMode,
+      staffAdvanceDate,
+      staffMonthlyPaidDate,
+      staffSettledZero,
+      staffRemarks,
+      multiAdvances,
+      multiPaidReturns,
+      multiBalanceDates,
+      activeStaffName,
+      showFreightOnPrint,
+      company,
+      onPreviewPdf,
+      resetFormToBlank,
+      onExitToDashboard,
+    ]
+  );
+
+  // Connect slim header "Save" button via custom event
+  useEffect(() => {
+    const handler = () => {
+      void handleSaveCompleteSheet('stay');
+    };
+    window.addEventListener('drc:form-save', handler);
+    return () => window.removeEventListener('drc:form-save', handler);
+  }, [handleSaveCompleteSheet]);
+
+  // Inline LR Quick Actions
+  const handleInlineLrPdf = async (action: 'preview' | 'print') => {
+    if (isFtl) {
+      const snap = buildCurrentCnSnapshot();
+      const pdf = await generateLR3CopyPDF(snap, company, 'l');
+      if (action === 'print') printPdfDirect(pdf);
+      else onPreviewPdf(pdf, 'LR Copy');
+    } else {
+      const docketMock: LogisticsDocket = {
+        id: editingDocketId || 'preview_dkt',
+        docketNo: docNo.trim() || 'DRAFT',
+        docketDate: docDate,
+        financialYear: normalizeFyLabel(activeFy),
+        billedAtBranch,
+        originBranch: fromCity.trim() || billedAtBranch,
+        destBranch: toCity.trim() || billedAtBranch,
+        deliveryMode: docketDeliveryMode,
+        payMode: payBasis,
+        consignorName: consignorName.trim() || 'Consignor',
+        consignorAddress,
+        consignorGstin,
+        consigneeName: consigneeName.trim() || 'Consignee',
+        consigneeAddress,
+        consigneeGstin,
+        billingPartyName: billingPartyName.trim() || consignorName.trim(),
+        packages: Number(packages || 1),
+        packingType: packageMode,
+        goodsDesc: particulars,
+        actualWeightKg: Number(nettWeight || 0),
+        chargedWeightKg: Number(chargedWeight || nettWeight || 0),
+        rateBasis: 'Fixed',
+        ratePerUnit: Number(ratePerUnit || 0),
+        baseFreight: computedCnFreight,
+        gstRate: 0,
+        cgstAmt: 0,
+        sgstAmt: 0,
+        igstAmt: 0,
+        totalAmount: computedCnFreight,
+        stockStage: 'Origin Godown',
+        billed: false,
         ownerUid,
-      });
+      };
+      const pdf = await generateLogisticsDocketPDF(docketMock, company, 'l');
+      if (action === 'print') printPdfDirect(pdf);
+      else onPreviewPdf(pdf, 'Docket_LR');
+    }
+  };
 
+  const handleScanPhysicalLr = async (e: React.ChangeEvent<HTMLInputElement>) => {
+    const file = e.target.files?.[0];
+    if (!file) return;
+    const uploadCheck = validateSafeUploadFile(file, 'media_docs');
+    if (!uploadCheck.valid) {
+      playAlertBeep();
+      setStatusToast(uploadCheck.reason || 'Unsupported scan file blocked by DRC Security.');
+      e.target.value = '';
+      return;
+    }
+    try {
+      const res = await compressComplianceFileToDataUrl(file);
+      setScannedLrDataUrl(res.dataUrl);
+      setStatusToast(`Scanned Physical LR / POD compressed (${res.sizeKB} KB) & attached to CN.`);
       playVerifiedBeep();
-
-      if (afterAction === 'pdf') {
-        if (savedInvoiceObj) {
-          const pdf = await generateInvoicePDF(savedInvoiceObj, company, true, 'p', 1);
-          onPreviewPdf(pdf, 'Bills_Invoices');
-        } else if (savedLogiInvoiceObj) {
-          const pdf = await generateLogisticsInvoicePDF(savedLogiInvoiceObj, company, 'p');
-          onPreviewPdf(pdf, 'Logistics_Invoices_CN_DN');
-        } else if (savedCnObj) {
-          const pdf = await generateLR3CopyPDF(savedCnObj, company, 'l');
-          onPreviewPdf(pdf, 'LR Copy');
-        } else if (savedDocketObj) {
-          const pdf = await generateLogisticsDocketPDF(savedDocketObj, company, 'l');
-          onPreviewPdf(pdf, 'Docket_LR');
-        }
-        resetFormToBlank();
-        setStatusToast('Complete sheet saved & PDF opened.');
-      } else {
-        resetFormToBlank();
-        onExitToDashboard();
-      }
+    } catch {
+      setStatusToast('Could not read scanned file.');
     } finally {
-      setSaving(false);
+      e.target.value = '';
+    }
+  };
+
+  const handleShareLr = (channel: 'whatsapp' | 'email') => {
+    const freightLine = showFreightOnPrint
+      ? `Freight: Rs. ${formatINR(computedCnFreight)}`
+      : 'Freight: As Agreed';
+    const text = [
+      `${company.companyName} — ${divisionMeta.shortLabel} Bilty / CN`,
+      `CN No: ${docNo} | Date: ${formatDateDDMMYYYY(docDate)}`,
+      `Route: ${fromCity} -> ${toCity} (${billedAtBranch})`,
+      `Consignor: ${consignorName}`,
+      `Consignee: ${consigneeName}`,
+      hasVehicleNo && truckNo ? `Truck: ${truckNo} | Driver: ${driverName || '-'}` : '',
+      `${packages} ${packageMode} · ${particulars} · Wt: ${nettWeight} MT`,
+      ewayBillNo ? `EWB No: ${ewayBillNo} (Valid: ${ewayBillValidUpto || '-'})` : '',
+      freightLine,
+    ]
+      .filter(Boolean)
+      .join('\n');
+
+    if (channel === 'whatsapp') {
+      triggerExternalShareLink(buildWhatsAppShareHref({ message: text }));
+    } else {
+      triggerExternalShareLink(
+        buildEmailShareHref({
+          email: company.email || 'drc.kolkata1@gmail.com',
+          subject: `LR / Bilty ${docNo} (${fromCity} -> ${toCity})`,
+          body: text,
+        })
+      );
     }
   };
 
@@ -1105,12 +1530,14 @@ export const AllInOneEntrySheet: React.FC<AllInOneEntrySheetProps> = ({
             truckNo: cn.truckNo || 'UNASSIGNED',
             driverName: cn.driverName || '-',
             cnFreight: Number(cn.totalFreight || 0),
+            showFreightOnPrint: cn.showFreightOnPrint !== false,
             hireGross: Number(lh?.hireAmount || 0),
             hireBalance: Number(lh?.balancePayable || 0),
             podReceived: Boolean(lh?.podReceived),
             staffName: sc?.staffName || '-',
             staffAmount: Number(sc?.amount || 0),
-            billNo: inv?.invoiceNo || (cn.billed ? 'Billed' : 'Unbilled'),
+            staffSettledZero: Boolean(sc?.settledZeroFlag || sc?.monthlyPaidDate),
+            billNo: inv?.invoiceNo || (cn.billed ? 'Billed' : 'Pending Billing Tab'),
             billTotal: Number(inv?.grandTotal || 0),
             billBalance: invBal,
             cnRecord: cn,
@@ -1152,12 +1579,14 @@ export const AllInOneEntrySheet: React.FC<AllInOneEntrySheetProps> = ({
           truckNo: lh?.truckNo || '-',
           driverName: '-',
           cnFreight: Number(dk.totalAmount || 0),
+          showFreightOnPrint: true,
           hireGross: Number(lh?.hireAmount || 0),
           hireBalance: Number(lh?.balancePayable || 0),
           podReceived: Boolean(lh?.podReceived || dk.stockStage === 'Delivered'),
           staffName: sc?.staffName || '-',
           staffAmount: Number(sc?.amount || 0),
-          billNo: inv?.docNo || (dk.billed ? 'Billed' : 'Unbilled'),
+          staffSettledZero: Boolean(sc?.settledZeroFlag || sc?.monthlyPaidDate),
+          billNo: inv?.docNo || (dk.billed ? 'Billed' : 'Pending Billing Tab'),
           billTotal: Number(inv?.grandTotal || 0),
           billBalance: invBal,
           docketRecord: dk,
@@ -1167,6 +1596,18 @@ export const AllInOneEntrySheet: React.FC<AllInOneEntrySheetProps> = ({
         };
       });
   }, [isFtl, consignments, logisticsDockets, lorryHires, staffCommissions, invoices, logisticsInvoices]);
+
+  const findCnMatches = useMemo(() => {
+    const q = findCnQuery.trim().toLowerCase();
+    if (!q) return registerRows.slice(0, 12);
+    return registerRows
+      .filter((r) =>
+        `${r.docNo} ${r.truckNo} ${r.consignorName} ${r.consigneeName} ${r.route}`
+          .toLowerCase()
+          .includes(q)
+      )
+      .slice(0, 15);
+  }, [registerRows, findCnQuery]);
 
   const filteredRegisterRows = useMemo(() => {
     const q = registerSearch.trim().toLowerCase();
@@ -1178,25 +1619,105 @@ export const AllInOneEntrySheet: React.FC<AllInOneEntrySheetProps> = ({
     );
   }, [registerRows, registerSearch]);
 
+  // Band 2 Live Staff Chart Metrics (Date-Wise + Monthly + Yearly FY)
+  const staffChartStats = useMemo(() => {
+    const activeMonth = (docDate || todayISO()).slice(0, 7);
+    const activeDay = docDate || todayISO();
+    const list = staffCommissions.filter(
+      (s) =>
+        (!s.financialYear || normalizeFyLabel(s.financialYear) === normalizeFyLabel(activeFy)) &&
+        (staffChartFilter === 'ALL' ? true : s.entryType === staffChartFilter)
+    );
+    const sumRow = (s: StaffCommissionEntry) =>
+      Number(s.amount || 0) + Number(s.challanAmt || 0) + Number(s.travellingAmt || 0) + Number(s.miscAmt || 0);
+
+    const dayTotal = list.filter((s) => s.entryDate === activeDay).reduce((acc, s) => acc + sumRow(s), 0);
+    const monthTotal = list.filter((s) => (s.entryDate || '').startsWith(activeMonth)).reduce((acc, s) => acc + sumRow(s), 0);
+    const fyTotal = list.reduce((acc, s) => acc + sumRow(s), 0);
+
+    return {
+      rows: [...list].sort((a, b) => (b.entryDate || '').localeCompare(a.entryDate || '')),
+      dayTotal,
+      monthTotal,
+      fyTotal,
+      activeDay,
+      activeMonth,
+    };
+  }, [staffCommissions, activeFy, staffChartFilter, docDate]);
+
+  const buildStaffChartPdf = async (): Promise<GeneratedPdfResult> => {
+    return generateFoxproStatementPDF(
+      {
+        title: `STAFF DETAILS & COMMISSION CHART (${staffChartFilter})`,
+        subtitle: `FY: ${activeFy}  |  Day (${formatDateDDMMYYYY(staffChartStats.activeDay)}): Rs. ${formatINR(staffChartStats.dayTotal)}  |  Month: Rs. ${formatINR(staffChartStats.monthTotal)}`,
+        fileName: `Staff_Chart_${activeFy.replace(/\s+/g, '_')}.pdf`,
+        orientation: 'l',
+        summaryLines: [
+          { label: 'Date-Wise Total', value: `Rs. ${formatINR(staffChartStats.dayTotal)}` },
+          { label: 'Monthly Total', value: `Rs. ${formatINR(staffChartStats.monthTotal)}` },
+          { label: 'Yearly FY Total', value: `Rs. ${formatINR(staffChartStats.fyTotal)}` },
+        ],
+        columns: [
+          { label: 'DATE', widthPct: 10 },
+          { label: 'STAFF NAME', widthPct: 18 },
+          { label: 'CHALLAN / TRUCK', widthPct: 15 },
+          { label: 'TYPE / WHEELS', widthPct: 16 },
+          { label: 'RUPEES', widthPct: 10, align: 'right' },
+          { label: 'CHAL+TRV+MISC', widthPct: 15, align: 'right' },
+          { label: 'PAID STAMP', widthPct: 16 },
+        ],
+        rows: staffChartStats.rows.slice(0, 150).map((s) => {
+          const extras = Number(s.challanAmt || 0) + Number(s.travellingAmt || 0) + Number(s.miscAmt || 0);
+          const paidTag = s.settledZeroFlag || s.monthlyPaidDate ? `PAID (${s.monthlyPaidDate || 'Zero Due'})` : 'OPEN';
+          return {
+            line1: [
+              formatDateDDMMYYYY(s.entryDate),
+              s.staffName,
+              `${s.challanNo || '-'} / ${s.truckNo || '-'}`,
+              `${s.entryType} (${s.wheelType})`,
+              formatINR(s.amount),
+              formatINR(extras),
+              paidTag,
+            ],
+          };
+        }),
+        totalsLabel: 'YEARLY FY TOTAL :',
+        totalsLine1: ['', '', '', '', formatINR(staffChartStats.fyTotal), '', ''],
+        totalAmountForWords: staffChartStats.fyTotal,
+      },
+      company
+    );
+  };
+
   const loadRowForEdit = (row: UnifiedRegisterRow) => {
     resetFormToBlank();
     if (row.cnRecord) {
       const cn = row.cnRecord;
       setEditingCnId(cn.id);
+      setBranchShort(cn.branchShort || 'KOL');
+      setRefCnNo(cn.refCnNo || '');
       setDocNo(cn.cnNo);
       setDocDate(cn.cnDate);
       setBilledAtBranch(cn.billedAtBranch || 'Kolkata');
+      setTransportMode((cn.transportMode as 'Road' | 'Rail' | 'Air') || 'Road');
+      setBookingBasis((cn.bookingBasis as 'Party' | 'Franchise' | 'Cash') || 'Party');
+      setPayBasis((cn.payBasis as 'TBB' | 'Paid' | 'To-Pay') || 'TBB');
+      setDeliverAt(cn.deliverAt || '');
+      setIsChallanAttached(Boolean(cn.isChallanAttached));
       setCreditDays(cn.creditDays || 15);
+      setBillingPartyName(cn.billingPartyName || '');
       setConsignorName(cn.consignorName);
       setConsignorAddress(cn.consignorAddress || '');
       setConsignorGstin(cn.consignorGstin || '');
+      setConsignorHsn(cn.consignorHsn || '');
       setConsigneeName(cn.consigneeName);
       setConsigneeAddress(cn.consigneeAddress || '');
       setConsigneeGstin(cn.consigneeGstin || '');
+      setConsigneeHsn(cn.consigneeHsn || '');
       setFromCity(cn.fromCity);
       setToCity(cn.toCity);
       setHasVehicleNo(cn.hasVehicleNo !== false && cn.truckNo !== 'UNASSIGNED');
-      setHasMultiVehicle(Boolean(cn.hasMultiVehicle));
+      setHasMultiVehicle(Boolean(cn.hasMultiVehicle || (cn.extraVehicles && cn.extraVehicles.length > 0)));
       setTruckNo(cn.truckNo === 'UNASSIGNED' ? '' : cn.truckNo);
       setExtraVehicles(cn.extraVehicles || []);
       setDriverName(cn.driverName || '');
@@ -1206,17 +1727,43 @@ export const AllInOneEntrySheet: React.FC<AllInOneEntrySheetProps> = ({
       setPackages(cn.packages || '1');
       setPackageMode(cn.packageMode || 'PACKAGES');
       setParticulars(cn.particulars || '');
+      setHasMultiGoods(Boolean(cn.multiGoodsItems && cn.multiGoodsItems.length > 0));
+      setMultiGoodsItems(cn.multiGoodsItems || []);
+      setTaxInvNo(cn.taxInvNo || '');
+      setTaxInvDate(cn.taxInvDate || '');
+      setValueOfGoods(String(cn.valueOfGoods || 0));
+      setHasMultiTaxInv(Boolean(cn.extraTaxInvoices && cn.extraTaxInvoices.length > 0));
+      setExtraTaxInvoices(cn.extraTaxInvoices || []);
+      setEwayBillNo(cn.ewayBillNo || '');
+      setEwayBillDate(cn.ewayBillDate || '');
+      setEwayBillValidUpto(cn.ewayBillValidUpto || '');
+      setHasMultiEwb(Boolean(cn.hasMultiEwayBill || (cn.extraEwayBills && cn.extraEwayBills.length > 0)));
+      setExtraEwayBills(cn.extraEwayBills || []);
+      setEwbExtensions(cn.ewbExtensions || []);
       setNettWeight(String(cn.nettWeight || 0));
       setGrossWeight(String(cn.grossWeight || 0));
       setChargedWeight(String(cn.chargedWeight || cn.nettWeight || 0));
+      setHasMultiWeight(Boolean(cn.multiWeights && cn.multiWeights.length > 0));
+      setMultiWeights(cn.multiWeights || []);
       setRateMode(cn.rateMode || 'Fixed');
       setRatePerUnit(String(cn.ratePerUnit || 0));
       setBaseFreight(String(Math.max(0, Number(cn.totalFreight || 0) - Number(cn.otherCharge || 0))));
       setOtherCharge(String(cn.otherCharge || 0));
+      setManualFreightOverride(cn.totalFreight ? String(cn.totalFreight) : null);
+      setShowFreightOnPrint(cn.showFreightOnPrint !== false);
+      setInsuranceCo(cn.insuranceCo || '');
+      setInsurancePolicyNo(cn.insurancePolicyNo || '');
+      setInsurancePolicyDate(cn.insurancePolicyDate || '');
+      setInsuranceAmount(String(cn.insuranceAmount || 0));
+      setHasMultiInsurance(Boolean(cn.extraInsurances && cn.extraInsurances.length > 0));
+      setExtraInsurances(cn.extraInsurances || []);
       setDeliveryModeCode(cn.deliveryModeCode || 'P');
       setGstPaidByCode(cn.gstPaidByCode || 'E');
       setRiskTakenBy(cn.riskTakenBy || 'O');
+      setBillAdjustmentDetails(cn.billAdjustmentDetails || '');
+      setAddlDetailsEnabled(Boolean(cn.addlDetailsEnabled));
       setCnRemarks(cn.remarks || '');
+      setScannedLrDataUrl(cn.scannedLrDataUrl || '');
     } else if (row.docketRecord) {
       const dk = row.docketRecord;
       setEditingDocketId(dk.id);
@@ -1232,7 +1779,7 @@ export const AllInOneEntrySheet: React.FC<AllInOneEntrySheetProps> = ({
       setFromCity(dk.originBranch);
       setToCity(dk.destBranch);
       setDocketDeliveryMode(dk.deliveryMode);
-      setDocketPayMode(dk.payMode);
+      setPayBasis(dk.payMode);
       setPackages(String(dk.packages || 1));
       setPackageMode(dk.packingType || 'PACKAGES');
       setParticulars(dk.goodsDesc || '');
@@ -1241,6 +1788,9 @@ export const AllInOneEntrySheet: React.FC<AllInOneEntrySheetProps> = ({
       setRatePerUnit(String(dk.ratePerUnit || 0));
       setBaseFreight(String(dk.baseFreight || dk.totalAmount || 0));
       setOtherCharge(String(dk.docketCharge || 0));
+      setEwayBillNo(dk.ewayBillNo || '');
+      setEwayBillValidUpto(dk.ewayBillValidUpto || '');
+      setValueOfGoods(String(dk.valueOfGoods || 0));
       setCnRemarks(dk.remarks || '');
     }
 
@@ -1254,6 +1804,8 @@ export const AllInOneEntrySheet: React.FC<AllInOneEntrySheetProps> = ({
       setHireRateMode(lh.rateMode === 'Per MT' ? 'Per MT' : 'Fixed');
       setHireRatePerUnit(String(lh.ratePerUnit || 0));
       setHireAmount(String(lh.hireAmount || 0));
+      setDetentionFromDate(lh.detentionFromDate || '');
+      setDetentionToDate(lh.detentionToDate || '');
       setDetentionDays(String(lh.detentionDays || 0));
       setHireLoadingCharge(String(lh.loadingCharge || 0));
       setHireUnloadingCharge(String(lh.unloadingCharge || 0));
@@ -1266,7 +1818,11 @@ export const AllInOneEntrySheet: React.FC<AllInOneEntrySheetProps> = ({
       setReceiptChallanNo(lh.receiptChallanNo || '');
       setReceiptChallanDate(lh.receiptChallanDate || '');
       setHireRemarks(lh.remarks || '');
+      setHasMultiAdvance(Boolean(lh.hasMultiAdvance || (lh.advances?.length || 0) > 1));
       setHireAdvances(lh.advances?.length ? lh.advances : [DEFAULT_ADV_ROW()]);
+      setPayInstallments(mergePay12Rows(lh.payInstallments));
+      setAdvExDate(lh.advExDate || '');
+      setPayTdsOverride(lh.payTdsAmt ? String(lh.payTdsAmt) : '');
       setPodReceived(Boolean(lh.podReceived));
       setPodReceiveDate(lh.podReceiveDate || '');
       setPodRemarks(lh.podRemarks || '');
@@ -1282,77 +1838,27 @@ export const AllInOneEntrySheet: React.FC<AllInOneEntrySheetProps> = ({
       setStaffEntryType(sc.entryType);
       setWheelType(sc.wheelType || '10-Wheeler');
       setStaffAmount(String(sc.amount || 0));
+      setChallanAmt(String(sc.challanAmt || 0));
       setTravellingAmt(String(sc.travellingAmt || 0));
       setMiscAmt(String(sc.miscAmt || 0));
       setStaffPayMode(sc.paymentMode || 'Cash');
+      setStaffAdvanceDate(sc.advanceDate || '');
+      setStaffMonthlyPaidDate(sc.monthlyPaidDate || '');
+      setStaffSettledZero(Boolean(sc.settledZeroFlag || sc.monthlyPaidDate));
       setStaffRemarks(sc.remarks || '');
       setMultiAdvances(sc.multiAdvances || []);
       setMultiPaidReturns(sc.multiPaidReturns || []);
       setMultiBalanceDates(sc.multiBalanceDates || []);
     }
 
-    if (row.invoiceRecord) {
-      const inv = row.invoiceRecord;
-      setEditingInvoiceId(inv.id);
-      setIncludeBillSection(true);
-      setBillId(inv.billId || '');
-      setInvoiceNo(inv.invoiceNo);
-      setBilledByCode(inv.billedByCode === 'P' ? 'P' : 'B');
-      setBillDate(inv.invoiceDate);
-      setDueDate(inv.dueDate || addDaysISO(inv.invoiceDate, 15));
-      setBillingCountry((inv.billingCountry as 'India' | 'Nepal' | 'Bangladesh' | 'Bhutan') || 'India');
-      setBillPartyName(inv.partyName);
-      setBillPartyGstin(inv.partyGstin || '');
-      setBillPartyPan(inv.partyPan || '');
-      setBillPartyAddress(inv.partyAddress || '');
-      setGstPaidByBill((inv.gstPaidBy as 'Consignor' | 'Consignee' | 'Transporter') || 'Consignee');
-      setInterstateBill(Boolean(inv.interstate));
-      setInsuranceCharge(String(inv.insuranceCharge || 0));
-      setCollCharge(String(inv.collCharge || 0));
-      setBillLoadingCharge(String(inv.loadingCharge || 0));
-      setBillUnloadingCharge(String(inv.unloadingCharges || 0));
-      setSurchargeAmt(String(inv.surchargeAmt || 0));
-      setDetentionBillCharge(String(inv.detentionCharges || 0));
-      setStCharge(String(inv.stCharges || 0));
-      setFumigationCharge(String(inv.fumigationCharge || 0));
-      setExtraBillCharge(String(inv.extraCharge || 0));
-      setAdvanceReceived(String(inv.advanceReceived || 0));
-      setAdvanceMode(inv.advanceMode || 'NEFT');
-      setFullPaymentReceived(inv.status === 'Paid');
-      setFullPaymentMode(inv.fullPaymentMode || 'NEFT');
-      setBillRemarks(inv.remarks || '');
-      setBillFootnote(inv.billFootnote || '');
-      setAdditionalNotes(inv.additionalNotes || '');
-    } else if (row.logiInvoiceRecord) {
-      const inv = row.logiInvoiceRecord;
-      setEditingInvoiceId(inv.id);
-      setIncludeBillSection(true);
-      setInvoiceNo(inv.docNo);
-      setBillDate(inv.docDate);
-      setBillPartyName(inv.partyName);
-      setBillPartyGstin(inv.partyGstin || '');
-      setBillPartyPan(inv.partyPan || '');
-      setBillPartyAddress(inv.partyAddress || '');
-      setInterstateBill(Boolean(inv.interstate));
-      setFullPaymentReceived(inv.status === 'Paid');
-      setBillRemarks(inv.remarks || '');
-    }
-
-    setStatusToast(`Loaded ${row.docNo} & linked records for Edit / Rectify.`);
+    setFindCnFocused(false);
+    setStatusToast(`Loaded CN/LR ${row.docNo} & linked Lorry Hire / Staff records for editing.`);
     topFormRef.current?.scrollIntoView({ behavior: 'smooth', block: 'start' });
   };
 
   const buildPdfForRow = async (
     row: UnifiedRegisterRow
   ): Promise<{ pdf: GeneratedPdfResult; folder: AnyDriveFolderName } | null> => {
-    if (row.invoiceRecord) {
-      const pdf = await generateInvoicePDF(row.invoiceRecord, company, true, 'p', 1);
-      return { pdf, folder: 'Bills_Invoices' };
-    }
-    if (row.logiInvoiceRecord) {
-      const pdf = await generateLogisticsInvoicePDF(row.logiInvoiceRecord, company, 'p');
-      return { pdf, folder: 'Logistics_Invoices_CN_DN' };
-    }
     if (row.cnRecord) {
       const pdf = await generateLR3CopyPDF(row.cnRecord, company, 'l');
       return { pdf, folder: 'LR Copy' };
@@ -1364,62 +1870,87 @@ export const AllInOneEntrySheet: React.FC<AllInOneEntrySheetProps> = ({
     return null;
   };
 
-  const handleRowPdfPreview = async (row: UnifiedRegisterRow) => {
-    const res = await buildPdfForRow(row);
-    if (res) {
-      onPreviewPdf(res.pdf, res.folder);
-    }
-  };
-
-  const handleRowAutoPrint = async (row: UnifiedRegisterRow) => {
-    const res = await buildPdfForRow(row);
-    if (res) {
-      printPdfDirect(res.pdf);
-    }
-  };
-
   return (
     <div ref={topFormRef} className="space-y-4">
-      {/* Top Sticky Master Bar */}
+      {/* TOP MASTER STICKY BAR + FIND CN/LR */}
       <div className="bg-gradient-to-r from-[#0B3B8C] via-[#0D47A1] to-[#1565C0] text-white rounded-xl p-3.5 shadow-md flex flex-wrap items-center justify-between gap-3">
-        <div className="flex items-center gap-3 min-w-0">
+        <div className="flex items-center gap-2.5 min-w-0">
           <ClipboardList className="w-6 h-6 text-amber-300 shrink-0" />
           <div className="min-w-0">
             <h2 className="text-sm sm:text-base font-extrabold tracking-tight truncate">
-              All-in-One Complete Entry Sheet ({divisionMeta.shortLabel} · {activeFy})
+              A. BILTY &amp; LORRY MASTER SHEET ({divisionMeta.shortLabel} · {activeFy})
             </h2>
             <p className="text-[11px] text-blue-100 truncate">
-              Single continuous sheet: CN/Docket → Lorry Hire &amp; Multi-Adv → Staff Ledger (M) → Party Bill &amp; Live Register
+              FoxPro Bilty Entry + Multi [Y/N] Extensions → Band 1 Lorry Hire/Broker → Band 2 Staff Chart → Band 3 Pay 1–12
             </p>
           </div>
         </div>
 
         <div className="flex flex-wrap items-center gap-2">
+          {/* Find CN / LR Instant Lookup */}
+          <div className="relative">
+            <Search className="w-3.5 h-3.5 text-blue-900 absolute left-2.5 top-2 pointer-events-none" />
+            <input
+              type="text"
+              value={findCnQuery}
+              onFocus={() => setFindCnFocused(true)}
+              onBlur={() => setTimeout(() => setFindCnFocused(false), 180)}
+              onChange={(e) => {
+                setFindCnQuery(e.target.value);
+                setFindCnFocused(true);
+              }}
+              placeholder="🔍 Find CN / LR No..."
+              className="pl-8 pr-3 py-1.5 rounded-lg bg-amber-50 text-slate-900 placeholder:text-slate-600 text-xs font-bold w-48 sm:w-56 border border-amber-300 focus:outline-none"
+            />
+            {findCnFocused && findCnMatches.length > 0 && (
+              <div className="absolute right-0 mt-1 w-80 max-h-64 overflow-y-auto rounded-xl bg-white text-slate-900 border border-slate-300 shadow-2xl z-50 divide-y divide-slate-100">
+                {findCnMatches.map((m) => (
+                  <button
+                    key={m.id}
+                    type="button"
+                    onMouseDown={() => loadRowForEdit(m)}
+                    className="w-full text-left px-3 py-2 hover:bg-blue-50 text-xs cursor-pointer"
+                  >
+                    <div className="flex items-center justify-between font-extrabold text-[#0D47A1]">
+                      <span className="font-mono-num">{m.docNo}</span>
+                      <span className="text-[10px] font-mono-num text-slate-500">
+                        {formatDateDDMMYYYY(m.docDate)}
+                      </span>
+                    </div>
+                    <div className="text-[11px] text-slate-700 truncate">
+                      {m.consignorName} → {m.consigneeName} · {m.truckNo}
+                    </div>
+                  </button>
+                ))}
+              </div>
+            )}
+          </div>
+
           <button
             type="button"
             onClick={resetFormToBlank}
             className="inline-flex items-center gap-1 px-2.5 py-1.5 rounded-lg bg-white/15 hover:bg-white/25 text-white text-xs font-bold cursor-pointer"
           >
             <RotateCcw className="w-3.5 h-3.5" />
-            <span>New Blank Sheet</span>
+            <span>New Sheet</span>
           </button>
           <button
             type="button"
             disabled={saving || readOnly}
-            onClick={() => void saveCompleteSheet('pdf')}
+            onClick={() => void handleSaveCompleteSheet('pdf')}
             className="inline-flex items-center gap-1.5 px-3 py-1.5 rounded-lg bg-amber-400 hover:bg-amber-300 text-slate-950 text-xs font-extrabold shadow-sm cursor-pointer disabled:opacity-50"
           >
             <Printer className="w-3.5 h-3.5" />
-            <span>{saving ? 'Saving...' : 'Save & PDF Preview'}</span>
+            <span>{saving ? 'Saving...' : 'Save & LR PDF'}</span>
           </button>
           <button
             type="button"
             disabled={saving || readOnly}
-            onClick={() => void saveCompleteSheet('exit')}
+            onClick={() => void handleSaveCompleteSheet('exit')}
             className="inline-flex items-center gap-1.5 px-3.5 py-1.5 rounded-lg bg-emerald-500 hover:bg-emerald-400 text-slate-950 text-xs font-extrabold shadow-sm cursor-pointer disabled:opacity-50"
           >
             <Save className="w-3.5 h-3.5" />
-            <span>{saving ? 'Saving...' : 'Save Complete Sheet & Exit'}</span>
+            <span>{saving ? 'Saving...' : 'Save & Exit'}</span>
           </button>
         </div>
       </div>
@@ -1438,33 +1969,64 @@ export const AllInOneEntrySheet: React.FC<AllInOneEntrySheetProps> = ({
         </div>
       )}
 
-      {/* SECTION 1: CN / LR OR LOGISTICS DOCKET */}
-      <div className="bg-white rounded-xl border border-slate-300 shadow-sm overflow-visible">
-        <div className="bg-gradient-to-r from-[#0D47A1] to-[#1976D2] text-white px-4 py-2 rounded-t-xl flex flex-wrap items-center justify-between gap-2">
-          <div className="flex items-center gap-2 text-xs font-extrabold">
+      {/* ============================================================ */}
+      {/* TOP HALF: CLASSIC FOXPRO BILTY RECORDS ENTRY (NO INVOICE!) */}
+      {/* ============================================================ */}
+      <div className="bg-white rounded-xl border-2 border-[#0D47A1] shadow-sm overflow-visible">
+        <div className="bg-gradient-to-r from-[#0D47A1] to-[#1976D2] text-white px-4 py-2 rounded-t-lg flex flex-wrap items-center justify-between gap-2">
+          <div className="flex items-center gap-2 text-xs font-extrabold tracking-wide">
             <Layers className="w-4 h-4 text-amber-300" />
             <span>
-              SECTION 1 — {isFtl ? 'Consignment Note (CN / LR Bilty)' : `${divisionMeta.shortLabel} Docket / AWB`}
-              {(editingCnId || editingDocketId) && ' (Editing Mode)'}
+              CLASSIC FOXPRO — {isFtl ? 'BILTY RECORDS ENTRY (CN / LR)' : `${divisionMeta.shortLabel} DOCKET / LR ENTRY`}
+              {(editingCnId || editingDocketId) && ' [EDITING]'}
+            </span>
+            <span className="px-2 py-0.5 rounded bg-white/15 text-[10px] font-mono-num">
+              Last CN: {computedLastCnNo}
             </span>
           </div>
-          <div className="flex items-center gap-2 text-[11px] font-bold">
-            <span>Input Vehicle No.?</span>
-            <button
-              type="button"
-              onClick={() => setHasVehicleNo((v) => !v)}
-              className={`px-2.5 py-0.5 rounded font-extrabold cursor-pointer ${
-                hasVehicleNo ? 'bg-emerald-400 text-slate-950' : 'bg-slate-800 text-amber-300'
-              }`}
-            >
-              {hasVehicleNo ? 'Yes' : 'No'}
-            </button>
+
+          <div className="flex flex-wrap items-center gap-3 text-[11px] font-bold">
+            <div className="flex items-center gap-1.5">
+              <span>Show Freight on LR PDF:</span>
+              <button
+                type="button"
+                onClick={() => setShowFreightOnPrint((v) => !v)}
+                className={`px-2 py-0.5 rounded font-extrabold cursor-pointer ${
+                  showFreightOnPrint ? 'bg-emerald-400 text-slate-950' : 'bg-amber-300 text-slate-950'
+                }`}
+              >
+                {showFreightOnPrint ? 'YES (Show ₹)' : 'NO (As Agreed)'}
+              </button>
+            </div>
+            <div className="flex items-center gap-1.5">
+              <span>Input Vehicle No.?</span>
+              <button
+                type="button"
+                onClick={() => setHasVehicleNo((v) => !v)}
+                className={`px-2 py-0.5 rounded font-extrabold cursor-pointer ${
+                  hasVehicleNo ? 'bg-emerald-400 text-slate-950' : 'bg-slate-800 text-amber-300'
+                }`}
+              >
+                {hasVehicleNo ? 'YES' : 'NO'}
+              </button>
+            </div>
           </div>
         </div>
 
         <div className="p-4 space-y-3 text-xs">
-          <div className="grid grid-cols-1 sm:grid-cols-2 lg:grid-cols-5 gap-3">
+          {/* Row 1: FoxPro Header Strip */}
+          <div className="grid grid-cols-2 sm:grid-cols-4 lg:grid-cols-8 gap-2.5">
             <div>
+              <label className="block font-bold text-slate-700 mb-1">Branch Short</label>
+              <input
+                type="text"
+                value={branchShort}
+                onChange={(e) => setBranchShort(e.target.value.toUpperCase())}
+                placeholder="KOL"
+                className="w-full px-2 py-1.5 rounded border border-slate-300 font-mono-num font-bold"
+              />
+            </div>
+            <div className="col-span-2 sm:col-span-1 lg:col-span-2">
               <label className="block font-bold text-slate-700 mb-1">
                 {isFtl ? 'C/N (Bilty) No *' : 'Docket / AWB No *'}
               </label>
@@ -1472,7 +2034,17 @@ export const AllInOneEntrySheet: React.FC<AllInOneEntrySheetProps> = ({
                 type="text"
                 value={docNo}
                 onChange={(e) => setDocNo(e.target.value.toUpperCase())}
-                className="w-full px-2.5 py-1.5 rounded border border-slate-300 font-mono-num font-bold text-slate-900"
+                className="w-full px-2.5 py-1.5 rounded border border-slate-400 bg-amber-50/40 font-mono-num font-extrabold text-slate-950"
+              />
+            </div>
+            <div>
+              <label className="block font-bold text-slate-700 mb-1">Ref CN / Manual No</label>
+              <input
+                type="text"
+                value={refCnNo}
+                onChange={(e) => setRefCnNo(e.target.value.toUpperCase())}
+                placeholder="Optional Ref"
+                className="w-full px-2 py-1.5 rounded border border-slate-300 font-mono-num"
               />
             </div>
             <div>
@@ -1481,7 +2053,7 @@ export const AllInOneEntrySheet: React.FC<AllInOneEntrySheetProps> = ({
                 type="date"
                 value={docDate}
                 onChange={(e) => setDocDate(e.target.value)}
-                className="w-full px-2.5 py-1.5 rounded border border-slate-300 font-mono-num"
+                className="w-full px-2 py-1.5 rounded border border-slate-300 font-mono-num"
               />
             </div>
             <div>
@@ -1491,52 +2063,125 @@ export const AllInOneEntrySheet: React.FC<AllInOneEntrySheetProps> = ({
                 value={billedAtBranch}
                 onChange={setBilledAtBranch}
                 options={ALL_INDIA_BRANCH_OPTIONS}
-                placeholder="Select branch..."
+                placeholder="Branch..."
               />
             </div>
             <div>
-              <label className="block font-bold text-slate-700 mb-1">Credit Days</label>
-              <SearchableSelect
-                ariaLabel="Credit Days"
-                value={String(creditDays)}
-                onChange={(v) => {
-                  const n = Number(v || 15);
-                  setCreditDays(n);
-                  setDueDate(addDaysISO(billDate, n));
-                }}
-                options={creditDayPresets.map((d) => ({ value: String(d), label: `${d} Days` }))}
-              />
+              <label className="block font-bold text-slate-700 mb-1">Mode / Basis</label>
+              <div className="flex gap-1">
+                <select
+                  value={transportMode}
+                  onChange={(e) => setTransportMode(e.target.value as 'Road' | 'Rail' | 'Air')}
+                  className="w-1/2 px-1.5 py-1.5 rounded border border-slate-300 bg-white font-semibold"
+                >
+                  <option value="Road">Road</option>
+                  <option value="Rail">Rail</option>
+                  <option value="Air">Air</option>
+                </select>
+                <select
+                  value={bookingBasis}
+                  onChange={(e) => setBookingBasis(e.target.value as 'Party' | 'Franchise' | 'Cash')}
+                  className="w-1/2 px-1.5 py-1.5 rounded border border-slate-300 bg-white font-semibold"
+                >
+                  <option value="Party">Party</option>
+                  <option value="Franchise">Franchise</option>
+                  <option value="Cash">Cash</option>
+                </select>
+              </div>
             </div>
             <div>
-              <label className="block font-bold text-slate-700 mb-1">
-                {isFtl ? 'Total CN Freight (₹)' : 'Docket Pay Mode'}
-              </label>
-              {isFtl ? (
-                <div className="px-2.5 py-1.5 rounded bg-blue-50 border border-blue-200 font-mono-num font-extrabold text-[#0D47A1]">
-                  ₹ {formatINR(computedCnFreight)}
-                </div>
-              ) : (
-                <div className="flex gap-1">
-                  {(['TBB', 'Paid', 'To-Pay'] as const).map((pm) => (
-                    <button
-                      key={pm}
-                      type="button"
-                      onClick={() => setDocketPayMode(pm)}
-                      className={`flex-1 py-1.5 rounded text-[11px] font-extrabold cursor-pointer ${
-                        docketPayMode === pm ? 'bg-[#0F766E] text-white' : 'bg-slate-100 text-slate-700'
-                      }`}
-                    >
-                      {pm}
-                    </button>
-                  ))}
-                </div>
-              )}
+              <label className="block font-bold text-slate-700 mb-1">Pay Basis</label>
+              <select
+                value={payBasis}
+                onChange={(e) => setPayBasis(e.target.value as 'TBB' | 'Paid' | 'To-Pay')}
+                className="w-full px-2 py-1.5 rounded border border-slate-300 bg-white font-bold text-[#0D47A1]"
+              >
+                <option value="TBB">TBB (To Be Billed)</option>
+                <option value="Paid">Paid</option>
+                <option value="To-Pay">To-Pay</option>
+              </select>
             </div>
           </div>
 
-          <div className="grid grid-cols-1 lg:grid-cols-2 gap-3">
+          {/* Row 2: Deliver At, Challan Attached, Credit Days, Billing Customer Ref */}
+          <div className="grid grid-cols-1 sm:grid-cols-2 lg:grid-cols-5 gap-2.5 items-end">
             <div>
-              <label className="block font-bold text-slate-700 mb-1">Consignor *</label>
+              <label className="block font-bold text-slate-700 mb-1">Deliver At (Hub/Point)</label>
+              <input
+                type="text"
+                value={deliverAt}
+                onChange={(e) => setDeliverAt(e.target.value)}
+                placeholder="Door / Godown / Party Point"
+                className="w-full px-2.5 py-1.5 rounded border border-slate-300"
+              />
+            </div>
+            <div>
+              <label className="block font-bold text-slate-700 mb-1">Challan Attached [Y/N]</label>
+              <button
+                type="button"
+                onClick={() => setIsChallanAttached((v) => !v)}
+                className={`w-full py-1.5 px-3 rounded border font-extrabold cursor-pointer ${
+                  isChallanAttached
+                    ? 'bg-emerald-50 border-emerald-400 text-emerald-900'
+                    : 'bg-slate-50 border-slate-300 text-slate-700'
+                }`}
+              >
+                {isChallanAttached ? 'YES — Challan Attached' : 'NO — Separate'}
+              </button>
+            </div>
+            <div>
+              <label className="block font-bold text-slate-700 mb-1">Credit Days (Ref)</label>
+              <SearchableSelect
+                ariaLabel="Credit Days"
+                value={String(creditDays)}
+                onChange={(v) => setCreditDays(Number(v || 15))}
+                options={creditDayPresets.map((d) => ({ value: String(d), label: `${d} Days` }))}
+              />
+            </div>
+            <div className="lg:col-span-2">
+              <label className="block font-bold text-slate-700 mb-1">
+                TBB Billing Party Reference (Optional — Customers Only)
+              </label>
+              <RichEntityPicker<Party>
+                ariaLabel="Billing Customer Reference"
+                value={billingPartyName}
+                selectedId={selectedBillingPartyId}
+                onChangeText={(txt) => {
+                  setBillingPartyName(txt);
+                  setSelectedBillingPartyId('');
+                }}
+                onSelectEntity={(p) => {
+                  setBillingPartyName(p.name);
+                  setSelectedBillingPartyId(p.id);
+                }}
+                items={billingCustomerParties}
+                getId={(p) => p.id}
+                getValue={(p) => p.name}
+                getSearchText={(p) => `${p.name} ${p.gstin || ''} ${p.address || ''}`}
+                renderTitle={(p) => p.name}
+                renderBadge={(p) => p.partyType}
+                renderDetails={(p) => formatPartyDetailsLine(p)}
+                placeholder="Select TBB Customer (Actual GST Bill in Tab B)..."
+              />
+            </div>
+          </div>
+
+          {/* Row 3: Consignor & Consignee + HSN */}
+          <div className="grid grid-cols-1 lg:grid-cols-2 gap-3">
+            <div className="space-y-1.5">
+              <div className="flex items-center justify-between gap-2">
+                <label className="font-bold text-slate-700">Consignor *</label>
+                <div className="flex items-center gap-1">
+                  <span className="text-[10px] font-bold text-slate-500">HSN/SAC:</span>
+                  <input
+                    type="text"
+                    value={consignorHsn}
+                    onChange={(e) => setConsignorHsn(e.target.value)}
+                    placeholder="996511"
+                    className="w-24 px-1.5 py-0.5 rounded border border-slate-300 font-mono-num text-[11px]"
+                  />
+                </div>
+              </div>
               <RichEntityPicker<AnyPartyEntity>
                 ariaLabel="Consignor"
                 value={consignorName}
@@ -1566,10 +2211,29 @@ export const AllInOneEntrySheet: React.FC<AllInOneEntrySheetProps> = ({
                   return matched ? <EntityQuickPreviewCard kind="party" party={matched} compact /> : null;
                 })()}
               />
+              <GstinInputField
+                label="Consignor GSTIN (15-Char Checksum)"
+                value={consignorGstin}
+                onChange={setConsignorGstin}
+                compact
+                placeholder="Consignor GSTIN (Optional)"
+              />
             </div>
 
-            <div>
-              <label className="block font-bold text-slate-700 mb-1">Consignee *</label>
+            <div className="space-y-1.5">
+              <div className="flex items-center justify-between gap-2">
+                <label className="font-bold text-slate-700">Consignee *</label>
+                <div className="flex items-center gap-1">
+                  <span className="text-[10px] font-bold text-slate-500">HSN/SAC:</span>
+                  <input
+                    type="text"
+                    value={consigneeHsn}
+                    onChange={(e) => setConsigneeHsn(e.target.value)}
+                    placeholder="996511"
+                    className="w-24 px-1.5 py-0.5 rounded border border-slate-300 font-mono-num text-[11px]"
+                  />
+                </div>
+              </div>
               <RichEntityPicker<AnyPartyEntity>
                 ariaLabel="Consignee"
                 value={consigneeName}
@@ -1599,9 +2263,17 @@ export const AllInOneEntrySheet: React.FC<AllInOneEntrySheetProps> = ({
                   return matched ? <EntityQuickPreviewCard kind="party" party={matched} compact /> : null;
                 })()}
               />
+              <GstinInputField
+                label="Consignee GSTIN (15-Char Checksum)"
+                value={consigneeGstin}
+                onChange={setConsigneeGstin}
+                compact
+                placeholder="Consignee GSTIN (Optional)"
+              />
             </div>
           </div>
 
+          {/* Row 4: Origin, Destination, Packages + Inline Multi Package/Goods [Y/N] */}
           <div className="grid grid-cols-1 sm:grid-cols-2 lg:grid-cols-4 gap-3">
             <div>
               <label className="block font-bold text-slate-700 mb-1">From City / Origin *</label>
@@ -1624,7 +2296,18 @@ export const AllInOneEntrySheet: React.FC<AllInOneEntrySheetProps> = ({
               />
             </div>
             <div>
-              <label className="block font-bold text-slate-700 mb-1">Packages &amp; Mode</label>
+              <div className="flex items-center justify-between mb-1">
+                <label className="font-bold text-slate-700">Packages &amp; Mode</label>
+                <button
+                  type="button"
+                  onClick={() => setHasMultiGoods((v) => !v)}
+                  className={`px-1.5 py-0.5 rounded text-[10px] font-extrabold cursor-pointer ${
+                    hasMultiGoods ? 'bg-blue-600 text-white' : 'bg-slate-100 text-slate-700 border border-slate-300'
+                  }`}
+                >
+                  Multi Pkg/Goods [{hasMultiGoods ? 'Y' : 'N'}]
+                </button>
+              </div>
               <div className="flex gap-1.5">
                 <input
                   type="text"
@@ -1653,7 +2336,75 @@ export const AllInOneEntrySheet: React.FC<AllInOneEntrySheetProps> = ({
             </div>
           </div>
 
-          {/* Vehicle + Auto-Fetched Driver Fields (Shown only when hasVehicleNo = Yes) */}
+          {hasMultiGoods && (
+            <div className="rounded-lg border border-blue-200 bg-blue-50/40 p-2.5 space-y-1.5">
+              <div className="flex items-center justify-between">
+                <span className="font-extrabold text-[#0D47A1]">
+                  Multi-Package / Multi-Goods Items ({multiGoodsItems.length}/50)
+                </span>
+                <button
+                  type="button"
+                  onClick={() =>
+                    multiGoodsItems.length < 50 &&
+                    setMultiGoodsItems((prev) => [
+                      ...prev,
+                      { description: particulars, packages: 1, packageMode, weightKg: 0 },
+                    ])
+                  }
+                  className="px-2 py-0.5 rounded bg-[#0D47A1] text-white text-[11px] font-bold cursor-pointer"
+                >
+                  + Add Goods Item
+                </button>
+              </div>
+              {multiGoodsItems.map((g, idx) => (
+                <div key={idx} className="grid grid-cols-1 sm:grid-cols-5 gap-1.5 items-center bg-white p-1.5 rounded border border-slate-200">
+                  <input
+                    type="text"
+                    value={g.description}
+                    onChange={(e) =>
+                      setMultiGoodsItems((prev) =>
+                        prev.map((row, i) => (i === idx ? { ...row, description: e.target.value } : row))
+                      )
+                    }
+                    placeholder="Description"
+                    className="sm:col-span-2 px-2 py-1 rounded border border-slate-300"
+                  />
+                  <input
+                    type="number"
+                    value={g.packages}
+                    onChange={(e) =>
+                      setMultiGoodsItems((prev) =>
+                        prev.map((row, i) => (i === idx ? { ...row, packages: Number(e.target.value || 0) } : row))
+                      )
+                    }
+                    placeholder="Pkgs"
+                    className="px-2 py-1 rounded border border-slate-300 font-mono-num"
+                  />
+                  <input
+                    type="number"
+                    step="0.01"
+                    value={g.weightKg}
+                    onChange={(e) =>
+                      setMultiGoodsItems((prev) =>
+                        prev.map((row, i) => (i === idx ? { ...row, weightKg: Number(e.target.value || 0) } : row))
+                      )
+                    }
+                    placeholder="Wt Kg"
+                    className="px-2 py-1 rounded border border-slate-300 font-mono-num"
+                  />
+                  <button
+                    type="button"
+                    onClick={() => setMultiGoodsItems((prev) => prev.filter((_, i) => i !== idx))}
+                    className="text-red-600 text-xs font-bold cursor-pointer"
+                  >
+                    Remove
+                  </button>
+                </div>
+              ))}
+            </div>
+          )}
+
+          {/* Row 5: Vehicle + Driver + Inline Multi Lorry [Y/N] */}
           {hasVehicleNo && (
             <div className="rounded-lg border border-blue-200 bg-blue-50/40 p-3 space-y-2.5">
               <div className="flex flex-wrap items-center justify-between gap-2">
@@ -1661,14 +2412,15 @@ export const AllInOneEntrySheet: React.FC<AllInOneEntrySheetProps> = ({
                   <Truck className="w-4 h-4" />
                   Vehicle &amp; Auto-Fetched Driver Details
                 </span>
-                <label className="inline-flex items-center gap-1.5 text-[11px] font-bold text-slate-700 cursor-pointer">
-                  <input
-                    type="checkbox"
-                    checked={hasMultiVehicle}
-                    onChange={(e) => setHasMultiVehicle(e.target.checked)}
-                  />
-                  Multi-Lorry [Yes/No]
-                </label>
+                <button
+                  type="button"
+                  onClick={() => setHasMultiVehicle((v) => !v)}
+                  className={`px-2 py-0.5 rounded text-[11px] font-extrabold cursor-pointer ${
+                    hasMultiVehicle ? 'bg-blue-700 text-white' : 'bg-white border border-blue-300 text-blue-900'
+                  }`}
+                >
+                  Multi-Lorry [{hasMultiVehicle ? 'Y' : 'N'}]
+                </button>
               </div>
 
               <div className="grid grid-cols-1 sm:grid-cols-2 lg:grid-cols-4 gap-2.5">
@@ -1786,7 +2538,9 @@ export const AllInOneEntrySheet: React.FC<AllInOneEntrySheetProps> = ({
               {hasMultiVehicle && (
                 <div className="pt-1 space-y-1.5">
                   <div className="flex items-center justify-between">
-                    <span className="text-[11px] font-bold text-slate-700">Additional Multi-Lorries ({extraVehicles.length}/50)</span>
+                    <span className="text-[11px] font-bold text-slate-700">
+                      Additional Multi-Lorries ({extraVehicles.length}/50)
+                    </span>
                     <button
                       type="button"
                       onClick={() => {
@@ -1824,215 +2578,725 @@ export const AllInOneEntrySheet: React.FC<AllInOneEntrySheetProps> = ({
             </div>
           )}
 
-          {/* Weights, Rate, Freight & Single-Key Codes */}
-          <div className="grid grid-cols-2 sm:grid-cols-4 lg:grid-cols-8 gap-2.5">
-            <div>
-              <label className="block font-bold text-slate-700 mb-1">Nett Wt (MT)</label>
-              <input
-                type="number"
-                step="0.01"
-                value={nettWeight}
-                onChange={(e) => {
-                  setNettWeight(e.target.value);
-                  setChargedWeight(e.target.value);
-                  setHireWeightMt(e.target.value);
-                }}
-                className="w-full px-2 py-1.5 rounded border border-slate-300 font-mono-num"
-              />
-            </div>
-            <div>
-              <label className="block font-bold text-slate-700 mb-1">Gross Wt (MT)</label>
-              <input
-                type="number"
-                step="0.01"
-                value={grossWeight}
-                onChange={(e) => setGrossWeight(e.target.value)}
-                className="w-full px-2 py-1.5 rounded border border-slate-300 font-mono-num"
-              />
-            </div>
-            <div>
-              <label className="block font-bold text-slate-700 mb-1">Rate Mode</label>
-              <SearchableSelect
-                ariaLabel="Rate Mode"
-                value={rateMode}
-                onChange={setRateMode}
-                options={DEFAULT_RATE_MODES}
-              />
-            </div>
-            <div>
-              <label className="block font-bold text-slate-700 mb-1">Rate (₹)</label>
-              <input
-                type="number"
-                step="0.01"
-                value={ratePerUnit}
-                onChange={(e) => setRatePerUnit(e.target.value)}
-                className="w-full px-2 py-1.5 rounded border border-slate-300 font-mono-num"
-              />
-            </div>
-            <div>
-              <label className="block font-bold text-slate-700 mb-1">Base Freight (₹)</label>
-              <input
-                type="number"
-                step="0.01"
-                value={baseFreight}
-                onChange={(e) => setBaseFreight(e.target.value)}
-                className="w-full px-2 py-1.5 rounded border border-slate-300 font-mono-num font-bold"
-              />
-            </div>
-            <div>
-              <label className="block font-bold text-slate-700 mb-1">Others (₹)</label>
-              <input
-                type="number"
-                step="0.01"
-                value={otherCharge}
-                onChange={(e) => setOtherCharge(e.target.value)}
-                className="w-full px-2 py-1.5 rounded border border-slate-300 font-mono-num"
-              />
-            </div>
-            <div>
-              <label className="block font-bold text-slate-700 mb-1">Del [P/G/D]</label>
-              <SearchableSelect
-                ariaLabel="Delivery Mode Code"
-                value={deliveryModeCode}
-                onChange={setDeliveryModeCode}
-                options={DELIVERY_MODE_CODES.map((c) => ({ value: c.code, label: c.label }))}
-              />
-            </div>
-            <div>
-              <label className="block font-bold text-slate-700 mb-1">GST [R/E/T]</label>
-              <SearchableSelect
-                ariaLabel="GST Paid By Code"
-                value={gstPaidByCode}
-                onChange={(v) => {
-                  setGstPaidByCode(v);
-                  const mapped = GST_PAID_BY_CODES.find((c) => c.code === v)?.mapped;
-                  if (mapped) setGstPaidByBill(mapped as 'Consignor' | 'Consignee' | 'Transporter');
-                }}
-                options={GST_PAID_BY_CODES.map((c) => ({ value: c.code, label: c.label }))}
-              />
-            </div>
-          </div>
-
-          <div className="grid grid-cols-1 sm:grid-cols-4 gap-2.5 items-center">
-            <div>
-              <label className="block font-bold text-slate-700 mb-1">Risk [O/C/I]</label>
-              <SearchableSelect
-                ariaLabel="Risk Code"
-                value={riskTakenBy}
-                onChange={setRiskTakenBy}
-                options={RISK_TYPE_CODES.map((c) => ({ value: c.code, label: c.label }))}
-              />
-            </div>
-            <div className="sm:col-span-2">
-              <label className="block font-bold text-slate-700 mb-1">CN / LR Remarks</label>
-              <input
-                type="text"
-                value={cnRemarks}
-                onChange={(e) => setCnRemarks(e.target.value)}
-                placeholder="Notes, detention instructions, delivery terms..."
-                className="w-full px-2.5 py-1.5 rounded border border-slate-300"
-              />
-            </div>
-            <div className="pt-4">
-              <button
-                type="button"
-                onClick={() => setMultiGoodsOpen((v) => !v)}
-                className="w-full px-2.5 py-1.5 rounded border border-blue-300 bg-blue-50 hover:bg-blue-100 text-[#0D47A1] font-bold cursor-pointer"
-              >
-                {multiGoodsOpen ? 'Hide Multi-Goods / EWB' : `+ Multi-Goods (${multiGoodsItems.length}) / EWB (${extraEwayBills.length})`}
-              </button>
-            </div>
-          </div>
-
-          {multiGoodsOpen && (
-            <div className="rounded-lg border border-slate-200 bg-slate-50 p-3 space-y-2">
-              <div className="flex flex-wrap items-center justify-between gap-2">
-                <span className="font-bold text-slate-800">Multi-Goods Items (max 50)</span>
+          {/* Row 6: Supplier Invoice + E-Way Bill + Inline Multi [Y/N] & EWB Extension (1st/2nd/3rd) */}
+          <div className="grid grid-cols-1 lg:grid-cols-2 gap-3">
+            {/* Supplier Tax Inv Card */}
+            <div className="rounded-lg border border-slate-200 bg-slate-50/70 p-2.5 space-y-2">
+              <div className="flex items-center justify-between">
+                <span className="font-extrabold text-slate-800">Supplier Invoice &amp; Goods Value</span>
                 <button
                   type="button"
-                  onClick={() =>
-                    multiGoodsItems.length < 50 &&
-                    setMultiGoodsItems((prev) => [
-                      ...prev,
-                      { description: particulars, packages: 1, packageMode, weightKg: 0 },
-                    ])
-                  }
-                  className="px-2 py-0.5 rounded bg-[#0D47A1] text-white text-[11px] font-bold cursor-pointer"
+                  onClick={() => setHasMultiTaxInv((v) => !v)}
+                  className={`px-2 py-0.5 rounded text-[10px] font-extrabold cursor-pointer ${
+                    hasMultiTaxInv ? 'bg-blue-700 text-white' : 'bg-white border border-slate-300 text-slate-700'
+                  }`}
                 >
-                  + Add Goods Item
+                  Multi Invoice [{hasMultiTaxInv ? 'Y' : 'N'}]
                 </button>
               </div>
-              {multiGoodsItems.map((g, idx) => (
-                <div key={idx} className="grid grid-cols-1 sm:grid-cols-5 gap-2 items-center bg-white p-2 rounded border border-slate-200">
+              <div className="grid grid-cols-3 gap-2">
+                <div>
+                  <label className="block text-[10px] font-bold text-slate-600 mb-0.5">Consignor Inv No</label>
                   <input
                     type="text"
-                    value={g.description}
-                    onChange={(e) =>
-                      setMultiGoodsItems((prev) =>
-                        prev.map((row, i) => (i === idx ? { ...row, description: e.target.value } : row))
-                      )
-                    }
-                    placeholder="Description"
-                    className="sm:col-span-2 px-2 py-1 rounded border border-slate-300"
+                    value={taxInvNo}
+                    onChange={(e) => setTaxInvNo(e.target.value.toUpperCase())}
+                    placeholder="INV-001"
+                    className="w-full px-2 py-1 rounded border border-slate-300 bg-white font-mono-num"
                   />
+                </div>
+                <div>
+                  <label className="block text-[10px] font-bold text-slate-600 mb-0.5">Inv Date</label>
                   <input
-                    type="number"
-                    value={g.packages}
-                    onChange={(e) =>
-                      setMultiGoodsItems((prev) =>
-                        prev.map((row, i) => (i === idx ? { ...row, packages: Number(e.target.value || 0) } : row))
-                      )
-                    }
-                    placeholder="Pkgs"
-                    className="px-2 py-1 rounded border border-slate-300 font-mono-num"
+                    type="date"
+                    value={taxInvDate}
+                    onChange={(e) => setTaxInvDate(e.target.value)}
+                    className="w-full px-2 py-1 rounded border border-slate-300 bg-white font-mono-num"
                   />
+                </div>
+                <div>
+                  <label className="block text-[10px] font-bold text-slate-600 mb-0.5">Goods Value (₹)</label>
                   <input
                     type="number"
                     step="0.01"
-                    value={g.weightKg}
-                    onChange={(e) =>
-                      setMultiGoodsItems((prev) =>
-                        prev.map((row, i) => (i === idx ? { ...row, weightKg: Number(e.target.value || 0) } : row))
-                      )
-                    }
-                    placeholder="Wt Kg"
-                    className="px-2 py-1 rounded border border-slate-300 font-mono-num"
+                    value={valueOfGoods}
+                    onChange={(e) => setValueOfGoods(e.target.value)}
+                    className="w-full px-2 py-1 rounded border border-slate-300 bg-white font-mono-num"
                   />
-                  <button
-                    type="button"
-                    onClick={() => setMultiGoodsItems((prev) => prev.filter((_, i) => i !== idx))}
-                    className="text-red-600 text-xs font-bold cursor-pointer"
-                  >
-                    Remove
-                  </button>
                 </div>
-              ))}
-              {!isFtl && (
-                <div className="pt-1 flex items-center gap-3 text-xs">
-                  <span className="font-bold text-slate-700">Logistics Delivery:</span>
-                  {(['Door Delivery', 'Godown Delivery'] as const).map((dm) => (
-                    <label key={dm} className="inline-flex items-center gap-1 font-semibold cursor-pointer">
+              </div>
+              {hasMultiTaxInv && (
+                <div className="space-y-1 pt-1">
+                  <div className="flex justify-between items-center text-[10px] font-bold text-slate-600">
+                    <span>Extra Supplier Invoices ({extraTaxInvoices.length}/50)</span>
+                    <button
+                      type="button"
+                      onClick={() =>
+                        extraTaxInvoices.length < 50 &&
+                        setExtraTaxInvoices((p) => [...p, { no: '', date: docDate, value: 0 }])
+                      }
+                      className="px-2 py-0.5 rounded bg-blue-600 text-white cursor-pointer"
+                    >
+                      + Add Inv
+                    </button>
+                  </div>
+                  {extraTaxInvoices.map((inv, idx) => (
+                    <div key={idx} className="flex gap-1 items-center">
                       <input
-                        type="radio"
-                        checked={docketDeliveryMode === dm}
-                        onChange={() => setDocketDeliveryMode(dm)}
+                        type="text"
+                        value={inv.no}
+                        placeholder="Inv No"
+                        onChange={(e) =>
+                          setExtraTaxInvoices((p) =>
+                            p.map((x, i) => (i === idx ? { ...x, no: e.target.value.toUpperCase() } : x))
+                          )
+                        }
+                        className="flex-1 px-1.5 py-1 rounded border border-slate-300 bg-white font-mono-num text-[11px]"
                       />
-                      {dm}
-                    </label>
+                      <input
+                        type="date"
+                        value={inv.date}
+                        onChange={(e) =>
+                          setExtraTaxInvoices((p) => p.map((x, i) => (i === idx ? { ...x, date: e.target.value } : x)))
+                        }
+                        className="w-28 px-1 py-1 rounded border border-slate-300 bg-white text-[11px]"
+                      />
+                      <input
+                        type="number"
+                        value={inv.value || 0}
+                        onChange={(e) =>
+                          setExtraTaxInvoices((p) =>
+                            p.map((x, i) => (i === idx ? { ...x, value: Number(e.target.value || 0) } : x))
+                          )
+                        }
+                        className="w-24 px-1.5 py-1 rounded border border-slate-300 bg-white font-mono-num text-[11px]"
+                      />
+                      <button
+                        type="button"
+                        onClick={() => setExtraTaxInvoices((p) => p.filter((_, i) => i !== idx))}
+                        className="text-red-600 font-bold cursor-pointer px-1"
+                      >
+                        ×
+                      </button>
+                    </div>
                   ))}
                 </div>
               )}
             </div>
-          )}
+
+            {/* E-Way Bill + Extension Card */}
+            <div className="rounded-lg border border-slate-200 bg-slate-50/70 p-2.5 space-y-2">
+              <div className="flex flex-wrap items-center justify-between gap-1">
+                <span className="font-extrabold text-slate-800">E-Way Bill &amp; Extension Log</span>
+                <div className="flex items-center gap-1.5">
+                  <button
+                    type="button"
+                    disabled={ewbExtensions.length >= 3}
+                    onClick={() =>
+                      ewbExtensions.length < 3 &&
+                      setEwbExtensions((p) => [
+                        ...p,
+                        {
+                          extNo: p.length + 1,
+                          extendedDate: todayISO(),
+                          validUpto: ewayBillValidUpto || todayISO(),
+                          reason: 'In-transit delay',
+                        },
+                      ])
+                    }
+                    className="px-2 py-0.5 rounded bg-amber-500 hover:bg-amber-600 text-slate-950 text-[10px] font-extrabold cursor-pointer disabled:opacity-40"
+                  >
+                    + Extend Date ({ewbExtensions.length}/3)
+                  </button>
+                  <button
+                    type="button"
+                    onClick={() => setHasMultiEwb((v) => !v)}
+                    className={`px-2 py-0.5 rounded text-[10px] font-extrabold cursor-pointer ${
+                      hasMultiEwb ? 'bg-blue-700 text-white' : 'bg-white border border-slate-300 text-slate-700'
+                    }`}
+                  >
+                    Multi EWB [{hasMultiEwb ? 'Y' : 'N'}]
+                  </button>
+                </div>
+              </div>
+              <div className="grid grid-cols-3 gap-2">
+                <div>
+                  <label className="block text-[10px] font-bold text-slate-600 mb-0.5">E-Way Bill No</label>
+                  <input
+                    type="text"
+                    value={ewayBillNo}
+                    onChange={(e) => setEwayBillNo(e.target.value.replace(/\s/g, ''))}
+                    placeholder="12-digit EWB"
+                    className="w-full px-2 py-1 rounded border border-slate-300 bg-white font-mono-num"
+                  />
+                </div>
+                <div>
+                  <label className="block text-[10px] font-bold text-slate-600 mb-0.5">EWB Date</label>
+                  <input
+                    type="date"
+                    value={ewayBillDate}
+                    onChange={(e) => setEwayBillDate(e.target.value)}
+                    className="w-full px-2 py-1 rounded border border-slate-300 bg-white font-mono-num"
+                  />
+                </div>
+                <div>
+                  <label className="block text-[10px] font-bold text-slate-600 mb-0.5">Valid Upto</label>
+                  <input
+                    type="date"
+                    value={ewayBillValidUpto}
+                    onChange={(e) => setEwayBillValidUpto(e.target.value)}
+                    className="w-full px-2 py-1 rounded border border-slate-300 bg-white font-mono-num"
+                  />
+                </div>
+              </div>
+
+              {ewbExtensions.length > 0 && (
+                <div className="space-y-1 bg-amber-50 border border-amber-200 rounded p-1.5">
+                  {ewbExtensions.map((ext, idx) => (
+                    <div key={idx} className="grid grid-cols-12 gap-1 items-center text-[10px]">
+                      <span className="col-span-2 font-extrabold text-amber-900">
+                        {ext.extNo === 1 ? '1st Ext' : ext.extNo === 2 ? '2nd Ext' : '3rd Ext'}
+                      </span>
+                      <input
+                        type="date"
+                        value={ext.extendedDate}
+                        onChange={(e) =>
+                          setEwbExtensions((p) =>
+                            p.map((x, i) => (i === idx ? { ...x, extendedDate: e.target.value } : x))
+                          )
+                        }
+                        className="col-span-3 px-1 py-0.5 rounded border border-amber-300 bg-white font-mono-num"
+                      />
+                      <input
+                        type="date"
+                        value={ext.validUpto}
+                        onChange={(e) => {
+                          setEwayBillValidUpto(e.target.value);
+                          setEwbExtensions((p) =>
+                            p.map((x, i) => (i === idx ? { ...x, validUpto: e.target.value } : x))
+                          );
+                        }}
+                        className="col-span-3 px-1 py-0.5 rounded border border-amber-300 bg-white font-mono-num"
+                      />
+                      <input
+                        type="text"
+                        value={ext.reason || ''}
+                        placeholder="Reason"
+                        onChange={(e) =>
+                          setEwbExtensions((p) =>
+                            p.map((x, i) => (i === idx ? { ...x, reason: e.target.value } : x))
+                          )
+                        }
+                        className="col-span-3 px-1 py-0.5 rounded border border-amber-300 bg-white"
+                      />
+                      <button
+                        type="button"
+                        onClick={() => setEwbExtensions((p) => p.filter((_, i) => i !== idx))}
+                        className="col-span-1 text-red-600 font-bold cursor-pointer"
+                      >
+                        ×
+                      </button>
+                    </div>
+                  ))}
+                </div>
+              )}
+
+              {hasMultiEwb && (
+                <div className="space-y-1 pt-1">
+                  <div className="flex justify-between items-center text-[10px] font-bold text-slate-600">
+                    <span>Extra E-Way Bills ({extraEwayBills.length}/50)</span>
+                    <button
+                      type="button"
+                      onClick={() =>
+                        extraEwayBills.length < 50 &&
+                        setExtraEwayBills((p) => [...p, { no: '', date: docDate, validUpto: '' }])
+                      }
+                      className="px-2 py-0.5 rounded bg-blue-600 text-white cursor-pointer"
+                    >
+                      + Add EWB
+                    </button>
+                  </div>
+                  {extraEwayBills.map((ewb, idx) => (
+                    <div key={idx} className="flex gap-1 items-center">
+                      <input
+                        type="text"
+                        value={ewb.no}
+                        placeholder="12-digit EWB No"
+                        onChange={(e) =>
+                          setExtraEwayBills((p) => p.map((x, i) => (i === idx ? { ...x, no: e.target.value } : x)))
+                        }
+                        className="flex-1 px-1.5 py-1 rounded border border-slate-300 bg-white font-mono-num text-[11px]"
+                      />
+                      <input
+                        type="date"
+                        value={ewb.validUpto || ''}
+                        onChange={(e) =>
+                          setExtraEwayBills((p) =>
+                            p.map((x, i) => (i === idx ? { ...x, validUpto: e.target.value } : x))
+                          )
+                        }
+                        className="w-32 px-1 py-1 rounded border border-slate-300 bg-white text-[11px]"
+                      />
+                      <button
+                        type="button"
+                        onClick={() => setExtraEwayBills((p) => p.filter((_, i) => i !== idx))}
+                        className="text-red-600 font-bold cursor-pointer px-1"
+                      >
+                        ×
+                      </button>
+                    </div>
+                  ))}
+                </div>
+              )}
+            </div>
+          </div>
+
+          {/* Row 7: Unlocked Weights, Editable Rate Mode, Base/Total Freight + Multi Weight [Y/N] */}
+          <div className="space-y-2">
+            <div className="flex items-center justify-between">
+              <span className="font-extrabold text-slate-800">
+                Weights (Unlocked) &amp; Freight Valuation
+              </span>
+              <button
+                type="button"
+                onClick={() => setHasMultiWeight((v) => !v)}
+                className={`px-2 py-0.5 rounded text-[10px] font-extrabold cursor-pointer ${
+                  hasMultiWeight ? 'bg-blue-700 text-white' : 'bg-slate-100 border border-slate-300 text-slate-700'
+                }`}
+              >
+                Multi Weight [{hasMultiWeight ? 'Y' : 'N'}]
+              </button>
+            </div>
+            <div className="grid grid-cols-2 sm:grid-cols-4 lg:grid-cols-8 gap-2.5">
+              <div>
+                <label className="block font-bold text-slate-700 mb-1">Nett Wt (MT)</label>
+                <input
+                  type="number"
+                  step="0.001"
+                  value={nettWeight}
+                  onChange={(e) => {
+                    setNettWeight(e.target.value);
+                    setChargedWeight(e.target.value);
+                    setHireWeightMt(e.target.value);
+                  }}
+                  className="w-full px-2 py-1.5 rounded border border-slate-300 font-mono-num"
+                />
+              </div>
+              <div>
+                <label className="block font-bold text-slate-700 mb-1">Gross Wt (MT)</label>
+                <input
+                  type="number"
+                  step="0.001"
+                  value={grossWeight}
+                  onChange={(e) => setGrossWeight(e.target.value)}
+                  className="w-full px-2 py-1.5 rounded border border-slate-300 font-mono-num"
+                />
+              </div>
+              <div>
+                <label className="block font-bold text-slate-700 mb-1">Charged Wt (MT)</label>
+                <input
+                  type="number"
+                  step="0.001"
+                  value={chargedWeight}
+                  onChange={(e) => setChargedWeight(e.target.value)}
+                  className="w-full px-2 py-1.5 rounded border border-slate-300 font-mono-num"
+                />
+              </div>
+              <div>
+                <label className="block font-bold text-slate-700 mb-1">Rate Mode (Edit/Drop)</label>
+                <EditableSearchSelect
+                  ariaLabel="Rate Mode"
+                  value={rateMode}
+                  onChange={setRateMode}
+                  options={rateModeOptions}
+                />
+              </div>
+              <div>
+                <label className="block font-bold text-slate-700 mb-1">Rate (₹)</label>
+                <input
+                  type="number"
+                  step="0.01"
+                  value={ratePerUnit}
+                  onChange={(e) => {
+                    setRatePerUnit(e.target.value);
+                    setManualFreightOverride(null);
+                  }}
+                  className="w-full px-2 py-1.5 rounded border border-slate-300 font-mono-num"
+                />
+              </div>
+              <div>
+                <label className="block font-bold text-slate-700 mb-1">Base Freight (₹)</label>
+                <input
+                  type="number"
+                  step="0.01"
+                  value={baseFreight}
+                  onChange={(e) => {
+                    setBaseFreight(e.target.value);
+                    setManualFreightOverride(null);
+                  }}
+                  className="w-full px-2 py-1.5 rounded border border-slate-300 font-mono-num"
+                />
+              </div>
+              <div>
+                <label className="block font-bold text-slate-700 mb-1">Others (₹)</label>
+                <input
+                  type="number"
+                  step="0.01"
+                  value={otherCharge}
+                  onChange={(e) => {
+                    setOtherCharge(e.target.value);
+                    setManualFreightOverride(null);
+                  }}
+                  className="w-full px-2 py-1.5 rounded border border-slate-300 font-mono-num"
+                />
+              </div>
+              <div>
+                <label className="block font-bold text-[#0D47A1] mb-1">
+                  Total Freight (Unlocked ₹)
+                </label>
+                <input
+                  type="number"
+                  step="0.01"
+                  value={manualFreightOverride !== null ? manualFreightOverride : computedCnFreight}
+                  onChange={(e) => setManualFreightOverride(e.target.value)}
+                  className="w-full px-2 py-1.5 rounded border-2 border-blue-400 bg-blue-50 font-mono-num font-extrabold text-[#0D47A1]"
+                />
+              </div>
+            </div>
+
+            {hasMultiWeight && (
+              <div className="rounded-lg border border-blue-200 bg-blue-50/40 p-2 space-y-1">
+                <div className="flex justify-between items-center text-[11px] font-bold text-[#0D47A1]">
+                  <span>Multi-Weight Breakdown ({multiWeights.length}/50)</span>
+                  <button
+                    type="button"
+                    onClick={() =>
+                      multiWeights.length < 50 &&
+                      setMultiWeights((p) => [
+                        ...p,
+                        { label: `Lot ${p.length + 1}`, actualWeightKg: 0, grossWeightKg: 0, chargedWeightKg: 0 },
+                      ])
+                    }
+                    className="px-2 py-0.5 rounded bg-blue-600 text-white cursor-pointer"
+                  >
+                    + Add Weight Row
+                  </button>
+                </div>
+                {multiWeights.map((mw, idx) => (
+                  <div key={idx} className="grid grid-cols-5 gap-1.5 items-center bg-white p-1.5 rounded border border-slate-200">
+                    <input
+                      type="text"
+                      value={mw.label}
+                      placeholder="Label"
+                      onChange={(e) =>
+                        setMultiWeights((p) => p.map((x, i) => (i === idx ? { ...x, label: e.target.value } : x)))
+                      }
+                      className="px-2 py-1 rounded border border-slate-300"
+                    />
+                    <input
+                      type="number"
+                      step="0.01"
+                      value={mw.actualWeightKg}
+                      placeholder="Nett Kg"
+                      onChange={(e) =>
+                        setMultiWeights((p) =>
+                          p.map((x, i) => (i === idx ? { ...x, actualWeightKg: Number(e.target.value || 0) } : x))
+                        )
+                      }
+                      className="px-2 py-1 rounded border border-slate-300 font-mono-num"
+                    />
+                    <input
+                      type="number"
+                      step="0.01"
+                      value={mw.grossWeightKg}
+                      placeholder="Gross Kg"
+                      onChange={(e) =>
+                        setMultiWeights((p) =>
+                          p.map((x, i) => (i === idx ? { ...x, grossWeightKg: Number(e.target.value || 0) } : x))
+                        )
+                      }
+                      className="px-2 py-1 rounded border border-slate-300 font-mono-num"
+                    />
+                    <input
+                      type="number"
+                      step="0.01"
+                      value={mw.chargedWeightKg}
+                      placeholder="Charged Kg"
+                      onChange={(e) =>
+                        setMultiWeights((p) =>
+                          p.map((x, i) => (i === idx ? { ...x, chargedWeightKg: Number(e.target.value || 0) } : x))
+                        )
+                      }
+                      className="px-2 py-1 rounded border border-slate-300 font-mono-num"
+                    />
+                    <button
+                      type="button"
+                      onClick={() => setMultiWeights((p) => p.filter((_, i) => i !== idx))}
+                      className="text-red-600 font-bold cursor-pointer"
+                    >
+                      Remove
+                    </button>
+                  </div>
+                ))}
+              </div>
+            )}
+          </div>
+
+          {/* Row 8: Insurance + Multi Insurance [Y/N] + Codes + Adjustments */}
+          <div className="rounded-lg border border-slate-200 bg-slate-50/70 p-2.5 space-y-2">
+            <div className="flex flex-wrap items-center justify-between gap-2">
+              <span className="font-extrabold text-slate-800">Insurance, Risk &amp; Statutory Codes</span>
+              <div className="flex items-center gap-2">
+                <button
+                  type="button"
+                  onClick={() => setAddlDetailsEnabled((v) => !v)}
+                  className={`px-2 py-0.5 rounded text-[10px] font-extrabold cursor-pointer ${
+                    addlDetailsEnabled ? 'bg-indigo-700 text-white' : 'bg-white border border-slate-300 text-slate-700'
+                  }`}
+                >
+                  Addl Details [{addlDetailsEnabled ? 'Y' : 'N'}]
+                </button>
+                <button
+                  type="button"
+                  onClick={() => setHasMultiInsurance((v) => !v)}
+                  className={`px-2 py-0.5 rounded text-[10px] font-extrabold cursor-pointer ${
+                    hasMultiInsurance ? 'bg-blue-700 text-white' : 'bg-white border border-slate-300 text-slate-700'
+                  }`}
+                >
+                  Multi Insurance [{hasMultiInsurance ? 'Y' : 'N'}]
+                </button>
+              </div>
+            </div>
+            <div className="grid grid-cols-2 sm:grid-cols-4 lg:grid-cols-7 gap-2">
+              <div>
+                <label className="block text-[10px] font-bold text-slate-600 mb-0.5">Del [P/G/D]</label>
+                <SearchableSelect
+                  ariaLabel="Delivery Mode Code"
+                  value={deliveryModeCode}
+                  onChange={setDeliveryModeCode}
+                  options={DELIVERY_MODE_CODES.map((c) => ({ value: c.code, label: c.label }))}
+                />
+              </div>
+              <div>
+                <label className="block text-[10px] font-bold text-slate-600 mb-0.5">GST [R/E/T]</label>
+                <SearchableSelect
+                  ariaLabel="GST Paid By Code"
+                  value={gstPaidByCode}
+                  onChange={setGstPaidByCode}
+                  options={GST_PAID_BY_CODES.map((c) => ({ value: c.code, label: c.label }))}
+                />
+              </div>
+              <div>
+                <label className="block text-[10px] font-bold text-slate-600 mb-0.5">Risk [O/C/I]</label>
+                <SearchableSelect
+                  ariaLabel="Risk Code"
+                  value={riskTakenBy}
+                  onChange={setRiskTakenBy}
+                  options={RISK_TYPE_CODES.map((c) => ({ value: c.code, label: c.label }))}
+                />
+              </div>
+              <div>
+                <label className="block text-[10px] font-bold text-slate-600 mb-0.5">Insurance Co</label>
+                <input
+                  type="text"
+                  value={insuranceCo}
+                  onChange={(e) => setInsuranceCo(e.target.value)}
+                  placeholder="New India / ICICI"
+                  className="w-full px-2 py-1 rounded border border-slate-300 bg-white"
+                />
+              </div>
+              <div>
+                <label className="block text-[10px] font-bold text-slate-600 mb-0.5">Policy No</label>
+                <input
+                  type="text"
+                  value={insurancePolicyNo}
+                  onChange={(e) => setInsurancePolicyNo(e.target.value.toUpperCase())}
+                  placeholder="Policy No"
+                  className="w-full px-2 py-1 rounded border border-slate-300 bg-white font-mono-num"
+                />
+              </div>
+              <div>
+                <label className="block text-[10px] font-bold text-slate-600 mb-0.5">Policy Date</label>
+                <input
+                  type="date"
+                  value={insurancePolicyDate}
+                  onChange={(e) => setInsurancePolicyDate(e.target.value)}
+                  className="w-full px-2 py-1 rounded border border-slate-300 bg-white font-mono-num"
+                />
+              </div>
+              <div>
+                <label className="block text-[10px] font-bold text-slate-600 mb-0.5">Insured Amt (₹)</label>
+                <input
+                  type="number"
+                  step="0.01"
+                  value={insuranceAmount}
+                  onChange={(e) => setInsuranceAmount(e.target.value)}
+                  className="w-full px-2 py-1 rounded border border-slate-300 bg-white font-mono-num"
+                />
+              </div>
+            </div>
+
+            {hasMultiInsurance && (
+              <div className="space-y-1 pt-1">
+                <div className="flex justify-between items-center text-[10px] font-bold text-slate-600">
+                  <span>Extra Insurance Policies ({extraInsurances.length}/50)</span>
+                  <button
+                    type="button"
+                    onClick={() =>
+                      extraInsurances.length < 50 &&
+                      setExtraInsurances((p) => [...p, { policyNo: '', policyDate: docDate, amount: 0 }])
+                    }
+                    className="px-2 py-0.5 rounded bg-blue-600 text-white cursor-pointer"
+                  >
+                    + Add Policy
+                  </button>
+                </div>
+                {extraInsurances.map((ins, idx) => (
+                  <div key={idx} className="flex gap-1 items-center">
+                    <input
+                      type="text"
+                      value={ins.policyNo}
+                      placeholder="Policy No"
+                      onChange={(e) =>
+                        setExtraInsurances((p) =>
+                          p.map((x, i) => (i === idx ? { ...x, policyNo: e.target.value.toUpperCase() } : x))
+                        )
+                      }
+                      className="flex-1 px-1.5 py-1 rounded border border-slate-300 bg-white font-mono-num text-[11px]"
+                    />
+                    <input
+                      type="date"
+                      value={ins.policyDate || ''}
+                      onChange={(e) =>
+                        setExtraInsurances((p) =>
+                          p.map((x, i) => (i === idx ? { ...x, policyDate: e.target.value } : x))
+                        )
+                      }
+                      className="w-32 px-1 py-1 rounded border border-slate-300 bg-white text-[11px]"
+                    />
+                    <input
+                      type="number"
+                      value={ins.amount}
+                      onChange={(e) =>
+                        setExtraInsurances((p) =>
+                          p.map((x, i) => (i === idx ? { ...x, amount: Number(e.target.value || 0) } : x))
+                        )
+                      }
+                      className="w-28 px-1.5 py-1 rounded border border-slate-300 bg-white font-mono-num text-[11px]"
+                    />
+                    <button
+                      type="button"
+                      onClick={() => setExtraInsurances((p) => p.filter((_, i) => i !== idx))}
+                      className="text-red-600 font-bold cursor-pointer px-1"
+                    >
+                      ×
+                    </button>
+                  </div>
+                ))}
+              </div>
+            )}
+
+            {(addlDetailsEnabled || billAdjustmentDetails || cnRemarks) && (
+              <div className="grid grid-cols-1 sm:grid-cols-2 gap-2 pt-1">
+                <div>
+                  <label className="block text-[10px] font-bold text-slate-600 mb-0.5">
+                    Bill Adjustment Details
+                  </label>
+                  <input
+                    type="text"
+                    value={billAdjustmentDetails}
+                    onChange={(e) => setBillAdjustmentDetails(e.target.value)}
+                    placeholder="Bill adjustment / advance deduction notes..."
+                    className="w-full px-2 py-1 rounded border border-slate-300 bg-white"
+                  />
+                </div>
+                <div>
+                  <label className="block text-[10px] font-bold text-slate-600 mb-0.5">CN / LR Remarks</label>
+                  <input
+                    type="text"
+                    value={cnRemarks}
+                    onChange={(e) => setCnRemarks(e.target.value)}
+                    placeholder="Delivery / detention / weighment notes..."
+                    className="w-full px-2 py-1 rounded border border-slate-300 bg-white"
+                  />
+                </div>
+              </div>
+            )}
+          </div>
+
+          {/* Inline LR Quick Action Bar (Preview, Print, Low-MB PDF, Scan LR/POD, WhatsApp, Email) */}
+          <div className="flex flex-wrap items-center justify-between gap-2 pt-2 border-t border-slate-200">
+            <div className="flex flex-wrap items-center gap-1.5">
+              <button
+                type="button"
+                onClick={() => void handleInlineLrPdf('preview')}
+                className="inline-flex items-center gap-1 px-2.5 py-1.5 rounded-lg bg-[#0D47A1] hover:bg-blue-900 text-white text-[11px] font-bold cursor-pointer"
+              >
+                <Eye className="w-3.5 h-3.5" />
+                Preview LR (Yellow Logo)
+              </button>
+              <button
+                type="button"
+                onClick={() => void handleInlineLrPdf('print')}
+                className="inline-flex items-center gap-1 px-2.5 py-1.5 rounded-lg bg-amber-500 hover:bg-amber-400 text-slate-950 text-[11px] font-extrabold cursor-pointer"
+              >
+                <Printer className="w-3.5 h-3.5" />
+                Auto-Print LR
+              </button>
+              <button
+                type="button"
+                onClick={() => void handleInlineLrPdf('preview')}
+                className="inline-flex items-center gap-1 px-2.5 py-1.5 rounded-lg bg-emerald-600 hover:bg-emerald-700 text-white text-[11px] font-bold cursor-pointer"
+              >
+                <FileSpreadsheet className="w-3.5 h-3.5" />
+                Low-MB PDF
+              </button>
+              <input
+                ref={scanFileInputRef}
+                type="file"
+                accept="image/*"
+                onChange={(e) => void handleScanPhysicalLr(e)}
+                className="hidden"
+              />
+              <button
+                type="button"
+                onClick={() => scanFileInputRef.current?.click()}
+                className="inline-flex items-center gap-1 px-2.5 py-1.5 rounded-lg bg-purple-600 hover:bg-purple-700 text-white text-[11px] font-bold cursor-pointer"
+              >
+                <Camera className="w-3.5 h-3.5" />
+                {scannedLrDataUrl ? 'LR Scan Attached ✓' : 'Scan LR / POD'}
+              </button>
+            </div>
+            <div className="flex flex-wrap items-center gap-1.5">
+              <button
+                type="button"
+                onClick={() => handleShareLr('whatsapp')}
+                className="inline-flex items-center gap-1 px-2.5 py-1.5 rounded-lg bg-green-600 hover:bg-green-700 text-white text-[11px] font-bold cursor-pointer"
+              >
+                <MessageCircle className="w-3.5 h-3.5" />
+                Share WhatsApp
+              </button>
+              <button
+                type="button"
+                onClick={() => handleShareLr('email')}
+                className="inline-flex items-center gap-1 px-2.5 py-1.5 rounded-lg bg-sky-700 hover:bg-sky-800 text-white text-[11px] font-bold cursor-pointer"
+              >
+                <Mail className="w-3.5 h-3.5" />
+                Email ({company.email || 'drc.kolkata1@gmail.com'})
+              </button>
+            </div>
+          </div>
         </div>
       </div>
 
-      {/* SECTION 2: LORRY HIRE CHALLAN & MULTI-ADVANCE */}
+      {/* ============================================================ */}
+      {/* BOTTOM BAND 1: LORRY HIRE + BROKER & DETN FROM/TO            */}
+      {/* ============================================================ */}
       <div className="bg-white rounded-xl border border-amber-300 shadow-sm overflow-visible">
         <div className="bg-gradient-to-r from-amber-700 to-orange-600 text-white px-4 py-2 rounded-t-xl flex flex-wrap items-center justify-between gap-2">
           <div className="flex items-center gap-2 text-xs font-extrabold">
             <Truck className="w-4 h-4 text-amber-200" />
-            <span>SECTION 2 — Lorry Hire Challan, 2-Day Free Detention &amp; Multi-Advance</span>
+            <span>BAND 1 — Lorry Hire, Broker, DETN FROM/TO (2-Day Free) &amp; Multi ADV [Y/N]</span>
           </div>
           <label className="inline-flex items-center gap-1.5 text-xs font-extrabold cursor-pointer">
             <input
@@ -2049,15 +3313,13 @@ export const AllInOneEntrySheet: React.FC<AllInOneEntrySheetProps> = ({
             {podAlertActive && (
               <div className="rounded-lg border-2 border-red-500 bg-red-50 px-3 py-2 flex items-center gap-2 text-red-900 font-extrabold">
                 <AlertTriangle className="w-4 h-4 text-red-600 shrink-0" />
-                <span>
-                  POD SHORTAGE / BREAKAGE / LEAKAGE ALERT DETECTED — Verify deductions before releasing balance!
-                </span>
+                <span>POD SHORTAGE / BREAKAGE / LEAKAGE ALERT — Verify deductions before balance payment!</span>
               </div>
             )}
 
             <div className="grid grid-cols-1 lg:grid-cols-2 gap-3">
               <div>
-                <label className="block font-bold text-slate-700 mb-1">Broker Name</label>
+                <label className="block font-bold text-slate-700 mb-1">Broker Name (Excluded from Customer Billing)</label>
                 <RichEntityPicker<AnyPartyEntity>
                   ariaLabel="Broker Name"
                   value={brokerName}
@@ -2106,7 +3368,7 @@ export const AllInOneEntrySheet: React.FC<AllInOneEntrySheetProps> = ({
               </div>
             </div>
 
-            <div className="grid grid-cols-2 sm:grid-cols-4 lg:grid-cols-6 gap-2.5">
+            <div className="grid grid-cols-2 sm:grid-cols-4 lg:grid-cols-8 gap-2.5">
               <div>
                 <label className="block font-bold text-slate-700 mb-1">Weight (MT)</label>
                 <input
@@ -2118,7 +3380,7 @@ export const AllInOneEntrySheet: React.FC<AllInOneEntrySheetProps> = ({
                 />
               </div>
               <div>
-                <label className="block font-bold text-slate-700 mb-1">Rate Mode</label>
+                <label className="block font-bold text-slate-700 mb-1">Hire Mode</label>
                 <select
                   value={hireRateMode}
                   onChange={(e) => setHireRateMode(e.target.value as 'Fixed' | 'Per MT')}
@@ -2130,7 +3392,7 @@ export const AllInOneEntrySheet: React.FC<AllInOneEntrySheetProps> = ({
               </div>
               {hireRateMode === 'Per MT' ? (
                 <div>
-                  <label className="block font-bold text-slate-700 mb-1">Rate / MT (₹)</label>
+                  <label className="block font-bold text-slate-700 mb-1">Hire Rate / MT</label>
                   <input
                     type="number"
                     step="0.01"
@@ -2152,41 +3414,62 @@ export const AllInOneEntrySheet: React.FC<AllInOneEntrySheetProps> = ({
                 </div>
               )}
               <div>
-                <label className="block font-bold text-slate-700 mb-1">Detention Days (2 Free)</label>
+                <label className="block font-bold text-slate-700 mb-1">DETN FROM</label>
+                <input
+                  type="date"
+                  value={detentionFromDate}
+                  onChange={(e) => setDetentionFromDate(e.target.value)}
+                  className="w-full px-1.5 py-1.5 rounded border border-slate-300 font-mono-num"
+                />
+              </div>
+              <div>
+                <label className="block font-bold text-slate-700 mb-1">DETN TO</label>
+                <input
+                  type="date"
+                  value={detentionToDate}
+                  onChange={(e) => setDetentionToDate(e.target.value)}
+                  className="w-full px-1.5 py-1.5 rounded border border-slate-300 font-mono-num"
+                />
+              </div>
+              <div>
+                <label className="block font-bold text-slate-700 mb-1">Detn Days &amp; Rate</label>
                 <div className="flex gap-1">
                   <input
                     type="number"
                     value={detentionDays}
                     onChange={(e) => setDetentionDays(e.target.value)}
-                    className="w-16 px-2 py-1.5 rounded border border-slate-300 font-mono-num"
+                    className="w-12 px-1 py-1.5 rounded border border-slate-300 font-mono-num"
                     title="Total halt days (first 2 days free)"
                   />
                   <input
                     type="number"
                     value={detentionRatePerDay}
                     onChange={(e) => setDetentionRatePerDay(e.target.value)}
-                    className="flex-1 min-w-0 px-2 py-1.5 rounded border border-slate-300 font-mono-num"
+                    className="flex-1 min-w-0 px-1 py-1.5 rounded border border-slate-300 font-mono-num"
                     title="Rate per chargeable day"
                   />
+                </div>
+              </div>
+              <div>
+                <label className="block font-bold text-slate-700 mb-1">Detention (2d Free)</label>
+                <div className="px-2 py-1.5 rounded bg-amber-50 border border-amber-300 font-mono-num font-bold text-amber-900">
+                  ₹ {formatINR(effectiveDetentionCharge)}
                 </div>
               </div>
               <div>
                 <label className="block font-bold text-slate-700 mb-1">TDS 194C (%)</label>
                 <select
                   value={tdsRatePct}
-                  onChange={(e) => setTdsRatePct(e.target.value)}
+                  onChange={(e) => {
+                    setTdsRatePct(e.target.value);
+                    setPayTdsOverride('');
+                  }}
                   className="w-full px-2 py-1.5 rounded border border-slate-300 bg-white font-mono-num"
                 >
-                  <option value="0">0% (194C Exempt)</option>
-                  <option value="1">1% (Individual)</option>
-                  <option value="2">2% (Company)</option>
+                  <option value="0">0% Exempt</option>
+                  <option value="1">1% Indv</option>
+                  <option value="2">2% Co</option>
                 </select>
-              </div>
-              <div>
-                <label className="block font-bold text-slate-700 mb-1">Net Balance Due</label>
-                <div className="px-2.5 py-1.5 rounded bg-amber-50 border border-amber-300 font-mono-num font-extrabold text-amber-900">
-                  ₹ {formatINR(hireNetSummary.balancePayable)}
-                </div>
               </div>
             </div>
 
@@ -2225,15 +3508,31 @@ export const AllInOneEntrySheet: React.FC<AllInOneEntrySheetProps> = ({
               </div>
             </div>
 
-            {/* 50-Row Multi-Advance with Live Running Balance */}
+            {/* Multi ADV [Y/N] (4-50 rows) */}
             <div className="rounded-lg border border-amber-200 bg-amber-50/40 p-2.5 space-y-2">
               <div className="flex flex-wrap items-center justify-between gap-2">
-                <span className="font-extrabold text-amber-900">
-                  Multi-Advance Ledger ({hireAdvances.length}/50 Rows) — Total Paid: ₹ {formatINR(totalMultiAdvancePaid)}
-                </span>
+                <div className="flex items-center gap-2">
+                  <span className="font-extrabold text-amber-900">
+                    Advances Paid ({hireAdvances.length}/50 Rows) — Total: ₹ {formatINR(totalMultiAdvancePaid)}
+                  </span>
+                  <button
+                    type="button"
+                    onClick={handleToggleMultiAdvance}
+                    className={`px-2 py-0.5 rounded text-[10px] font-extrabold cursor-pointer ${
+                      hasMultiAdvance ? 'bg-amber-700 text-white' : 'bg-white border border-amber-400 text-amber-900'
+                    }`}
+                  >
+                    Multi ADV [{hasMultiAdvance ? 'Y (4–50)' : 'N'}]
+                  </button>
+                </div>
                 <button
                   type="button"
-                  onClick={() => hireAdvances.length < 50 && setHireAdvances((prev) => [...prev, DEFAULT_ADV_ROW()])}
+                  onClick={() => {
+                    if (hireAdvances.length < 50) {
+                      setHasMultiAdvance(true);
+                      setHireAdvances((prev) => [...prev, DEFAULT_ADV_ROW()]);
+                    }
+                  }}
                   className="inline-flex items-center gap-1 px-2.5 py-1 rounded bg-amber-600 hover:bg-amber-700 text-white text-[11px] font-bold cursor-pointer"
                 >
                   <Plus className="w-3 h-3" />
@@ -2266,7 +3565,8 @@ export const AllInOneEntrySheet: React.FC<AllInOneEntrySheetProps> = ({
                         Number(hireDamageCharge || 0) +
                         effectiveTdsAmt;
                       let runningCum = 0;
-                      return hireAdvances.map((adv, idx) => {
+                      const rowsToRender = hasMultiAdvance ? hireAdvances : hireAdvances.slice(0, 1);
+                      return rowsToRender.map((adv, idx) => {
                         runningCum += Number(adv.amount || 0);
                         const rowBal = Math.max(
                           0,
@@ -2423,18 +3723,28 @@ export const AllInOneEntrySheet: React.FC<AllInOneEntrySheetProps> = ({
         )}
       </div>
 
-      {/* SECTION 3: STAFF LEDGER & M (MULTI-LOGS) */}
+      {/* ============================================================ */}
+      {/* BOTTOM BAND 2: STAFF DETAILS, WHEEL RATE MASTER & LIVE CHART */}
+      {/* ============================================================ */}
       <div className="bg-white rounded-xl border border-indigo-300 shadow-sm overflow-visible">
         <div className="bg-gradient-to-r from-indigo-700 to-blue-700 text-white px-4 py-2 rounded-t-xl flex flex-wrap items-center justify-between gap-2">
           <div className="flex items-center gap-2 text-xs font-extrabold">
             <Users className="w-4 h-4 text-amber-300" />
-            <span>SECTION 3 — Staff Commission &amp; Advance Ledger (Press M for Multi Logs)</span>
+            <span>BAND 2 — Staff Details, Editable Wheel Rates, Paid Stamp &amp; Live Chart</span>
           </div>
-          <div className="flex items-center gap-3">
+          <div className="flex flex-wrap items-center gap-2">
+            <button
+              type="button"
+              onClick={() => setWheelRatesModalOpen(true)}
+              className="inline-flex items-center gap-1 px-2 py-0.5 rounded bg-white/15 hover:bg-white/25 text-white text-[11px] font-bold cursor-pointer"
+            >
+              <Settings2 className="w-3.5 h-3.5 text-amber-300" />
+              Edit Wheel Rate Master
+            </button>
             <button
               type="button"
               onClick={() => setShowMultiLogs((v) => !v)}
-              className="inline-flex items-center gap-1 px-2.5 py-0.5 rounded bg-amber-400 text-slate-950 text-[11px] font-extrabold cursor-pointer"
+              className="inline-flex items-center gap-1 px-2 py-0.5 rounded bg-amber-400 text-slate-950 text-[11px] font-extrabold cursor-pointer"
             >
               <Keyboard className="w-3.5 h-3.5" />
               <span>{showMultiLogs ? 'Hide M (Multi)' : 'M (Multi Logs)'}</span>
@@ -2454,7 +3764,7 @@ export const AllInOneEntrySheet: React.FC<AllInOneEntrySheetProps> = ({
           <div className="p-4 space-y-3 text-xs">
             <div className="grid grid-cols-1 sm:grid-cols-2 lg:grid-cols-6 gap-2.5">
               <div>
-                <label className="block font-bold text-slate-700 mb-1">Staff Name</label>
+                <label className="block font-bold text-slate-700 mb-1">NAME OF STAFF</label>
                 <EditableSearchSelect
                   ariaLabel="Staff Name"
                   value={staffName}
@@ -2463,9 +3773,26 @@ export const AllInOneEntrySheet: React.FC<AllInOneEntrySheetProps> = ({
                 />
               </div>
               <div>
-                <label className="block font-bold text-slate-700 mb-1">Auto Bank / UPI</label>
-                <div className="px-2 py-1.5 rounded bg-indigo-50 border border-indigo-200 font-mono-num text-[11px] truncate">
-                  {staffBankAccount || staffUpiId || 'No Bank/UPI on profile'}
+                <label className="block font-bold text-slate-700 mb-1">Bank &amp; UPI Modal [Lock]</label>
+                <div className="flex gap-1">
+                  <button
+                    type="button"
+                    onClick={() => setBankUpiModalOpen(true)}
+                    className="flex-1 inline-flex items-center justify-center gap-1 px-2 py-1.5 rounded border border-indigo-300 bg-indigo-50 hover:bg-indigo-100 text-indigo-900 font-bold cursor-pointer"
+                    title="Open Staff Bank A/c modal"
+                  >
+                    <Landmark className="w-3.5 h-3.5 text-indigo-700" />
+                    <span>🏦 Bank</span>
+                  </button>
+                  <button
+                    type="button"
+                    onClick={() => setBankUpiModalOpen(true)}
+                    className="flex-1 inline-flex items-center justify-center gap-1 px-2 py-1.5 rounded border border-emerald-300 bg-emerald-50 hover:bg-emerald-100 text-emerald-900 font-bold cursor-pointer"
+                    title="Open Staff UPI modal"
+                  >
+                    <Smartphone className="w-3.5 h-3.5 text-emerald-700" />
+                    <span>📱 UPI</span>
+                  </button>
                 </div>
               </div>
               <div>
@@ -2475,13 +3802,13 @@ export const AllInOneEntrySheet: React.FC<AllInOneEntrySheetProps> = ({
                   onChange={(e) => setStaffEntryType(e.target.value as 'Commission' | 'Advance Taken' | 'Paid')}
                   className="w-full px-2 py-1.5 rounded border border-slate-300 bg-white font-semibold"
                 >
-                  <option value="Commission">Commission</option>
-                  <option value="Advance Taken">Advance Taken</option>
-                  <option value="Paid">Paid / Settlement</option>
+                  <option value="Commission">Commission (+)</option>
+                  <option value="Advance Taken">Advance Taken (-)</option>
+                  <option value="Paid">Monthly Paid (-)</option>
                 </select>
               </div>
               <div>
-                <label className="block font-bold text-slate-700 mb-1">Wheel Type (Auto-Rate)</label>
+                <label className="block font-bold text-slate-700 mb-1">WHEELS (Auto Rate)</label>
                 <select
                   value={wheelType}
                   onChange={(e) => {
@@ -2499,7 +3826,7 @@ export const AllInOneEntrySheet: React.FC<AllInOneEntrySheetProps> = ({
                 </select>
               </div>
               <div>
-                <label className="block font-bold text-slate-700 mb-1">Amount (₹)</label>
+                <label className="block font-bold text-slate-700 mb-1">RUPEES (₹)</label>
                 <input
                   type="number"
                   step="0.01"
@@ -2509,25 +3836,73 @@ export const AllInOneEntrySheet: React.FC<AllInOneEntrySheetProps> = ({
                 />
               </div>
               <div>
-                <label className="block font-bold text-slate-700 mb-1">Travelling + Misc (₹)</label>
-                <div className="flex gap-1">
+                <label className="block font-bold text-slate-700 mb-1">CHALLAN AMT (₹)</label>
+                <input
+                  type="number"
+                  step="0.01"
+                  value={challanAmt}
+                  onChange={(e) => setChallanAmt(e.target.value)}
+                  className="w-full px-2 py-1.5 rounded border border-slate-300 font-mono-num"
+                />
+              </div>
+            </div>
+
+            <div className="grid grid-cols-1 sm:grid-cols-2 lg:grid-cols-6 gap-2.5 items-end">
+              <div>
+                <label className="block font-bold text-slate-700 mb-1">TRAVELLING (₹)</label>
+                <input
+                  type="number"
+                  step="0.01"
+                  value={travellingAmt}
+                  onChange={(e) => setTravellingAmt(e.target.value)}
+                  className="w-full px-2 py-1.5 rounded border border-slate-300 font-mono-num"
+                />
+              </div>
+              <div>
+                <label className="block font-bold text-slate-700 mb-1">MISCELLANEOUS (₹)</label>
+                <input
+                  type="number"
+                  step="0.01"
+                  value={miscAmt}
+                  onChange={(e) => setMiscAmt(e.target.value)}
+                  className="w-full px-2 py-1.5 rounded border border-slate-300 font-mono-num"
+                />
+              </div>
+              <div>
+                <label className="block font-bold text-slate-700 mb-1">ADVANCE DATE</label>
+                <input
+                  type="date"
+                  value={staffAdvanceDate}
+                  onChange={(e) => setStaffAdvanceDate(e.target.value)}
+                  className="w-full px-2 py-1.5 rounded border border-slate-300 font-mono-num"
+                />
+              </div>
+              <div>
+                <label className="block font-bold text-slate-700 mb-1">MONTHLY PAID DATE</label>
+                <input
+                  type="date"
+                  value={staffMonthlyPaidDate}
+                  onChange={(e) => {
+                    setStaffMonthlyPaidDate(e.target.value);
+                    if (e.target.value) setStaffSettledZero(true);
+                  }}
+                  className="w-full px-2 py-1.5 rounded border border-slate-300 font-mono-num"
+                />
+              </div>
+              <div className="lg:col-span-2 flex flex-wrap items-center gap-2">
+                <label className="inline-flex items-center gap-1.5 font-bold text-slate-800 cursor-pointer">
                   <input
-                    type="number"
-                    step="0.01"
-                    value={travellingAmt}
-                    onChange={(e) => setTravellingAmt(e.target.value)}
-                    placeholder="Travel"
-                    className="w-1/2 px-2 py-1.5 rounded border border-slate-300 font-mono-num"
+                    type="checkbox"
+                    checked={staffSettledZero}
+                    onChange={(e) => setStaffSettledZero(e.target.checked)}
                   />
-                  <input
-                    type="number"
-                    step="0.01"
-                    value={miscAmt}
-                    onChange={(e) => setMiscAmt(e.target.value)}
-                    placeholder="Misc"
-                    className="w-1/2 px-2 py-1.5 rounded border border-slate-300 font-mono-num"
-                  />
-                </div>
+                  Settled to ₹0
+                </label>
+                {(staffSettledZero || staffMonthlyPaidDate) && (
+                  <span className="inline-flex items-center gap-1 px-2.5 py-1 rounded bg-emerald-100 border border-emerald-400 text-emerald-900 font-extrabold">
+                    ✅ PAID (No Balance Due)
+                  </span>
+                )}
               </div>
             </div>
 
@@ -2599,281 +3974,258 @@ export const AllInOneEntrySheet: React.FC<AllInOneEntrySheetProps> = ({
                 </div>
               </div>
             )}
+
+            {/* Live Filterable Staff Chart + Totals + Print/PDF/Share */}
+            <div className="rounded-lg border border-indigo-200 bg-indigo-50/40 p-3 space-y-2">
+              <div className="flex flex-wrap items-center justify-between gap-2">
+                <div className="flex flex-wrap items-center gap-1.5">
+                  <span className="font-extrabold text-indigo-950">Staff Chart &amp; Totals:</span>
+                  {(['ALL', 'Commission', 'Advance Taken', 'Paid'] as const).map((f) => (
+                    <button
+                      key={f}
+                      type="button"
+                      onClick={() => setStaffChartFilter(f)}
+                      className={`px-2 py-0.5 rounded text-[10px] font-bold cursor-pointer ${
+                        staffChartFilter === f
+                          ? 'bg-indigo-700 text-white'
+                          : 'bg-white border border-indigo-200 text-indigo-900'
+                      }`}
+                    >
+                      {f}
+                    </button>
+                  ))}
+                </div>
+                <div className="flex flex-wrap items-center gap-1.5">
+                  <button
+                    type="button"
+                    onClick={() => void buildStaffChartPdf().then((pdf) => onPreviewPdf(pdf, 'Reports_Ledgers'))}
+                    className="inline-flex items-center gap-1 px-2 py-1 rounded bg-white border border-indigo-300 text-indigo-900 text-[11px] font-bold cursor-pointer"
+                  >
+                    <Eye className="w-3 h-3" /> Preview
+                  </button>
+                  <button
+                    type="button"
+                    onClick={() => void buildStaffChartPdf().then((pdf) => printPdfDirect(pdf))}
+                    className="inline-flex items-center gap-1 px-2 py-1 rounded bg-amber-400 text-slate-950 text-[11px] font-extrabold cursor-pointer"
+                  >
+                    <Printer className="w-3 h-3" /> Print / Low-MB PDF
+                  </button>
+                  <button
+                    type="button"
+                    onClick={() =>
+                      triggerExternalShareLink(
+                        buildWhatsAppShareHref({
+                          message: `DRC Staff Chart (${activeFy} - ${staffChartFilter})\nDay Total: Rs. ${formatINR(staffChartStats.dayTotal)}\nMonth Total: Rs. ${formatINR(staffChartStats.monthTotal)}\nYearly FY Total: Rs. ${formatINR(staffChartStats.fyTotal)}`,
+                        })
+                      )
+                    }
+                    className="inline-flex items-center gap-1 px-2 py-1 rounded bg-green-600 text-white text-[11px] font-bold cursor-pointer"
+                  >
+                    <MessageCircle className="w-3 h-3" /> Share
+                  </button>
+                  <button
+                    type="button"
+                    onClick={() => setStaffChartExpanded((v) => !v)}
+                    className="p-1 rounded hover:bg-indigo-100 text-indigo-900 cursor-pointer"
+                  >
+                    {staffChartExpanded ? <ChevronUp className="w-3.5 h-3.5" /> : <ChevronDown className="w-3.5 h-3.5" />}
+                  </button>
+                </div>
+              </div>
+
+              <div className="grid grid-cols-1 sm:grid-cols-3 gap-2 font-mono-num">
+                <div className="p-2 rounded bg-white border border-indigo-200 flex justify-between">
+                  <span className="font-sans font-bold text-slate-600">Date-Wise ({formatDateDDMMYYYY(staffChartStats.activeDay)}):</span>
+                  <span className="font-extrabold text-indigo-900">₹ {formatINR(staffChartStats.dayTotal)}</span>
+                </div>
+                <div className="p-2 rounded bg-white border border-indigo-200 flex justify-between">
+                  <span className="font-sans font-bold text-slate-600">Monthly ({staffChartStats.activeMonth}):</span>
+                  <span className="font-extrabold text-blue-900">₹ {formatINR(staffChartStats.monthTotal)}</span>
+                </div>
+                <div className="p-2 rounded bg-indigo-900 text-white flex justify-between">
+                  <span className="font-sans font-bold">Yearly ({activeFy}):</span>
+                  <span className="font-extrabold text-amber-300">₹ {formatINR(staffChartStats.fyTotal)}</span>
+                </div>
+              </div>
+
+              {staffChartExpanded && staffChartStats.rows.length > 0 && (
+                <div className="max-h-40 overflow-y-auto rounded border border-indigo-200 bg-white">
+                  <table className="w-full text-[11px] border-collapse">
+                    <thead className="sticky top-0 bg-indigo-100 text-indigo-950 font-bold text-left">
+                      <tr>
+                        <th className="p-1.5">Date</th>
+                        <th className="p-1.5">Staff</th>
+                        <th className="p-1.5">CN / Truck</th>
+                        <th className="p-1.5">Type / Wheels</th>
+                        <th className="p-1.5 text-right">Rupees + Extras</th>
+                        <th className="p-1.5">Status</th>
+                      </tr>
+                    </thead>
+                    <tbody className="divide-y divide-slate-100">
+                      {staffChartStats.rows.slice(0, 25).map((r) => {
+                        const tot =
+                          Number(r.amount || 0) +
+                          Number(r.challanAmt || 0) +
+                          Number(r.travellingAmt || 0) +
+                          Number(r.miscAmt || 0);
+                        const paidOk = Boolean(r.settledZeroFlag || r.monthlyPaidDate);
+                        return (
+                          <tr key={r.id}>
+                            <td className="p-1.5 font-mono-num">{formatDateDDMMYYYY(r.entryDate)}</td>
+                            <td className="p-1.5 font-bold">{r.staffName}</td>
+                            <td className="p-1.5 font-mono-num">{r.challanNo || '-'} / {r.truckNo || '-'}</td>
+                            <td className="p-1.5">{r.entryType} ({r.wheelType})</td>
+                            <td className="p-1.5 text-right font-mono-num font-bold">₹ {formatINR(tot)}</td>
+                            <td className="p-1.5">
+                              {paidOk ? (
+                                <span className="px-1.5 py-0.5 rounded bg-emerald-100 text-emerald-900 font-bold text-[10px]">
+                                  ✅ PAID
+                                </span>
+                              ) : (
+                                <span className="text-slate-500 text-[10px]">Open</span>
+                              )}
+                            </td>
+                          </tr>
+                        );
+                      })}
+                    </tbody>
+                  </table>
+                </div>
+              )}
+            </div>
           </div>
         )}
       </div>
 
-      {/* SECTION 4: PARTY BILL & TAX INVOICE BUILDER */}
-      <div className="bg-white rounded-xl border border-emerald-300 shadow-sm overflow-visible">
-        <div className="bg-gradient-to-r from-emerald-800 to-teal-700 text-white px-4 py-2 rounded-t-xl flex flex-wrap items-center justify-between gap-2">
+      {/* ============================================================ */}
+      {/* BOTTOM BAND 3: PAY 1 TO PAY 12 INSTALLMENTS & FINAL SAVE     */}
+      {/* ============================================================ */}
+      <div className="bg-white rounded-xl border border-emerald-400 shadow-sm overflow-hidden">
+        <div className="bg-gradient-to-r from-emerald-800 to-teal-700 text-white px-4 py-2 flex flex-wrap items-center justify-between gap-2">
           <div className="flex items-center gap-2 text-xs font-extrabold">
-            <FileSpreadsheet className="w-4 h-4 text-amber-300" />
-            <span>SECTION 4 — Party Bill, Itemized Charges &amp; Tax Invoice</span>
+            <Wallet className="w-4 h-4 text-amber-300" />
+            <span>BAND 3 — PAY 1 TO PAY 12 Installment Tracker, ADV EX DATE, TDS &amp; SAVE [Y/N]</span>
           </div>
-          <label className="inline-flex items-center gap-1.5 text-xs font-extrabold cursor-pointer">
-            <input
-              type="checkbox"
-              checked={includeBillSection}
-              onChange={(e) => setIncludeBillSection(e.target.checked)}
-            />
-            Generate &amp; Link Party Bill
-          </label>
+          <button
+            type="button"
+            onClick={() => setShowAllPay12((v) => !v)}
+            className="px-2.5 py-0.5 rounded bg-white/15 hover:bg-white/25 text-white text-[11px] font-bold cursor-pointer"
+          >
+            {showAllPay12 ? 'Show PAY 1–4 Compact' : 'Expand All PAY 1–12 Slots'}
+          </button>
         </div>
 
-        {includeBillSection && (
-          <div className="p-4 space-y-3 text-xs">
-            <div className="grid grid-cols-1 sm:grid-cols-2 lg:grid-cols-6 gap-2.5">
-              <div>
-                <label className="block font-bold text-slate-700 mb-1">Bill ID</label>
-                <input
-                  type="text"
-                  value={billId}
-                  onChange={(e) => setBillId(e.target.value.toUpperCase())}
-                  className="w-full px-2 py-1.5 rounded border border-slate-300 font-mono-num"
-                />
-              </div>
-              <div>
-                <label className="block font-bold text-slate-700 mb-1">Invoice No *</label>
-                <input
-                  type="text"
-                  value={invoiceNo}
-                  onChange={(e) => setInvoiceNo(e.target.value.toUpperCase())}
-                  className="w-full px-2 py-1.5 rounded border border-slate-300 font-mono-num font-bold"
-                />
-              </div>
-              <div>
-                <label className="block font-bold text-slate-700 mb-1">Billed By [B/P]</label>
-                <select
-                  value={billedByCode}
-                  onChange={(e) => setBilledByCode(e.target.value as 'B' | 'P')}
-                  className="w-full px-2 py-1.5 rounded border border-slate-300 bg-white font-semibold"
-                >
-                  <option value="B">B = Branch Billing</option>
-                  <option value="P">P = Principal / HO</option>
-                </select>
-              </div>
-              <div>
-                <label className="block font-bold text-slate-700 mb-1">Bill Date *</label>
-                <input
-                  type="date"
-                  value={billDate}
-                  onChange={(e) => {
-                    setBillDate(e.target.value);
-                    setDueDate(addDaysISO(e.target.value, creditDays));
-                  }}
-                  className="w-full px-2 py-1.5 rounded border border-slate-300 font-mono-num"
-                />
-              </div>
-              <div>
-                <label className="block font-bold text-slate-700 mb-1">Billing Country</label>
-                <select
-                  value={billingCountry}
-                  onChange={(e) => setBillingCountry(e.target.value as 'India' | 'Nepal' | 'Bangladesh' | 'Bhutan')}
-                  className="w-full px-2 py-1.5 rounded border border-slate-300 bg-white font-semibold"
-                >
-                  <option value="India">India (GST)</option>
-                  <option value="Nepal">Nepal (0% Export)</option>
-                  <option value="Bangladesh">Bangladesh (0% Export)</option>
-                  <option value="Bhutan">Bhutan (0% Export)</option>
-                </select>
-              </div>
-              <div>
-                <label className="block font-bold text-slate-700 mb-1">Grand Bill Total</label>
-                <div className="px-2.5 py-1.5 rounded bg-emerald-50 border border-emerald-300 font-mono-num font-extrabold text-emerald-900">
-                  ₹ {formatINR(billSummary.grossBillAmount)}
-                </div>
-              </div>
-            </div>
-
-            <div className="grid grid-cols-1 lg:grid-cols-2 gap-3">
-              <div>
-                <label className="block font-bold text-slate-700 mb-1">
-                  Bill To Party * (Customers Only — Brokers/Owners Excluded)
-                </label>
-                <RichEntityPicker<Party>
-                  ariaLabel="Bill To Party"
-                  value={billPartyName}
-                  selectedId={selectedBillPartyId}
-                  onChangeText={(txt) => {
-                    setBillPartyName(txt);
-                    setSelectedBillPartyId('');
-                  }}
-                  onSelectEntity={handleSelectBillParty}
-                  items={billingCustomerParties}
-                  getId={(p) => p.id}
-                  getValue={(p) => p.name}
-                  getSearchText={(p) => `${p.name} ${p.gstin || ''} ${p.address || ''} ${p.phone || ''}`}
-                  renderTitle={(p) => p.name}
-                  renderBadge={(p) => p.partyType}
-                  renderDetails={(p) => formatPartyDetailsLine(p)}
-                  placeholder="Select Customer / Billing Party (auto-fills GSTIN & State)..."
-                  quickPreview={(() => {
-                    const matched = billingCustomerParties.find(
-                      (p) => p.id === selectedBillPartyId || p.name.toLowerCase() === billPartyName.trim().toLowerCase()
-                    );
-                    return matched ? <EntityQuickPreviewCard kind="party" party={matched} compact /> : null;
-                  })()}
-                />
-              </div>
-              <div className="grid grid-cols-2 sm:grid-cols-3 gap-2">
-                <div>
-                  <label className="block font-bold text-slate-700 mb-1">Party GSTIN</label>
+        <div className="p-4 space-y-3 text-xs">
+          <div className="grid grid-cols-1 sm:grid-cols-2 lg:grid-cols-4 gap-2.5">
+            {(showAllPay12 ? payInstallments : payInstallments.slice(0, 4)).map((row, idx) => (
+              <div key={row.slot} className="rounded-lg border border-slate-200 bg-slate-50 p-2 space-y-1">
+                <div className="flex items-center justify-between">
+                  <span className="font-extrabold text-emerald-900">PAY {row.slot}</span>
                   <input
-                    type="text"
-                    value={billPartyGstin}
-                    onChange={(e) => setBillPartyGstin(e.target.value.toUpperCase())}
-                    placeholder="19AAAAA0000A1Z5"
-                    className="w-full px-2 py-1.5 rounded border border-slate-300 font-mono-num"
+                    type="date"
+                    value={row.date}
+                    onChange={(e) =>
+                      setPayInstallments((p) =>
+                        p.map((x, i) => (i === idx ? { ...x, date: e.target.value } : x))
+                      )
+                    }
+                    className="px-1.5 py-0.5 rounded border border-slate-300 bg-white font-mono-num text-[11px]"
                   />
                 </div>
-                <div>
-                  <label className="block font-bold text-slate-700 mb-1">GST Mode</label>
-                  <select
-                    value={gstPaidByBill}
-                    onChange={(e) => setGstPaidByBill(e.target.value as 'Consignor' | 'Consignee' | 'Transporter')}
-                    className="w-full px-2 py-1.5 rounded border border-slate-300 bg-white font-semibold"
-                  >
-                    <option value="Consignee">Consignee (RCM 5%)</option>
-                    <option value="Consignor">Consignor (RCM 5%)</option>
-                    <option value="Transporter">Transporter (FCM 12%)</option>
-                  </select>
-                </div>
-                <div className="flex items-end pb-1">
-                  <label className="inline-flex items-center gap-1.5 font-bold text-slate-700 cursor-pointer">
-                    <input
-                      type="checkbox"
-                      checked={interstateBill}
-                      onChange={(e) => setInterstateBill(e.target.checked)}
-                    />
-                    Interstate (IGST)
-                  </label>
-                </div>
-              </div>
-            </div>
-
-            {/* Itemized Party Bill Charges */}
-            <div className="grid grid-cols-3 sm:grid-cols-5 lg:grid-cols-9 gap-2 bg-emerald-50/50 border border-emerald-200 rounded-lg p-2.5">
-              <div>
-                <label className="block text-[11px] font-bold text-slate-700 mb-0.5">Insurance</label>
-                <input type="number" step="0.01" value={insuranceCharge} onChange={(e) => setInsuranceCharge(e.target.value)} className="w-full px-2 py-1 rounded border border-slate-300 font-mono-num" />
-              </div>
-              <div>
-                <label className="block text-[11px] font-bold text-slate-700 mb-0.5">Coll</label>
-                <input type="number" step="0.01" value={collCharge} onChange={(e) => setCollCharge(e.target.value)} className="w-full px-2 py-1 rounded border border-slate-300 font-mono-num" />
-              </div>
-              <div>
-                <label className="block text-[11px] font-bold text-slate-700 mb-0.5">Loading</label>
-                <input type="number" step="0.01" value={billLoadingCharge} onChange={(e) => setBillLoadingCharge(e.target.value)} className="w-full px-2 py-1 rounded border border-slate-300 font-mono-num" />
-              </div>
-              <div>
-                <label className="block text-[11px] font-bold text-slate-700 mb-0.5">Unloading</label>
-                <input type="number" step="0.01" value={billUnloadingCharge} onChange={(e) => setBillUnloadingCharge(e.target.value)} className="w-full px-2 py-1 rounded border border-slate-300 font-mono-num" />
-              </div>
-              <div>
-                <label className="block text-[11px] font-bold text-slate-700 mb-0.5">Surcharge</label>
-                <input type="number" step="0.01" value={surchargeAmt} onChange={(e) => setSurchargeAmt(e.target.value)} className="w-full px-2 py-1 rounded border border-slate-300 font-mono-num" />
-              </div>
-              <div>
-                <label className="block text-[11px] font-bold text-slate-700 mb-0.5">Detention</label>
-                <input type="number" step="0.01" value={detentionBillCharge} onChange={(e) => setDetentionBillCharge(e.target.value)} className="w-full px-2 py-1 rounded border border-slate-300 font-mono-num" />
-              </div>
-              <div>
-                <label className="block text-[11px] font-bold text-slate-700 mb-0.5">ST Charge</label>
-                <input type="number" step="0.01" value={stCharge} onChange={(e) => setStCharge(e.target.value)} className="w-full px-2 py-1 rounded border border-slate-300 font-mono-num" />
-              </div>
-              <div>
-                <label className="block text-[11px] font-bold text-slate-700 mb-0.5">Fumigation</label>
-                <input type="number" step="0.01" value={fumigationCharge} onChange={(e) => setFumigationCharge(e.target.value)} className="w-full px-2 py-1 rounded border border-slate-300 font-mono-num" />
-              </div>
-              <div>
-                <label className="block text-[11px] font-bold text-slate-700 mb-0.5">Extra Chg</label>
-                <input type="number" step="0.01" value={extraBillCharge} onChange={(e) => setExtraBillCharge(e.target.value)} className="w-full px-2 py-1 rounded border border-slate-300 font-mono-num" />
-              </div>
-            </div>
-
-            <div className="grid grid-cols-1 sm:grid-cols-4 gap-2.5 items-center">
-              <div>
-                <label className="block font-bold text-slate-700 mb-1">Advance Received (₹) &amp; Mode</label>
                 <div className="flex gap-1">
+                  <input
+                    type="text"
+                    value={row.refNo}
+                    onChange={(e) =>
+                      setPayInstallments((p) =>
+                        p.map((x, i) => (i === idx ? { ...x, refNo: e.target.value } : x))
+                      )
+                    }
+                    placeholder="UTR / Chq Ref"
+                    className="flex-1 min-w-0 px-1.5 py-1 rounded border border-slate-300 bg-white font-mono-num text-[11px]"
+                  />
                   <input
                     type="number"
                     step="0.01"
-                    value={advanceReceived}
-                    onChange={(e) => setAdvanceReceived(e.target.value)}
-                    className="w-1/2 px-2 py-1.5 rounded border border-slate-300 font-mono-num"
+                    value={row.amount || ''}
+                    onChange={(e) =>
+                      setPayInstallments((p) =>
+                        p.map((x, i) => (i === idx ? { ...x, amount: Number(e.target.value || 0) } : x))
+                      )
+                    }
+                    placeholder="₹ Amt"
+                    className="w-24 px-1.5 py-1 rounded border border-slate-300 bg-white font-mono-num font-bold text-right text-[11px]"
                   />
-                  <select
-                    value={advanceMode}
-                    onChange={(e) => setAdvanceMode(e.target.value)}
-                    className="w-1/2 px-1.5 py-1.5 rounded border border-slate-300 bg-white"
-                  >
-                    {PAYMENT_MODE_OPTIONS.map((m) => (
-                      <option key={m} value={m}>
-                        {m}
-                      </option>
-                    ))}
-                  </select>
                 </div>
               </div>
-              <div className="pt-4 flex items-center gap-2">
-                <label className="inline-flex items-center gap-1.5 font-bold text-emerald-900 cursor-pointer">
-                  <input
-                    type="checkbox"
-                    checked={fullPaymentReceived}
-                    onChange={(e) => setFullPaymentReceived(e.target.checked)}
-                  />
-                  Full Paid
-                </label>
-                {fullPaymentReceived && (
-                  <select
-                    value={fullPaymentMode}
-                    onChange={(e) => setFullPaymentMode(e.target.value)}
-                    className="px-2 py-1 rounded border border-slate-300 bg-white"
-                  >
-                    {PAYMENT_MODE_OPTIONS.map((m) => (
-                      <option key={m} value={m}>
-                        {m}
-                      </option>
-                    ))}
-                  </select>
-                )}
-              </div>
-              <div>
-                <label className="block font-bold text-slate-700 mb-1">Bill Remarks Preset</label>
-                <EditableSearchSelect
-                  ariaLabel="Bill Remarks"
-                  value={billRemarks}
-                  onChange={setBillRemarks}
-                  options={BILL_REMARK_PRESETS}
-                />
-              </div>
-              <div>
-                <label className="block font-bold text-slate-700 mb-1">Footnote / Additional Notes</label>
-                <EditableSearchSelect
-                  ariaLabel="Bill Footnote"
-                  value={billFootnote}
-                  onChange={setBillFootnote}
-                  options={BILL_FOOTNOTE_PRESETS}
-                />
+            ))}
+          </div>
+
+          <div className="grid grid-cols-1 sm:grid-cols-2 lg:grid-cols-5 gap-3 items-end pt-2 border-t border-slate-200">
+            <div>
+              <label className="block font-bold text-slate-700 mb-1">ADV EX DATE</label>
+              <input
+                type="date"
+                value={advExDate}
+                onChange={(e) => setAdvExDate(e.target.value)}
+                className="w-full px-2 py-1.5 rounded border border-slate-300 font-mono-num"
+              />
+            </div>
+            <div>
+              <label className="block font-bold text-slate-700 mb-1">TDS Amount (₹)</label>
+              <input
+                type="number"
+                step="0.01"
+                value={payTdsOverride !== '' ? payTdsOverride : String(effectiveTdsAmt)}
+                onChange={(e) => setPayTdsOverride(e.target.value)}
+                className="w-full px-2 py-1.5 rounded border border-slate-300 font-mono-num"
+              />
+            </div>
+            <div>
+              <label className="block font-bold text-slate-700 mb-1">PAYMENT DUE (After Pay 1–12)</label>
+              <div className="px-2.5 py-1.5 rounded bg-amber-50 border border-amber-300 font-mono-num font-extrabold text-amber-950">
+                ₹ {formatINR(netPaymentDueAfterPay12)} (Paid ₹ {formatINR(totalPay1To12Paid)})
               </div>
             </div>
-
-            <div className="flex flex-wrap items-center justify-between gap-2 pt-2 border-t border-slate-200">
-              <div className="text-xs font-mono-num font-bold text-slate-700">
-                Taxable: ₹{formatINR(billSummary.taxableTotal)} · GST ({billSummary.gstRate}%): ₹{formatINR(billSummary.totalTax)} · Paid: ₹{formatINR(billSummary.paidAmount)} · Net Due: <span className="text-emerald-800">₹{formatINR(billSummary.balanceDue)}</span>
+            <div>
+              <label className="block font-bold text-slate-700 mb-1">SAVE [Y / N]</label>
+              <div className="flex gap-1">
+                {(['Y', 'N'] as const).map((yn) => (
+                  <button
+                    key={yn}
+                    type="button"
+                    onClick={() => setSaveConfirmYN(yn)}
+                    className={`flex-1 py-1.5 rounded font-extrabold cursor-pointer ${
+                      saveConfirmYN === yn
+                        ? yn === 'Y'
+                          ? 'bg-emerald-600 text-white'
+                          : 'bg-red-600 text-white'
+                        : 'bg-slate-100 text-slate-700'
+                    }`}
+                  >
+                    {yn === 'Y' ? 'Y (Ready)' : 'N (Hold)'}
+                  </button>
+                ))}
               </div>
+            </div>
+            <div>
               <button
                 type="button"
                 disabled={saving || readOnly}
-                onClick={() => void saveCompleteSheet('exit')}
-                className="inline-flex items-center gap-1.5 px-4 py-2 rounded-lg bg-[#0D47A1] hover:bg-[#0A3882] text-white text-xs font-extrabold shadow-sm cursor-pointer disabled:opacity-50"
+                onClick={() => void handleSaveCompleteSheet('exit')}
+                className="w-full inline-flex items-center justify-center gap-1.5 px-4 py-2 rounded-lg bg-[#0D47A1] hover:bg-[#0A3882] text-white text-xs font-extrabold shadow-sm cursor-pointer disabled:opacity-50"
               >
                 <CheckCircle2 className="w-4 h-4 text-emerald-300" />
-                <span>Save Complete Sheet &amp; Exit</span>
+                <span>Save Bilty &amp; Lorry Sheet</span>
               </button>
             </div>
           </div>
-        )}
+
+          <div className="text-[11px] font-semibold text-slate-600 bg-slate-50 rounded-lg px-3 py-1.5 border border-slate-200">
+            Note: Party GST Tax Invoices are created cleanly in standalone{' '}
+            <span className="font-extrabold text-[#0D47A1]">B. PARTY TAX INVOICE (BILLING)</span> (select single or multiple saved CNs there).
+          </div>
+        </div>
       </div>
 
       {/* LIVE VIEW ENTRY SHEET / REGISTER TABLE */}
@@ -2882,7 +4234,7 @@ export const AllInOneEntrySheet: React.FC<AllInOneEntrySheetProps> = ({
           <div className="flex items-center gap-2 text-xs font-extrabold">
             <Wallet className="w-4 h-4 text-emerald-400" />
             <span>
-              View Entry Sheet / Live Register ({filteredRegisterRows.length} {isFtl ? 'Trips' : 'Dockets'})
+              Live Bilty &amp; Lorry Register ({filteredRegisterRows.length} {isFtl ? 'Trips' : 'Dockets'})
             </span>
           </div>
           <div className="relative w-64">
@@ -2905,9 +4257,9 @@ export const AllInOneEntrySheet: React.FC<AllInOneEntrySheetProps> = ({
                 <th className="p-2.5">Date &amp; Branch</th>
                 <th className="p-2.5">Parties &amp; Route</th>
                 <th className="p-2.5">Truck / Driver</th>
-                <th className="p-2.5 text-right">Hire &amp; Bal (₹)</th>
+                <th className="p-2.5 text-right">Hire &amp; Due (₹)</th>
                 <th className="p-2.5">Staff Comm</th>
-                <th className="p-2.5 text-right">Bill &amp; Due (₹)</th>
+                <th className="p-2.5 text-right">Invoice Status</th>
                 <th className="p-2.5 text-right">Actions</th>
               </tr>
             </thead>
@@ -2915,7 +4267,7 @@ export const AllInOneEntrySheet: React.FC<AllInOneEntrySheetProps> = ({
               {filteredRegisterRows.length === 0 ? (
                 <tr>
                   <td colSpan={8} className="p-6 text-center text-slate-500 font-semibold">
-                    No entries recorded yet for {divisionMeta.shortLabel} ({activeFy}). Fill Section 1-4 above and click Save.
+                    No entries recorded yet for {divisionMeta.shortLabel} ({activeFy}). Fill Bilty &amp; Lorry Sheet above and click Save.
                   </td>
                 </tr>
               ) : (
@@ -2924,7 +4276,7 @@ export const AllInOneEntrySheet: React.FC<AllInOneEntrySheetProps> = ({
                     <td className="p-2.5 font-mono-num font-extrabold text-[#0D47A1] whitespace-nowrap">
                       {row.docNo}
                       <div className="text-[10px] font-normal text-slate-500">
-                        Freight ₹{formatINR(row.cnFreight)}
+                        {row.showFreightOnPrint ? `Freight ₹${formatINR(row.cnFreight)}` : 'As Agreed on PDF'}
                       </div>
                     </td>
                     <td className="p-2.5 font-mono-num whitespace-nowrap">
@@ -2944,18 +4296,22 @@ export const AllInOneEntrySheet: React.FC<AllInOneEntrySheetProps> = ({
                     <td className="p-2.5 text-right font-mono-num whitespace-nowrap">
                       <div className="font-bold text-slate-800">₹{formatINR(row.hireGross)}</div>
                       <div className="text-[10px] text-amber-800">
-                        Bal ₹{formatINR(row.hireBalance)} · {row.podReceived ? 'POD OK' : 'POD Pend'}
+                        Due ₹{formatINR(row.hireBalance)} · {row.podReceived ? 'POD OK' : 'POD Pend'}
                       </div>
                     </td>
                     <td className="p-2.5 whitespace-nowrap">
                       <div className="font-semibold text-slate-800 truncate max-w-[110px]">{row.staffName}</div>
-                      <div className="text-[10px] font-mono-num text-indigo-700">₹{formatINR(row.staffAmount)}</div>
+                      <div className="text-[10px] font-mono-num text-indigo-700">
+                        ₹{formatINR(row.staffAmount)} {row.staffSettledZero ? '✅' : ''}
+                      </div>
                     </td>
                     <td className="p-2.5 text-right font-mono-num whitespace-nowrap">
                       <div className="font-bold text-emerald-800">{row.billNo}</div>
-                      <div className="text-[10px] text-slate-600">
-                        Tot ₹{formatINR(row.billTotal)} · Due ₹{formatINR(row.billBalance)}
-                      </div>
+                      {row.billTotal > 0 && (
+                        <div className="text-[10px] text-slate-600">
+                          Tot ₹{formatINR(row.billTotal)} · Due ₹{formatINR(row.billBalance)}
+                        </div>
+                      )}
                     </td>
                     <td className="p-2.5 text-right whitespace-nowrap">
                       <div className="inline-flex items-center gap-1">
@@ -2963,7 +4319,7 @@ export const AllInOneEntrySheet: React.FC<AllInOneEntrySheetProps> = ({
                           type="button"
                           onClick={() => setViewModalRow(row)}
                           className="p-1.5 rounded border border-slate-200 hover:bg-slate-100 text-slate-700 cursor-pointer"
-                          title="View Complete Linked Summary"
+                          title="View Summary"
                         >
                           <Eye className="w-3.5 h-3.5" />
                         </button>
@@ -2971,23 +4327,25 @@ export const AllInOneEntrySheet: React.FC<AllInOneEntrySheetProps> = ({
                           type="button"
                           onClick={() => loadRowForEdit(row)}
                           className="p-1.5 rounded border border-blue-200 bg-blue-50 hover:bg-blue-100 text-[#0D47A1] cursor-pointer"
-                          title="Edit / Rectify Complete Entry"
+                          title="Edit / Rectify"
                         >
                           <Edit3 className="w-3.5 h-3.5" />
                         </button>
                         <button
                           type="button"
-                          onClick={() => void handleRowPdfPreview(row)}
+                          onClick={() =>
+                            void buildPdfForRow(row).then((res) => res && onPreviewPdf(res.pdf, res.folder))
+                          }
                           className="p-1.5 rounded border border-emerald-200 bg-emerald-50 hover:bg-emerald-100 text-emerald-800 cursor-pointer"
-                          title="Low-MB PDF Preview"
+                          title="Low-MB LR PDF Preview"
                         >
                           <FileSpreadsheet className="w-3.5 h-3.5" />
                         </button>
                         <button
                           type="button"
-                          onClick={() => void handleRowAutoPrint(row)}
+                          onClick={() => void buildPdfForRow(row).then((res) => res && printPdfDirect(res.pdf))}
                           className="p-1.5 rounded border border-amber-300 bg-amber-50 hover:bg-amber-100 text-amber-900 cursor-pointer"
-                          title="Auto-Print PDF"
+                          title="Auto-Print LR"
                         >
                           <Printer className="w-3.5 h-3.5" />
                         </button>
@@ -3001,14 +4359,135 @@ export const AllInOneEntrySheet: React.FC<AllInOneEntrySheetProps> = ({
         </div>
       </div>
 
+      {/* Staff Bank / UPI Modal with [YES/NO] Edit-Lock */}
+      {bankUpiModalOpen && (
+        <div className="fixed inset-0 z-50 bg-slate-900/60 flex items-center justify-center p-4">
+          <div className="bg-white rounded-xl border border-slate-300 shadow-2xl max-w-md w-full overflow-hidden">
+            <div className="bg-indigo-800 text-white px-4 py-3 flex items-center justify-between">
+              <span className="text-sm font-extrabold flex items-center gap-2">
+                <Landmark className="w-4 h-4 text-amber-300" />
+                Staff Bank &amp; UPI Details — {staffName}
+              </span>
+              <button
+                type="button"
+                onClick={() => setBankUpiModalOpen(false)}
+                className="p-1 rounded hover:bg-white/20 cursor-pointer"
+              >
+                <X className="w-4 h-4" />
+              </button>
+            </div>
+            <div className="p-4 space-y-3 text-xs">
+              <div className="flex items-center justify-between bg-slate-100 px-3 py-2 rounded-lg">
+                <span className="font-bold text-slate-800">
+                  Edit Unlock [YES / NO]:
+                </span>
+                <button
+                  type="button"
+                  onClick={() => setBankUpiEditUnlocked((v) => !v)}
+                  className={`inline-flex items-center gap-1 px-2.5 py-1 rounded font-extrabold cursor-pointer ${
+                    bankUpiEditUnlocked ? 'bg-amber-400 text-slate-950' : 'bg-slate-800 text-white'
+                  }`}
+                >
+                  {bankUpiEditUnlocked ? <Unlock className="w-3.5 h-3.5" /> : <Lock className="w-3.5 h-3.5" />}
+                  {bankUpiEditUnlocked ? 'YES (Editable)' : 'NO (Locked)'}
+                </button>
+              </div>
+              <div>
+                <label className="block font-bold text-slate-700 mb-1">Bank Name, A/c No &amp; IFSC</label>
+                <input
+                  type="text"
+                  value={staffBankAccount}
+                  disabled={!bankUpiEditUnlocked}
+                  onChange={(e) => setStaffBankAccount(e.target.value)}
+                  placeholder="Enter Bank A/c & IFSC"
+                  className="w-full px-2.5 py-2 rounded border border-slate-300 font-mono-num disabled:bg-slate-100"
+                />
+              </div>
+              <div>
+                <label className="block font-bold text-slate-700 mb-1">UPI ID</label>
+                <input
+                  type="text"
+                  value={staffUpiId}
+                  disabled={!bankUpiEditUnlocked}
+                  onChange={(e) => setStaffUpiId(e.target.value)}
+                  placeholder="name@okaxis / mobile@upi"
+                  className="w-full px-2.5 py-2 rounded border border-slate-300 font-mono-num disabled:bg-slate-100"
+                />
+              </div>
+            </div>
+            <div className="px-4 py-2.5 bg-slate-50 border-t border-slate-200 flex justify-end">
+              <button
+                type="button"
+                onClick={() => setBankUpiModalOpen(false)}
+                className="px-4 py-1.5 rounded-lg bg-[#0D47A1] text-white text-xs font-bold cursor-pointer"
+              >
+                Done
+              </button>
+            </div>
+          </div>
+        </div>
+      )}
+
+      {/* Wheel Rate Master Modal */}
+      {wheelRatesModalOpen && (
+        <div className="fixed inset-0 z-50 bg-slate-900/60 flex items-center justify-center p-4">
+          <div className="bg-white rounded-xl border border-slate-300 shadow-2xl max-w-md w-full overflow-hidden">
+            <div className="bg-[#0D47A1] text-white px-4 py-3 flex items-center justify-between">
+              <span className="text-sm font-extrabold">Wheel Commission Rate Master (₹)</span>
+              <button
+                type="button"
+                onClick={() => setWheelRatesModalOpen(false)}
+                className="p-1 rounded hover:bg-white/20 cursor-pointer"
+              >
+                <X className="w-4 h-4" />
+              </button>
+            </div>
+            <div className="p-4 space-y-2 text-xs">
+              {WHEEL_TYPES.map((wt) => (
+                <div key={wt} className="flex items-center justify-between gap-2">
+                  <span className="font-bold text-slate-800">{wt}</span>
+                  <input
+                    type="number"
+                    step="1"
+                    value={draftWheelRates[wt] ?? DEFAULT_WHEEL_RATES[wt]}
+                    onChange={(e) =>
+                      setDraftWheelRates((prev) => ({
+                        ...prev,
+                        [wt]: Math.max(0, Number(e.target.value || 0)),
+                      }))
+                    }
+                    className="w-28 px-2 py-1 rounded border border-slate-300 text-right font-mono-num font-bold"
+                  />
+                </div>
+              ))}
+            </div>
+            <div className="px-4 py-3 bg-slate-50 border-t border-slate-200 flex justify-end gap-2">
+              <button
+                type="button"
+                onClick={() => setWheelRatesModalOpen(false)}
+                className="px-3 py-1.5 rounded border border-slate-300 bg-white text-slate-700 text-xs font-bold cursor-pointer"
+              >
+                Cancel
+              </button>
+              <button
+                type="button"
+                disabled={!isMasterAdmin && readOnly}
+                onClick={() => void handleSaveWheelRates()}
+                className="px-4 py-1.5 rounded bg-emerald-600 text-white text-xs font-bold cursor-pointer"
+              >
+                Save Rate Master
+              </button>
+            </div>
+          </div>
+        </div>
+      )}
+
       {/* Read-Only View Modal */}
       {viewModalRow && (
         <div className="fixed inset-0 z-50 bg-slate-900/60 flex items-center justify-center p-4">
           <div className="bg-white rounded-xl border border-slate-300 shadow-2xl max-w-2xl w-full overflow-hidden">
             <div className="bg-[#0D47A1] text-white px-4 py-3 flex items-center justify-between">
-              <span className="text-sm font-extrabold">
-                Master Entry Summary — {viewModalRow.docNo}
-              </span>
+              <span className="text-sm font-extrabold">Bilty &amp; Lorry Summary — {viewModalRow.docNo}</span>
               <button
                 type="button"
                 onClick={() => setViewModalRow(null)}
@@ -3019,24 +4498,23 @@ export const AllInOneEntrySheet: React.FC<AllInOneEntrySheetProps> = ({
             </div>
             <div className="p-4 grid grid-cols-1 sm:grid-cols-2 gap-3 text-xs">
               <div className="p-3 rounded-lg bg-slate-50 border border-slate-200 space-y-1">
-                <p className="font-extrabold text-[#0D47A1]">1. CN / Docket</p>
+                <p className="font-extrabold text-[#0D47A1]">1. Bilty / CN</p>
                 <p><b>Date &amp; Branch:</b> {formatDateDDMMYYYY(viewModalRow.docDate)} · {viewModalRow.branch}</p>
                 <p><b>Route:</b> {viewModalRow.route}</p>
                 <p><b>Consignor:</b> {viewModalRow.consignorName}</p>
                 <p><b>Consignee:</b> {viewModalRow.consigneeName}</p>
                 <p><b>Truck / Driver:</b> {viewModalRow.truckNo} ({viewModalRow.driverName})</p>
-                <p><b>Freight:</b> ₹ {formatINR(viewModalRow.cnFreight)}</p>
+                <p><b>Freight:</b> {viewModalRow.showFreightOnPrint ? `₹ ${formatINR(viewModalRow.cnFreight)}` : 'As Agreed on Print'}</p>
               </div>
               <div className="p-3 rounded-lg bg-amber-50 border border-amber-200 space-y-1">
                 <p className="font-extrabold text-amber-900">2. Lorry Hire &amp; POD</p>
                 <p><b>Gross Hire:</b> ₹ {formatINR(viewModalRow.hireGross)}</p>
-                <p><b>Balance Payable:</b> ₹ {formatINR(viewModalRow.hireBalance)}</p>
+                <p><b>Balance Due:</b> ₹ {formatINR(viewModalRow.hireBalance)}</p>
                 <p><b>POD Status:</b> {viewModalRow.podReceived ? 'Received / Verified' : 'Pending'}</p>
                 <p className="font-extrabold text-indigo-900 pt-2">3. Staff Ledger</p>
-                <p><b>Staff:</b> {viewModalRow.staffName} · ₹ {formatINR(viewModalRow.staffAmount)}</p>
-                <p className="font-extrabold text-emerald-900 pt-2">4. Party Bill</p>
-                <p><b>Bill To:</b> {viewModalRow.billingPartyName}</p>
-                <p><b>Invoice:</b> {viewModalRow.billNo} · Total ₹ {formatINR(viewModalRow.billTotal)} · Due ₹ {formatINR(viewModalRow.billBalance)}</p>
+                <p><b>Staff:</b> {viewModalRow.staffName} · ₹ {formatINR(viewModalRow.staffAmount)} {viewModalRow.staffSettledZero ? '✅ PAID' : ''}</p>
+                <p className="font-extrabold text-emerald-900 pt-2">4. Billing Tab Status</p>
+                <p><b>Invoice:</b> {viewModalRow.billNo}</p>
               </div>
             </div>
             <div className="px-4 py-3 bg-slate-100 border-t border-slate-200 flex justify-end gap-2">
@@ -3054,11 +4532,11 @@ export const AllInOneEntrySheet: React.FC<AllInOneEntrySheetProps> = ({
               </button>
               <button
                 type="button"
-                onClick={() => void handleRowAutoPrint(viewModalRow)}
+                onClick={() => void buildPdfForRow(viewModalRow).then((res) => res && printPdfDirect(res.pdf))}
                 className="inline-flex items-center gap-1 px-3 py-1.5 rounded bg-amber-500 text-slate-950 text-xs font-bold cursor-pointer"
               >
                 <Printer className="w-3.5 h-3.5" />
-                Auto-Print
+                Auto-Print LR
               </button>
               <button
                 type="button"

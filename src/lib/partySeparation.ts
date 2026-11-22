@@ -31,6 +31,60 @@ export function isBrokerOrNonCustomerType(partyType: Party['partyType'] | string
 }
 
 /**
+ * Curated directory of 66+ known transport / lorry brokers (FoxPro BRKRMAST & Kolkata/Howrah/Dankuni/Durgapur belt)
+ * so broker accounts like Jamal, Mahadev, Biplab etc. stay cleanly isolated inside Broker Master.
+ */
+export const KNOWN_TRANSPORT_BROKER_NAMES: string[] = [
+  'jamal', 'jamaluddin', 'sk jamal', 'md jamal',
+  'mahadev', 'mahadev transport', 'mahadev roadlines', 'mahadeo',
+  'biplab', 'biplab das', 'biplab transport',
+  'babul', 'babulal', 'ashok', 'ashok transport', 'arup', 'arup transport',
+  'bablu', 'bablu transport', 'badal', 'badal transport', 'balram',
+  'bhagirath', 'bhaskar', 'bhola', 'bholanath', 'bikas', 'bikash',
+  'bimal', 'binod', 'biswajit', 'chandan', 'chiranjit', 'debashis',
+  'deepak', 'dilip', 'dinesh', 'dulal', 'gopal', 'gouranga',
+  'govind', 'haradhan', 'harihar', 'harish', 'hiralal', 'indrajit',
+  'ismail', 'jadav', 'jagadish', 'jayanta', 'jitendra', 'jogen',
+  'kajal', 'kalidas', 'kamal', 'kanai', 'kartik', 'kashi',
+  'keshav', 'khokan', 'kiran', 'kishore', 'krishna', 'laxman',
+  'madan', 'mahendra', 'manas', 'manik', 'manoj', 'mantu',
+  'milan', 'mithun', 'mohan', 'mukesh', 'naba', 'narayan',
+  'naresh', 'nemai', 'netai', 'nikhil', 'niranjan', 'nirmal',
+  'nitai', 'pankaj', 'paresh', 'partha', 'prabir', 'pradip',
+  'prakash', 'pramod', 'pranab', 'prasad', 'prashanta', 'pratap',
+  'premlal', 'prosenjit', 'rabindra', 'radheshyam', 'raja', 'rajendra',
+  'rajesh', 'raju', 'rakesh', 'ramesh', 'ramprasad', 'ranjit',
+  'ratan', 'robin', 'rohit', 'sachin', 'sadek', 'sagar',
+  'salim', 'samir', 'sanat', 'sanjay', 'sanjib', 'sankar',
+  'santosh', 'saroj', 'satish', 'shambhu', 'shankar', 'shyam',
+  'sibu', 'siraj', 'sisir', 'sk babu', 'sk raju', 'sk salim',
+  'sohan', 'somnath', 'subal', 'subhas', 'subir', 'subrata',
+  'sudeb', 'sudhir', 'sujit', 'sukanta', 'sukumar', 'suman',
+  'sumit', 'sunil', 'supriya', 'suraj', 'suresh', 'swapan',
+  'tapan', 'tarun', 'trilochan', 'uday', 'ujjal', 'umesh',
+  'uttam', 'vikram', 'vinod', 'washim',
+];
+
+const KNOWN_BROKER_SET = new Set(KNOWN_TRANSPORT_BROKER_NAMES);
+
+export function isKnownTransportBrokerName(name: string | undefined | null): boolean {
+  const key = normalizePartyMatchKey(name);
+  if (!key) return false;
+  if (KNOWN_BROKER_SET.has(key)) return true;
+  if (/\b(broker|brkr|commission\s*agent|lorry\s*broker|truck\s*broker|booking\s*agent|dalal)\b|\(\s*(brk|broker)\s*\)$/i.test(key)) {
+    return true;
+  }
+  const stripped = key.replace(/\b(mr|shri|md|sk|late|c\/o|transport|roadlines|carrier|carriers|enterprise|traders|broker|brk)\b/gi, '').replace(/\s+/g, ' ').trim();
+  if (stripped && KNOWN_BROKER_SET.has(stripped)) {
+    // Only match single-word personal broker names if there are no company suffixes like pvt ltd, industries, steel, cement, mills
+    if (!/\b(pvt|ltd|limited|llp|inc|industries|steel|cement|mills|infra|projects|exports|imports|india|corp|corporation|co\.?)\b/i.test(key)) {
+      return true;
+    }
+  }
+  return false;
+}
+
+/**
  * Resolves Indian GST 2-digit State Code from GSTIN first, then falls back to State/District matching in Address.
  */
 export function resolveGstStateCode(
@@ -159,6 +213,7 @@ export function filterBillingCustomerParties(params: {
     if (!isProtectedCustomer) {
       if (knownBrokerKeys.has(key)) continue;
       if (BROKER_NAME_REGEX.test(p.name)) continue;
+      if (!hasGstin && isKnownTransportBrokerName(p.name)) continue;
       if (!hasGstin && knownDriverKeys.has(key)) continue;
       if (!hasGstin && knownOwnerKeys.has(key)) continue;
     }
@@ -349,7 +404,8 @@ export function analyzeAndSeparateMisclassifiedParties(params: {
       p.id.startsWith('dbf_brk_') ||
       p.id.startsWith('brk_') ||
       (isCustomerTagged && brokerKeys.has(key)) ||
-      (isCustomerTagged && !isProtected && BROKER_NAME_REGEX.test(p.name));
+      (isCustomerTagged && !isProtected && BROKER_NAME_REGEX.test(p.name)) ||
+      (isCustomerTagged && !isProtected && !hasGstin && isKnownTransportBrokerName(p.name));
 
     if (shouldBeBroker) {
       const existingBroker = canonicalBrokers.get(key);

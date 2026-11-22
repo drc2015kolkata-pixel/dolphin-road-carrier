@@ -19,6 +19,7 @@ import {
   triggerExternalShareLink,
 } from '../lib/shareUtils';
 import { isLogisticsDriveFolder } from '../lib/driveBackup';
+import { OFFICIAL_PARTY_EMAIL } from '../lib/firebase';
 import { AnyDriveFolderName, BillCopyCount, CompanySettings, Party } from '../types/erp';
 
 interface A4PreviewModalProps {
@@ -120,7 +121,7 @@ export const A4PreviewModal: React.FC<A4PreviewModalProps> = ({
     }
   };
 
-  const companyReplyEmail = company?.email || 'drc.kolkata1@gmail.com';
+  const companyReplyEmail = company?.email || OFFICIAL_PARTY_EMAIL;
   const shareText = [
     pdf.shareMeta?.summaryText || pdf.title,
     `Document File: ${pdf.fileName}`,

@@ -91,6 +91,7 @@ import {
 import {
   clearErpSession,
   CustomAuthSession,
+  forceTwoWaySyncAndMerge,
   getStaffSheetAccess,
   loadSavedErpSession,
   loginWithCredentials,
@@ -146,7 +147,21 @@ import { DashboardHome } from './components/DashboardHome';
 import { SearchableSelect } from './components/SearchableSelect';
 import type { MasterTabId } from './components/MasterModule';
 import type { ReportTab } from './components/ReportsMisModule';
-import { getEwayBillExpiryState } from './lib/ewayBillUtils';
+import { evaluateEway8HourAlarms, getEwayBillExpiryState } from './lib/ewayBillUtils';
+import {
+  evaluateKycExpiryAlarms,
+  evaluateMonthlyGstAlarms,
+} from './lib/kycVaultStorage';
+import { playAlertBeep, playVerifiedBeep } from './lib/audioFeedback';
+import {
+  dispatchBackgroundNotification,
+  getPhoneAlarmPermissionState,
+  installScreenCaptureShield,
+  isScreenShieldTemporarilyUnlocked,
+  lockScreenShieldImmediately,
+  requestPhoneAlarmPermission,
+  unlockScreenShieldTemporarily,
+} from './lib/securityShield';
 
 const A4PreviewModal = lazy(() =>
   import('./components/A4PreviewModal').then((m) => ({ default: m.A4PreviewModal }))
@@ -197,20 +212,20 @@ interface SheetTabDef {
 
 const TAB_LABELS: Record<SheetTabId, string> = {
   dashboard: 'Dashboard',
-  allInOne: 'All-in-One Sheet',
-  master: 'Master',
+  allInOne: 'BILTY & LORRY MASTER SHEET',
+  master: 'MASTERS & LEDGERS',
   lr: 'Consignment / LR',
-  billing: 'Billing & Quotes',
+  billing: 'PARTY TAX INVOICE (BILLING)',
   lorryHire: 'Lorry Hire & POD',
   commission: 'Staff Commission',
   bankImport: 'Bank & TDS Import',
   accounts: 'Accounts',
-  reports: 'Reports',
+  reports: 'GST, STATUTORY VAULT & FILING HUB',
   mis: 'MIS Reports',
   staffAccess: 'Staff Sheet Access Control',
   backup: 'Backup / Restore',
   settings: 'Settings',
-  guide: 'User Guide (অপারেটিং বুক)',
+  guide: 'BILINGUAL OPERATING BOOK (অপারেটিং বুক)',
   about: 'About DRC',
 };
 
@@ -314,6 +329,22 @@ export default function App() {
   const [liveMonitorOpen, setLiveMonitorOpen] = useState(false);
   const [iosGuideOpen, setIosGuideOpen] = useState(false);
   const [appClosedOverlay, setAppClosedOverlay] = useState(false);
+  const [rotateMode, setRotateMode] = useState<'auto' | 'landscape' | 'portrait'>('auto');
+  const [alarmPopupDismissed, setAlarmPopupDismissed] = useState(false);
+  const alarmBeepedRef = useRef(false);
+  const [eway8hBannerDismissed, setEway8hBannerDismissed] = useState(false);
+  const eway8hLastBeepRef = useRef<number>(0);
+
+  // Stage B: Anti-Screenshot Privacy Shield + Background Phone Alarms
+  const [privacyCurtainReason, setPrivacyCurtainReason] = useState<string | null>(null);
+  const [shieldUnlockPin, setShieldUnlockPin] = useState('');
+  const [shieldUnlockError, setShieldUnlockError] = useState<string | null>(null);
+  const [shieldTempUnlocked, setShieldTempUnlocked] = useState(() =>
+    isScreenShieldTemporarilyUnlocked()
+  );
+  const [phoneAlarmPermission, setPhoneAlarmPermission] = useState<
+    NotificationPermission | 'unsupported'
+  >(() => getPhoneAlarmPermissionState());
 
   // Startup & Monthly Formula Health Guard + Admin PIN Modal
   const [formulaHealthReport, setFormulaHealthReport] = useState<FormulaHealthReport | null>(null);
@@ -814,18 +845,120 @@ export default function App() {
       return daysSinceDate(inv.invoiceDate) > 7;
     });
 
+    const gstAlarms = evaluateMonthlyGstAlarms();
+    const kycAlarms = evaluateKycExpiryAlarms(companySettings.kycVault);
+
     return {
       failedVehicles,
       failedDrivers,
       expiringEwbs,
       overdueInvoices,
+      gstAlarms,
+      kycAlarms,
       totalCount:
         failedVehicles.length +
         failedDrivers.length +
         expiringEwbs.length +
-        overdueInvoices.length,
+        overdueInvoices.length +
+        gstAlarms.length +
+        kycAlarms.length,
     };
-  }, [vehicles, drivers, visibleConsignments, visibleInvoices]);
+  }, [vehicles, drivers, visibleConsignments, visibleInvoices, companySettings.kycVault]);
+
+  const eway8hAlarms = useMemo(
+    () => evaluateEway8HourAlarms(visibleConsignments, visibleLorryHires),
+    [visibleConsignments, visibleLorryHires]
+  );
+
+  useEffect(() => {
+    if (!erpSession || alarmBeepedRef.current) return;
+    if (alerts.gstAlarms.length > 0 || alerts.kycAlarms.length > 0) {
+      alarmBeepedRef.current = true;
+      const topAlarm = alerts.gstAlarms[0] || alerts.kycAlarms[0];
+      if (topAlarm) {
+        void dispatchBackgroundNotification({
+          title: topAlarm.title,
+          body: topAlarm.message,
+          tag: `drc-compliance-${topAlarm.id}`,
+          requireInteraction: true,
+        });
+      }
+      const timer = setTimeout(() => playAlertBeep(), 600);
+      return () => clearTimeout(timer);
+    }
+  }, [erpSession, alerts.gstAlarms, alerts.kycAlarms]);
+
+  // Continuous 8h -> 1h E-Way Bill Countdown Alarm (stops once Unloading Date or Delivered POD is saved)
+  useEffect(() => {
+    if (!erpSession || eway8hAlarms.length === 0) return;
+    const triggerCountdownAlarm = () => {
+      const top = eway8hAlarms[0];
+      if (!top) return;
+      const nowMs = Date.now();
+      if (nowMs - eway8hLastBeepRef.current < 45_000) return;
+      eway8hLastBeepRef.current = nowMs;
+      playAlertBeep();
+      void dispatchBackgroundNotification({
+        title: top.title,
+        body: top.message,
+        tag: `drc-ewb-8h-${top.cnId}`,
+        requireInteraction: true,
+      });
+    };
+    triggerCountdownAlarm();
+    const interval = window.setInterval(triggerCountdownAlarm, 10 * 60_000);
+    return () => window.clearInterval(interval);
+  }, [erpSession, eway8hAlarms]);
+
+  // Anti-Screenshot & Screen-Capture Privacy Shield across Windows, Tablet & Android
+  useEffect(() => {
+    if (!erpSession) return;
+    const uninstall = installScreenCaptureShield({
+      enabled: true,
+      onViolation: (reason) => {
+        playAlertBeep();
+        setPrivacyCurtainReason(reason);
+      },
+    });
+    const timer = window.setInterval(() => {
+      setShieldTempUnlocked(isScreenShieldTemporarilyUnlocked());
+    }, 5000);
+    return () => {
+      uninstall();
+      window.clearInterval(timer);
+    };
+  }, [erpSession]);
+
+  const handleTogglePhoneAlarm = useCallback(async () => {
+    const res = await requestPhoneAlarmPermission();
+    setPhoneAlarmPermission(res);
+    if (res === 'granted') {
+      playVerifiedBeep();
+      void dispatchBackgroundNotification({
+        title: 'DRC Phone Alarms Active',
+        body: 'GST (7/8/15th), Master KYC (10/5/2d) & E-Way 8h Countdown alerts are active.',
+        tag: 'drc-alarm-ready',
+      });
+    } else {
+      playAlertBeep();
+    }
+  }, []);
+
+  const handleToggleRotateScreen = useCallback(async () => {
+    const nextMode: 'landscape' | 'portrait' =
+      rotateMode === 'landscape' ? 'portrait' : 'landscape';
+    setRotateMode(nextMode);
+    try {
+      const orient = window.screen?.orientation as ScreenOrientation & {
+        lock?: (o: string) => Promise<void>;
+      };
+      if (orient && typeof orient.lock === 'function') {
+        await orient.lock(nextMode);
+      }
+    } catch {
+      // Desktop browsers or OS blocks OS-level lock; CSS layout toggle remains active cleanly
+    }
+  }, [rotateMode]);
 
   const getSheetAccess = useCallback(
     (sheetKey: SheetPermissionKey) => {
@@ -1108,6 +1241,11 @@ export default function App() {
   };
 
   const handleRefreshApp = async () => {
+    try {
+      await forceTwoWaySyncAndMerge();
+    } catch {
+      // Preserve offline queue if offline
+    }
     try {
       if ('serviceWorker' in navigator) {
         const reg = await navigator.serviceWorker.getRegistration();
@@ -1573,23 +1711,23 @@ export default function App() {
     highlightClass?: string;
   }> = [
     { id: 'dashboard', label: 'Dashboard', icon: LayoutDashboard, perm: 'dashboard' },
-    { id: 'allInOne', label: 'All-in-One Entry Sheet', icon: ClipboardList, perm: 'allInOne' },
-    { id: 'master', label: 'Master', icon: Building2, perm: 'master' },
-    { id: 'lr', label: 'Consignment / LR', icon: ScanLine, perm: 'lr' },
-    { id: 'billing', label: 'Billing & Quotes', icon: FileSpreadsheet, perm: 'billing' },
+    { id: 'allInOne', label: 'A. Bilty & Lorry Master Sheet', icon: ClipboardList, perm: 'allInOne' },
+    { id: 'billing', label: 'B. Party Tax Invoice (Billing)', icon: FileSpreadsheet, perm: 'billing' },
+    { id: 'master', label: 'C. Masters & Ledgers', icon: Building2, perm: 'master' },
+    { id: 'bankImport', label: 'Bank Credit Reader & 194C', icon: Landmark, perm: 'bankImport' },
+    { id: 'reports', label: 'D. GST, Statutory Vault & ITR', icon: FileBarChart2, perm: 'reports' },
+    { id: 'guide', label: 'Bilingual Operating Book', icon: BookOpen },
+    { id: 'lr', label: 'CN / LR Register', icon: ScanLine, perm: 'lr' },
     { id: 'lorryHire', label: 'Lorry Hire & POD', icon: Truck, perm: 'lorryHire' },
-    { id: 'commission', label: 'Staff Commission', icon: Coins, perm: 'commission' },
-    { id: 'bankImport', label: 'Bank & TDS Import', icon: Landmark, perm: 'bankImport' },
-    { id: 'accounts', label: 'Accounts', icon: BookOpen, perm: 'accounts' },
-    { id: 'transactions', label: 'Transactions', icon: ArrowLeftRight, perm: 'accounts' },
-    { id: 'reports', label: 'Reports', icon: FileBarChart2, perm: 'reports' },
-    { id: 'mis', label: 'MIS Reports', icon: PieChart, perm: 'mis' },
-    { id: 'settings', label: 'Settings', icon: Settings, perm: 'settings' },
+    { id: 'commission', label: 'Staff Details & Chart', icon: Coins, perm: 'commission' },
+    { id: 'accounts', label: 'Tally Party Accounts', icon: BookOpen, perm: 'accounts' },
+    { id: 'transactions', label: 'Transactions Daybook', icon: ArrowLeftRight, perm: 'accounts' },
+    { id: 'mis', label: 'MIS & Profit/Loss', icon: PieChart, perm: 'mis' },
+    { id: 'settings', label: 'Settings & Bank API', icon: Settings, perm: 'settings' },
     { id: 'backup', label: 'Backup / Restore', icon: DatabaseBackup, perm: 'backup' },
-    { id: 'guide', label: 'User Guide (অপারেটিং বুক)', icon: BookOpen },
     {
       id: 'staffAccess',
-      label: 'Staff Sheet Access Control',
+      label: 'Staff Access Control',
       icon: KeyRound,
       perm: 'staffAccess',
       highlightClass: 'bg-amber-500/20 border border-amber-300/40 text-amber-100',
@@ -1611,15 +1749,86 @@ export default function App() {
   const showFullBanner = !isFormFocused || bannerExpanded;
   const activeBusinessMeta = BUSINESS_MODE_META[businessMode];
   const businessModesList: BusinessMode[] = ['FTL', 'LOGISTICS', 'PTL', 'COURIER'];
+  const activeFocusedFormTitle =
+    businessMode === 'FTL'
+      ? TAB_LABELS[activeTab] || activeTab
+      : `${activeBusinessMeta.shortLabel} · ${logiActiveTab.toUpperCase()}`;
 
   return (
     <ErrorBoundary>
-      <div className="min-h-screen w-full max-w-full overflow-x-clip flex flex-col bg-[#E2E8F0] text-slate-900 select-none">
-      {/* Flush Sticky Top Header Bar (Auto-Focus Slim Mode on Forms + Android/Tablet Zero-Overflow Pinned Switch Off) */}
-      <header className="sticky top-0 z-30 w-full max-w-full bg-white border-b border-slate-300 px-2 sm:px-3 md:px-4 py-1.5 sm:py-2 shadow-sm no-print space-y-1.5">
-        {/* Row 1: Left Controls & Brand | Top-Center Sacred Frames (auto-collapsed in forms) | Right Business Switchers, Health, FY & Switch Off */}
-        <div className="flex flex-wrap items-center justify-between gap-1.5 sm:gap-2 md:gap-3 min-w-0">
-          {/* Left: Sidebar Toggle, Dedicated Within-Business Back Button & Triangular DRC Brand */}
+      <div
+        className={`min-h-screen w-full max-w-full overflow-x-clip flex flex-col bg-[#E2E8F0] text-slate-900 select-none ${
+          rotateMode === 'landscape' ? 'min-w-[820px] sm:min-w-0' : ''
+        }`}
+      >
+      {/* Slim 36px 1-Line Sticky Bar when ANY Form is Open | Full Compact 2-Row Header on Dashboard */}
+      {isFormFocused && !bannerExpanded ? (
+        <header className="sticky top-0 z-30 w-full h-[36px] bg-[#0B3B8C] text-white border-b border-blue-900 px-2 sm:px-3 flex items-center justify-between gap-2 shadow-sm no-print">
+          <div className="flex items-center gap-1.5 min-w-0">
+            <button
+              type="button"
+              onClick={handleReturnToCurrentBusinessDashboard}
+              className="inline-flex items-center gap-1 px-2 py-0.5 rounded bg-amber-400 hover:bg-amber-300 text-slate-950 text-[11px] font-extrabold cursor-pointer whitespace-nowrap shrink-0 shadow-sm"
+              title={`← Back strictly to ${activeBusinessMeta.shortLabel} Dashboard`}
+            >
+              <ArrowLeft className="w-3.5 h-3.5 text-slate-950 shrink-0" />
+              <span>← Back</span>
+            </button>
+            <button
+              type="button"
+              onClick={() => setBannerExpanded(true)}
+              className="hidden sm:inline-flex items-center gap-0.5 px-1.5 py-0.5 rounded bg-white/15 hover:bg-white/25 text-[10px] font-bold text-blue-100 cursor-pointer shrink-0"
+              title="Expand Dashboard Header"
+            >
+              <ChevronDown className="w-3 h-3" />
+              <span>Header</span>
+            </button>
+          </div>
+
+          <div className="flex items-center gap-1.5 min-w-0">
+            <span className="px-1.5 py-0.5 rounded bg-white/15 text-amber-200 text-[10px] font-extrabold shrink-0">
+              {activeBusinessMeta.shortLabel}
+            </span>
+            <h1 className="text-[11px] sm:text-xs font-extrabold tracking-wide text-white truncate">
+              {activeFocusedFormTitle}
+            </h1>
+          </div>
+
+          <div className="flex items-center gap-1.5 shrink-0">
+            <button
+              type="button"
+              onClick={() => void handleToggleRotateScreen()}
+              className="inline-flex items-center gap-1 px-2 py-0.5 rounded bg-white/15 hover:bg-white/25 text-white text-[10px] font-bold cursor-pointer whitespace-nowrap"
+              title="Rotate Landscape / Portrait View"
+            >
+              <RefreshCw className="w-3 h-3 text-amber-300" />
+              <span className="hidden md:inline">Rotate</span>
+            </button>
+            <button
+              type="button"
+              onClick={() => window.dispatchEvent(new CustomEvent('drc:form-save'))}
+              className="inline-flex items-center gap-1 px-2.5 py-0.5 rounded bg-emerald-500 hover:bg-emerald-400 text-slate-950 text-[11px] font-extrabold cursor-pointer whitespace-nowrap shadow-sm"
+              title="Save active form entry"
+            >
+              <CheckCircle2 className="w-3.5 h-3.5 text-slate-950 shrink-0" />
+              <span>Save</span>
+            </button>
+            <button
+              type="button"
+              onClick={() => void handleSwitchOffExitApp()}
+              className="inline-flex items-center gap-1 px-2 py-0.5 rounded bg-red-600 hover:bg-red-500 text-white text-[11px] font-extrabold cursor-pointer whitespace-nowrap shadow-sm"
+              title="Switch Off / Exit App safely"
+            >
+              <Power className="w-3 h-3 shrink-0" />
+              <span>Switch Off</span>
+            </button>
+          </div>
+        </header>
+      ) : (
+      <header className="sticky top-0 z-30 w-full max-w-full bg-white border-b border-slate-300 px-2 sm:px-3 md:px-4 py-1.5 shadow-sm no-print space-y-1.5">
+        {/* Row 1: Left Controls & Brand | Switchers, Health, FY, Rotate, Lock, Switch Off | Top-Right Sacred Frames (Windows & Android) */}
+        <div className="flex flex-wrap items-center justify-between gap-1.5 sm:gap-2 min-w-0">
+          {/* Left: Sidebar Toggle, Back Button, & DRC Brand */}
           <div className="flex items-center gap-1.5 sm:gap-2 min-w-0">
             {businessMode === 'FTL' && (
               <button
@@ -1638,96 +1847,38 @@ export default function App() {
               <button
                 type="button"
                 onClick={handleReturnToCurrentBusinessDashboard}
-                className="inline-flex items-center gap-1 px-2 sm:px-2.5 py-1.5 rounded-lg border border-blue-300 bg-blue-50 hover:bg-blue-100 text-[#0D47A1] text-xs font-extrabold cursor-pointer whitespace-nowrap shrink-0"
-                title={`Return to ${activeBusinessMeta.shortLabel} Dashboard`}
+                className="inline-flex items-center gap-1 px-2 sm:px-2.5 py-1.5 rounded-lg border-2 border-amber-400 bg-amber-300 hover:bg-amber-200 text-slate-950 text-xs font-extrabold cursor-pointer whitespace-nowrap shrink-0 shadow-sm"
+                title={`Return strictly to ${activeBusinessMeta.shortLabel} Dashboard`}
               >
                 <ArrowLeft className="w-3.5 h-3.5 shrink-0" />
-                <span>Back</span>
+                <span>← Back</span>
               </button>
             )}
-            <DrcTriangleLogo
-              className={`${showFullBanner ? 'w-8 h-8 sm:w-9 sm:h-9 md:w-10 md:h-10' : 'w-7 h-7'} shrink-0 transition-all`}
-            />
+            <DrcTriangleLogo className="w-8 h-8 sm:w-9 sm:h-9 shrink-0 transition-all" />
             <div className="min-w-0">
-              <h1
-                className={`${
-                  showFullBanner ? 'text-xs sm:text-base md:text-lg' : 'text-xs sm:text-sm'
-                } font-extrabold tracking-tight text-[#0B3B8C] leading-none truncate`}
-              >
+              <h1 className="text-xs sm:text-base font-extrabold tracking-tight text-[#0B3B8C] leading-none truncate">
                 DOLPHIN ROAD CARRIERS
               </h1>
-              {showFullBanner && (
-                <p className="text-[10px] md:text-[11px] font-bold italic text-[#1565C0] mt-0.5 truncate max-w-[200px] sm:max-w-xs">
-                  {businessMode === 'FTL'
-                    ? companySettings.tagline || 'Fast · Safe · Reliable'
-                    : activeBusinessMeta.subtitle}
-                </p>
-              )}
+              <p className="text-[10px] font-bold italic text-[#1565C0] mt-0.5 truncate max-w-[180px] sm:max-w-xs">
+                {businessMode === 'FTL'
+                  ? companySettings.tagline || 'Fast · Safe · Reliable'
+                  : activeBusinessMeta.subtitle}
+              </p>
             </div>
-            {isFormFocused && (
+            {isFormFocused && bannerExpanded && (
               <button
                 type="button"
-                onClick={() => setBannerExpanded((v) => !v)}
-                className="hidden sm:inline-flex items-center gap-0.5 px-1.5 py-1 rounded border border-slate-200 bg-slate-50 hover:bg-slate-100 text-[10px] font-bold text-slate-600 cursor-pointer shrink-0"
-                title={bannerExpanded ? 'Slim Auto-Focus Header' : 'Expand Company Header Banner'}
+                onClick={() => setBannerExpanded(false)}
+                className="inline-flex items-center gap-0.5 px-2 py-1 rounded border border-slate-300 bg-slate-100 hover:bg-slate-200 text-[10px] font-bold text-slate-700 cursor-pointer shrink-0"
+                title="Collapse back to 36px Slim Form Bar"
               >
-                {bannerExpanded ? <ChevronUp className="w-3 h-3" /> : <ChevronDown className="w-3 h-3" />}
-                <span>{bannerExpanded ? 'Slim' : 'Banner'}</span>
+                <ChevronUp className="w-3 h-3" />
+                <span>Slim Bar</span>
               </button>
             )}
           </div>
 
-          {/* Top-Center: Two Compact Sacred Blessing Frames (Visible on Dashboard / Overview; Auto-Collapsed on Forms) */}
-          {showFullBanner && (
-            <div
-              className="hidden lg:flex items-center justify-center gap-2.5 mx-auto shrink-0"
-              aria-label="Sacred Blessing Frames"
-            >
-              <div className="flex flex-col items-center">
-                <div className="p-0.5 rounded-lg bg-gradient-to-b from-amber-300 via-yellow-500 to-amber-700 shadow-sm">
-                  {bholeImgFailed ? (
-                    <div className="w-9 h-9 sm:w-11 sm:h-11 rounded-[5px] bg-amber-50 flex items-center justify-center text-amber-800 font-extrabold text-[10px]">
-                      ॐ शिव
-                    </div>
-                  ) : (
-                    <img
-                      src={bholeBabaSrc}
-                      alt="Bhole Baba (Lord Shiva) with raised blessing hand"
-                      referrerPolicy="no-referrer"
-                      onError={() => setBholeImgFailed(true)}
-                      className="w-9 h-9 sm:w-11 sm:h-11 rounded-[5px] object-cover bg-amber-50 block"
-                    />
-                  )}
-                </div>
-                <span className="text-[9px] sm:text-[10px] font-extrabold text-amber-900 leading-tight mt-0.5 whitespace-nowrap">
-                  Bhole Baba
-                </span>
-              </div>
-
-              <div className="flex flex-col items-center">
-                <div className="p-0.5 rounded-lg bg-gradient-to-b from-amber-300 via-yellow-500 to-amber-700 shadow-sm">
-                  {shyamImgFailed ? (
-                    <div className="w-9 h-9 sm:w-11 sm:h-11 rounded-[5px] bg-amber-50 flex items-center justify-center text-amber-800 font-extrabold text-[10px]">
-                      श्याम
-                    </div>
-                  ) : (
-                    <img
-                      src={khatuShyamSrc}
-                      alt="Khatu Shyam Ji with raised blessing hand"
-                      referrerPolicy="no-referrer"
-                      onError={() => setShyamImgFailed(true)}
-                      className="w-9 h-9 sm:w-11 sm:h-11 rounded-[5px] object-cover bg-amber-50 block"
-                    />
-                  )}
-                </div>
-                <span className="text-[9px] sm:text-[10px] font-extrabold text-amber-900 leading-tight mt-0.5 whitespace-nowrap">
-                  Khatu Shyam Ji
-                </span>
-              </div>
-            </div>
-          )}
-
-          {/* Right Utility Strip: 4-Business Switcher, Health Shield, FY Badge, Branch, Bell, Lock, Switch Off */}
+          {/* Right Utility Strip + Dual Top-Right Sacred Deities Photos (Always Visible on Windows AND Android) */}
           <div className="flex flex-wrap items-center justify-end gap-1 sm:gap-1.5 min-w-0 max-w-full">
             {/* 4 Single-Click Business Switchers with Active Checkmarks */}
             <div
@@ -1792,28 +1943,25 @@ export default function App() {
               title="Click to inspect Startup & Monthly Formula Health Guard + Anti-Tamper Security Shield"
             >
               <ShieldCheck className="w-3.5 h-3.5 text-emerald-700 shrink-0" />
-              <span className="hidden md:inline">
+              <span className="hidden xl:inline">
                 {formulaHealthReport?.badgeLabel || 'System Health: 100% Error-Free'}
               </span>
-              <span className="md:hidden">100% Health</span>
+              <span className="xl:hidden">100% Health</span>
             </button>
 
-            {/* High-Contrast Active Financial Year Badge (Locked by Default with Padlock Toggle) */}
+            {/* High-Contrast Active Financial Year Badge */}
             <div
               className="inline-flex items-center gap-1 rounded-lg bg-[#0B3B8C] border-2 border-amber-400 px-2 py-0.5 text-white shadow-sm shrink-0"
               role="group"
               aria-label="Active Financial Year Control"
             >
               <Calendar className="w-3.5 h-3.5 text-amber-300 shrink-0" />
-              <span className="hidden sm:inline text-[10px] font-extrabold tracking-wide text-amber-200 whitespace-nowrap">
-                FY:
-              </span>
               {fyLocked ? (
-                <span className="text-[11px] sm:text-xs font-extrabold font-mono-num text-white whitespace-nowrap">
+                <span className="text-[11px] font-extrabold font-mono-num text-white whitespace-nowrap">
                   {activeFyShort}
                 </span>
               ) : (
-                <div className="w-28">
+                <div className="w-24">
                   <SearchableSelect
                     ariaLabel="Select Financial Year"
                     value={activeFy}
@@ -1834,63 +1982,57 @@ export default function App() {
               <button
                 type="button"
                 onClick={() => setFyLocked((prev) => !prev)}
-                aria-label={
-                  fyLocked
-                    ? 'Locked — click to unlock Financial Year selector'
-                    : 'Unlocked — select Financial Year or click to lock'
-                }
-                title={
-                  fyLocked
-                    ? 'Financial Year Locked by default — Click to unlock (🔓) to switch season'
-                    : 'Unlocked — Select season (auto-locks on change) or click to lock'
-                }
-                className={`inline-flex items-center gap-1 px-1.5 py-0.5 rounded text-[10px] font-extrabold transition-colors cursor-pointer whitespace-nowrap shrink-0 ${
+                className={`inline-flex items-center gap-1 px-1 py-0.5 rounded text-[10px] font-extrabold transition-colors cursor-pointer shrink-0 ${
                   fyLocked
                     ? 'bg-amber-400 text-slate-950 hover:bg-amber-300'
                     : 'bg-emerald-400 text-slate-950 hover:bg-emerald-300'
                 }`}
+                title={fyLocked ? 'Unlock FY Selector' : 'Lock FY Selector'}
               >
                 <span>{fyLocked ? '🔒' : '🔓'}</span>
               </button>
             </div>
 
-            {/* Branch Isolation / Master Filter Control */}
+            {/* Branch Filter */}
             <div className="inline-flex items-center gap-1 bg-blue-50 border border-blue-200 px-1.5 py-0.5 rounded-lg text-[11px] font-bold text-[#0D47A1] shrink-0">
               <GitBranch className="w-3.5 h-3.5 shrink-0" />
               {isBranchLocked ? (
-                <span className="whitespace-nowrap px-1">Branch: {effectiveBranchFilter}</span>
+                <span className="whitespace-nowrap px-1">{effectiveBranchFilter}</span>
               ) : (
-                <div className="w-32 sm:w-36">
+                <div className="w-28 sm:w-32">
                   <SearchableSelect
                     ariaLabel="Filter Branch View"
                     value={branchFilter}
                     onChange={(val) => setBranchFilter(val)}
                     options={BRANCH_OPTIONS.map((b) => ({
                       value: b,
-                      label: b === 'ALL' ? 'All Branches' : `Branch: ${b}`,
+                      label: b === 'ALL' ? 'All Branches' : b,
                     }))}
                     searchPlaceholder="Branch..."
                     buttonClassName="border-0 bg-transparent px-1 py-0.5 text-[11px] font-bold text-[#0D47A1]"
-                    menuClassName="min-w-[180px]"
+                    menuClassName="min-w-[160px]"
                   />
                 </div>
               )}
             </div>
 
-            {/* Location & Clock on Wide Desktop */}
-            <div className="hidden 2xl:flex items-center gap-2 text-xs font-semibold text-slate-700 bg-slate-50 border border-slate-200 px-2.5 py-1 rounded-lg shrink-0">
-              <span className="inline-flex items-center gap-1 text-[#0D47A1]">
-                <MapPin className="w-3.5 h-3.5" />
-                Kolkata
+            {/* Background Phone Alarm Toggle + Notification Bell (Includes GST 7/8/15th + KYC 10/5/2d + E-Way 8h Alerts) */}
+            <button
+              type="button"
+              onClick={() => void handleTogglePhoneAlarm()}
+              className={`inline-flex items-center gap-1 px-2 py-1 rounded-lg border text-[11px] font-bold cursor-pointer shrink-0 ${
+                phoneAlarmPermission === 'granted'
+                  ? 'border-emerald-300 bg-emerald-50 text-emerald-800 hover:bg-emerald-100'
+                  : 'border-amber-300 bg-amber-50 text-amber-900 hover:bg-amber-100'
+              }`}
+              title="Enable Android/Desktop background phone alarm notifications for GST, KYC & 8h E-Way Bill countdown"
+            >
+              <Bell className="w-3.5 h-3.5 shrink-0" />
+              <span className="hidden lg:inline">
+                {phoneAlarmPermission === 'granted' ? '🔔 Alarm ON' : '🔔 Phone Alarm'}
               </span>
-              <span className="text-slate-300">|</span>
-              <span className="inline-flex items-center gap-1 font-mono-num">
-                <CalendarClock className="w-3.5 h-3.5 text-[#1565C0]" />
-                {formattedClock}
-              </span>
-            </div>
+            </button>
 
-            {/* Notification Bell */}
             <div className="relative shrink-0">
               <button
                 type="button"
@@ -1898,10 +2040,10 @@ export default function App() {
                 className="relative p-1.5 rounded-lg border border-slate-200 bg-white hover:bg-slate-100 text-slate-700 cursor-pointer"
                 aria-label="Compliance and Payment Notifications"
               >
-                <Bell className="w-4 h-4" />
-                {alerts.totalCount > 0 && (
+                <Bell className="w-4 h-4 text-amber-600" />
+                {alerts.totalCount + eway8hAlarms.length > 0 && (
                   <span className="absolute -top-1 -right-1 px-1.5 py-0.2 rounded-full bg-red-600 text-white text-[10px] font-bold leading-tight">
-                    {alerts.totalCount}
+                    {alerts.totalCount + eway8hAlarms.length}
                   </span>
                 )}
               </button>
@@ -1921,10 +2063,48 @@ export default function App() {
                   <div className="max-h-72 overflow-y-auto divide-y divide-slate-100">
                     {alerts.totalCount === 0 ? (
                       <p className="p-4 text-center text-slate-500">
-                        All vehicle papers, driver licenses &amp; collections are up to date.
+                        All vehicle papers, driver licenses, GST dates &amp; KYC docs are up to date.
                       </p>
                     ) : (
                       <>
+                        {alerts.gstAlarms.map((ga) => (
+                          <button
+                            key={ga.id}
+                            type="button"
+                            onClick={() => {
+                              setNotifOpen(false);
+                              setReportInitialTab('gstFilingHub');
+                              setReportFocusNonce((n) => n + 1);
+                              openOrSwitchTab('reports');
+                            }}
+                            className="w-full text-left px-3.5 py-2.5 hover:bg-indigo-50 flex items-start gap-2 cursor-pointer"
+                          >
+                            <CalendarClock className="w-4 h-4 text-indigo-700 shrink-0 mt-0.5" />
+                            <div>
+                              <p className="font-bold text-slate-900">{ga.title}</p>
+                              <p className="text-[11px] text-indigo-800">{ga.message}</p>
+                            </div>
+                          </button>
+                        ))}
+                        {alerts.kycAlarms.map((ka) => (
+                          <button
+                            key={ka.id}
+                            type="button"
+                            onClick={() => {
+                              setNotifOpen(false);
+                              setReportInitialTab('gstFilingHub');
+                              setReportFocusNonce((n) => n + 1);
+                              openOrSwitchTab('reports');
+                            }}
+                            className="w-full text-left px-3.5 py-2.5 hover:bg-amber-50 flex items-start gap-2 cursor-pointer"
+                          >
+                            <ShieldAlert className="w-4 h-4 text-red-600 shrink-0 mt-0.5" />
+                            <div>
+                              <p className="font-bold text-slate-900">{ka.title}</p>
+                              <p className="text-[11px] text-red-700">{ka.message}</p>
+                            </div>
+                          </button>
+                        ))}
                         {alerts.failedVehicles.map((v) => (
                           <button
                             key={v.id}
@@ -1984,7 +2164,7 @@ export default function App() {
                               type="button"
                               onClick={() => {
                                 setNotifOpen(false);
-                                openOrSwitchTab('lr');
+                                openOrSwitchTab('allInOne');
                               }}
                               className="w-full text-left px-3.5 py-2.5 hover:bg-amber-50 flex items-start gap-2 cursor-pointer"
                             >
@@ -1992,7 +2172,6 @@ export default function App() {
                               <div>
                                 <p className="font-bold text-slate-900">
                                   EWB {cn.ewayBillNo || cn.cnNo} ({cn.truckNo})
-                                  {cn.division === 'LOGISTICS' ? ' · LOGISTICS' : ''}
                                 </p>
                                 <p className="text-[11px] text-amber-800 font-semibold">
                                   {worstSt.label}
@@ -2032,7 +2211,22 @@ export default function App() {
               )}
             </div>
 
-            {/* Manual Instant Screen Lock Button */}
+            {/* Rotate Screen Button (Android/Tablet Landscape + Portrait) */}
+            <button
+              type="button"
+              onClick={() => void handleToggleRotateScreen()}
+              className={`inline-flex items-center gap-1 px-2 py-1 rounded-lg border text-[11px] font-bold cursor-pointer shrink-0 ${
+                rotateMode !== 'auto'
+                  ? 'border-indigo-400 bg-indigo-50 text-indigo-800'
+                  : 'border-slate-200 bg-white hover:bg-slate-100 text-slate-700'
+              }`}
+              title="Rotate Landscape / Portrait View"
+            >
+              <RefreshCw className="w-3.5 h-3.5 text-indigo-700" />
+              <span className="hidden md:inline">Rotate</span>
+            </button>
+
+            {/* Manual Screen Lock */}
             <button
               type="button"
               onClick={() => {
@@ -2040,22 +2234,21 @@ export default function App() {
                 setUnlockError(null);
                 setIsScreenLocked(true);
               }}
-              className="inline-flex items-center gap-1 px-2.5 py-1.5 rounded-lg border border-slate-200 bg-white hover:bg-slate-100 text-slate-700 text-xs font-semibold cursor-pointer shrink-0"
+              className="inline-flex items-center gap-1 px-2 py-1 rounded-lg border border-slate-200 bg-white hover:bg-slate-100 text-slate-700 text-xs font-semibold cursor-pointer shrink-0"
               title="Lock Session Screen Immediately"
             >
               <Lock className="w-3.5 h-3.5 text-amber-700" />
-              <span className="hidden sm:inline">Lock</span>
+              <span className="hidden xl:inline">Lock</span>
             </button>
 
             {/* Refresh App Button */}
             <button
               type="button"
               onClick={handleRefreshApp}
-              className="inline-flex items-center gap-1 px-2.5 py-1.5 rounded-lg border border-slate-200 bg-white hover:bg-slate-100 text-slate-700 text-xs font-semibold cursor-pointer shrink-0"
+              className="inline-flex items-center gap-1 px-2 py-1 rounded-lg border border-slate-200 bg-white hover:bg-slate-100 text-slate-700 text-xs font-semibold cursor-pointer shrink-0"
               title="Refresh App & Sync Latest PWA Build"
             >
               <RefreshCw className="w-3.5 h-3.5 text-blue-700" />
-              <span className="hidden sm:inline">Refresh</span>
             </button>
 
             {/* Install App PWA Button */}
@@ -2070,34 +2263,81 @@ export default function App() {
                     setIosGuideOpen(true);
                   }
                 }}
-                className="inline-flex items-center gap-1 px-2.5 py-1.5 rounded-lg bg-emerald-600 hover:bg-emerald-700 text-white text-xs font-bold cursor-pointer whitespace-nowrap shrink-0"
+                className="inline-flex items-center gap-1 px-2 py-1 rounded-lg bg-emerald-600 hover:bg-emerald-700 text-white text-[11px] font-bold cursor-pointer whitespace-nowrap shrink-0"
                 title="Install Dolphin Road Carriers ERP on Android or Windows PC"
               >
                 <Download className="w-3.5 h-3.5" />
-                <span>Install App</span>
+                <span className="hidden sm:inline">Install</span>
               </button>
             )}
 
-            {/* Prominent Red Switch Off / Exit App Button (Always Pinned & Visible on Android/Tablet/Windows) */}
+            {/* Prominent Red Switch Off / Exit App Button */}
             <button
               type="button"
               onClick={() => void handleSwitchOffExitApp()}
-              className="inline-flex items-center gap-1 px-2.5 py-1.5 rounded-lg bg-red-600 hover:bg-red-700 text-white text-[11px] sm:text-xs font-extrabold shadow-sm cursor-pointer whitespace-nowrap shrink-0"
+              className="inline-flex items-center gap-1 px-2 sm:px-2.5 py-1 rounded-lg bg-red-600 hover:bg-red-700 text-white text-[11px] font-extrabold shadow-sm cursor-pointer whitespace-nowrap shrink-0"
               title="Flush sync, clean temp cache, sign out, stop listeners and switch off app"
             >
               <Power className="w-3.5 h-3.5 shrink-0" />
-              <span className="sm:hidden">Switch Off</span>
-              <span className="hidden sm:inline">Switch Off / Exit App</span>
+              <span className="hidden sm:inline">Switch Off</span>
             </button>
+
+            {/* Top-Right Sacred Frames: Bhole Baba & Khatu Shyam Ji (Visible on BOTH Windows AND Android) */}
+            <div
+              className="flex items-center gap-1.5 pl-1 border-l border-slate-200 shrink-0"
+              aria-label="Sacred Blessing Frames"
+            >
+              <div className="flex flex-col items-center">
+                <div className="p-0.5 rounded-md bg-gradient-to-b from-amber-300 via-yellow-500 to-amber-700 shadow-sm">
+                  {bholeImgFailed ? (
+                    <div className="w-7 h-7 sm:w-9 sm:h-9 rounded bg-amber-50 flex items-center justify-center text-amber-800 font-extrabold text-[8px]">
+                      ॐ शिव
+                    </div>
+                  ) : (
+                    <img
+                      src={bholeBabaSrc}
+                      alt="Bhole Baba"
+                      referrerPolicy="no-referrer"
+                      onError={() => setBholeImgFailed(true)}
+                      className="w-7 h-7 sm:w-9 sm:h-9 rounded object-cover bg-amber-50 block"
+                    />
+                  )}
+                </div>
+                <span className="text-[8px] font-extrabold text-amber-900 leading-none mt-0.5 whitespace-nowrap">
+                  Bhole Baba
+                </span>
+              </div>
+
+              <div className="flex flex-col items-center">
+                <div className="p-0.5 rounded-md bg-gradient-to-b from-amber-300 via-yellow-500 to-amber-700 shadow-sm">
+                  {shyamImgFailed ? (
+                    <div className="w-7 h-7 sm:w-9 sm:h-9 rounded bg-amber-50 flex items-center justify-center text-amber-800 font-extrabold text-[8px]">
+                      श्याम
+                    </div>
+                  ) : (
+                    <img
+                      src={khatuShyamSrc}
+                      alt="Khatu Shyam Ji"
+                      referrerPolicy="no-referrer"
+                      onError={() => setShyamImgFailed(true)}
+                      className="w-7 h-7 sm:w-9 sm:h-9 rounded object-cover bg-amber-50 block"
+                    />
+                  )}
+                </div>
+                <span className="text-[8px] font-extrabold text-amber-900 leading-none mt-0.5 whitespace-nowrap">
+                  Shyam Ji
+                </span>
+              </div>
+            </div>
           </div>
         </div>
 
-        {/* Row 2: FTL Universal Search (Ctrl+K), Quick Jump Navigation, Live Alerts & Cloud Sync (Hidden in Auto-Focus Form Mode) */}
-        {businessMode === 'FTL' && showFullBanner && (
+        {/* Row 2: FTL Universal Search + 4 Unified Pillar Buttons + Live Alerts (No Staff Access button here — moved to Sidebar bottom above About) */}
+        {businessMode === 'FTL' && (
         <div className="flex flex-wrap items-center justify-between gap-2 pt-1.5 border-t border-slate-100 text-[11px] font-bold">
           <div className="flex flex-wrap items-center gap-1.5">
             {/* Compact Universal Search (Ctrl+K) */}
-            <div className="relative w-56 sm:w-72">
+            <div className="relative w-48 sm:w-64">
               <div className="relative">
                 <Search className="w-3.5 h-3.5 text-slate-500 absolute left-2.5 top-2" />
                 <input
@@ -2110,10 +2350,10 @@ export default function App() {
                     setGlobalSearch(e.target.value);
                     setSearchDropdownOpen(true);
                   }}
-                  placeholder="Search (Ctrl+K): Bill, CN, Quote..."
-                  className="w-full pl-8 pr-12 py-1.5 rounded-lg border border-slate-300 bg-slate-50 focus:bg-white text-xs font-semibold text-slate-900 focus:outline-none focus:ring-2 focus:ring-blue-600"
+                  placeholder="Find CN, Bill, Party (Ctrl+K)..."
+                  className="w-full pl-8 pr-10 py-1 rounded-lg border border-slate-300 bg-slate-50 focus:bg-white text-xs font-semibold text-slate-900 focus:outline-none focus:ring-2 focus:ring-blue-600"
                 />
-                {globalSearch ? (
+                {globalSearch && (
                   <button
                     type="button"
                     onClick={() => setGlobalSearch('')}
@@ -2122,10 +2362,6 @@ export default function App() {
                   >
                     <X className="w-3.5 h-3.5" />
                   </button>
-                ) : (
-                  <kbd className="hidden sm:inline-block absolute right-2 top-1.5 px-1 py-0.2 rounded bg-white border border-slate-300 text-[9px] font-mono-num text-slate-600">
-                    Ctrl+K
-                  </kbd>
                 )}
               </div>
 
@@ -2166,18 +2402,10 @@ export default function App() {
               <button
                 type="button"
                 onClick={() => openOrSwitchTab('allInOne')}
-                className="px-2.5 py-1 rounded bg-[#0D47A1] hover:bg-[#0A3882] text-amber-200 cursor-pointer whitespace-nowrap"
+                className="inline-flex items-center gap-1 px-2.5 py-1 rounded bg-[#0D47A1] hover:bg-[#0A3882] text-amber-200 cursor-pointer whitespace-nowrap"
               >
-                ★ All-in-One Sheet
-              </button>
-            )}
-            {hasPermission('lr') && (
-              <button
-                type="button"
-                onClick={() => openOrSwitchTab('lr')}
-                className="px-2.5 py-1 rounded bg-blue-50 hover:bg-blue-100 text-[#0D47A1] cursor-pointer whitespace-nowrap"
-              >
-                + CN / LR
+                <ClipboardList className="w-3.5 h-3.5 text-amber-300" />
+                <span>A. BILTY &amp; LORRY MASTER SHEET</span>
               </button>
             )}
             {hasPermission('billing') && (
@@ -2188,36 +2416,34 @@ export default function App() {
                   setBillingFocusNonce((n) => n + 1);
                   openOrSwitchTab('billing');
                 }}
-                className="px-2.5 py-1 rounded bg-emerald-50 hover:bg-emerald-100 text-emerald-800 cursor-pointer whitespace-nowrap"
+                className="inline-flex items-center gap-1 px-2.5 py-1 rounded bg-emerald-50 hover:bg-emerald-100 border border-emerald-200 text-emerald-800 cursor-pointer whitespace-nowrap"
               >
-                + Tax Invoice
+                <FileSpreadsheet className="w-3.5 h-3.5 text-emerald-700" />
+                <span>B. PARTY TAX INVOICE</span>
               </button>
             )}
-            {hasPermission('lorryHire') && (
+            {hasPermission('master') && (
               <button
                 type="button"
-                onClick={() => openOrSwitchTab('lorryHire')}
-                className="px-2.5 py-1 rounded bg-amber-50 hover:bg-amber-100 text-amber-900 cursor-pointer whitespace-nowrap"
+                onClick={() => {
+                  setMasterInitialTab('parties');
+                  setMasterFocusNonce((n) => n + 1);
+                  openOrSwitchTab('master');
+                }}
+                className="inline-flex items-center gap-1 px-2.5 py-1 rounded bg-blue-50 hover:bg-blue-100 border border-blue-200 text-[#0D47A1] cursor-pointer whitespace-nowrap"
               >
-                Lorry Hire &amp; POD
-              </button>
-            )}
-            {hasPermission('commission') && (
-              <button
-                type="button"
-                onClick={() => openOrSwitchTab('commission')}
-                className="px-2.5 py-1 rounded bg-indigo-50 hover:bg-indigo-100 text-indigo-800 cursor-pointer whitespace-nowrap"
-              >
-                Commission &amp; Advance
+                <Users className="w-3.5 h-3.5 text-blue-700" />
+                <span>C. MASTERS &amp; LEDGERS</span>
               </button>
             )}
             {hasPermission('bankImport') && (
               <button
                 type="button"
                 onClick={() => openOrSwitchTab('bankImport')}
-                className="px-2.5 py-1 rounded bg-teal-50 hover:bg-teal-100 text-teal-800 cursor-pointer whitespace-nowrap"
+                className="inline-flex items-center gap-1 px-2.5 py-1 rounded bg-teal-50 hover:bg-teal-100 border border-teal-200 text-teal-800 cursor-pointer whitespace-nowrap"
               >
-                Bank &amp; 194C Import
+                <Landmark className="w-3.5 h-3.5 text-teal-700" />
+                <span>Bank Reader</span>
               </button>
             )}
             {hasPermission('reports') && (
@@ -2228,39 +2454,19 @@ export default function App() {
                   setReportFocusNonce((n) => n + 1);
                   openOrSwitchTab('reports');
                 }}
-                className="px-2.5 py-1 rounded bg-indigo-600 hover:bg-indigo-700 text-white cursor-pointer whitespace-nowrap"
+                className="inline-flex items-center gap-1 px-2.5 py-1 rounded bg-indigo-600 hover:bg-indigo-700 text-white cursor-pointer whitespace-nowrap"
               >
-                GST &amp; RCM Filing Hub
-              </button>
-            )}
-            {hasPermission('reports') && (
-              <button
-                type="button"
-                onClick={() => {
-                  setReportInitialTab('partyFollowUp');
-                  setReportFocusNonce((n) => n + 1);
-                  openOrSwitchTab('reports');
-                }}
-                className="px-2.5 py-1 rounded bg-red-50 hover:bg-red-100 text-red-800 cursor-pointer whitespace-nowrap"
-              >
-                15/30d Alerts &amp; Follow-Up
-              </button>
-            )}
-            {isEffectiveMasterAdmin && (
-              <button
-                type="button"
-                onClick={() => requestProtectedTab('staffAccess')}
-                className="px-2.5 py-1 rounded bg-amber-500 text-white hover:bg-amber-600 cursor-pointer whitespace-nowrap"
-              >
-                Staff Access Control
+                <FileBarChart2 className="w-3.5 h-3.5 text-amber-200" />
+                <span>D. GST &amp; KYC VAULT</span>
               </button>
             )}
             <button
               type="button"
               onClick={() => openOrSwitchTab('guide')}
-              className="px-2.5 py-1 rounded bg-slate-800 hover:bg-slate-900 text-amber-200 cursor-pointer whitespace-nowrap"
+              className="inline-flex items-center gap-1 px-2.5 py-1 rounded bg-slate-800 hover:bg-slate-900 text-amber-200 cursor-pointer whitespace-nowrap"
             >
-              অপারেটিং বুক / Guide
+              <BookOpen className="w-3.5 h-3.5 text-amber-300" />
+              <span>BILINGUAL GUIDE</span>
             </button>
           </div>
 
@@ -2365,6 +2571,81 @@ export default function App() {
         </div>
         )}
       </header>
+      )}
+
+      {/* E-Way Bill 8h -> 1h Countdown Alarm Banner (Stops automatically when Unloading Date / POD Delivered is saved) */}
+      {!eway8hBannerDismissed && eway8hAlarms.length > 0 && (
+        <div className="bg-gradient-to-r from-red-700 via-orange-600 to-amber-600 text-white px-3 py-2 flex flex-wrap items-center justify-between gap-2 text-xs font-bold shadow no-print">
+          <div className="flex flex-wrap items-center gap-2 min-w-0">
+            <AlertTriangle className="w-4 h-4 text-amber-200 animate-pulse shrink-0" />
+            <span className="truncate">
+              {eway8hAlarms[0].title} ({eway8hAlarms.length} urgent):{' '}
+              <span className="font-normal text-amber-100">
+                {eway8hAlarms[0].message}
+              </span>
+            </span>
+          </div>
+          <div className="flex items-center gap-2 shrink-0">
+            <button
+              type="button"
+              onClick={() => {
+                setBusinessMode('FTL');
+                openOrSwitchTab('allInOne');
+                setEway8hBannerDismissed(true);
+              }}
+              className="px-2.5 py-1 rounded bg-white hover:bg-amber-100 text-red-900 font-extrabold cursor-pointer"
+            >
+              Update Unloading / Extend EWB &rarr;
+            </button>
+            <button
+              type="button"
+              onClick={() => setEway8hBannerDismissed(true)}
+              className="p-1 rounded hover:bg-white/15 cursor-pointer"
+              aria-label="Dismiss E-Way 8h countdown banner"
+            >
+              <X className="w-4 h-4" />
+            </button>
+          </div>
+        </div>
+      )}
+
+      {/* Monthly GST (7/8/15th) & Master KYC (10/5/2-Day) Popup Alarm Banner */}
+      {!alarmPopupDismissed && (alerts.gstAlarms.length > 0 || alerts.kycAlarms.length > 0) && (
+        <div className="bg-gradient-to-r from-amber-600 via-red-600 to-indigo-700 text-white px-3 py-2 flex flex-wrap items-center justify-between gap-2 text-xs font-bold shadow no-print">
+          <div className="flex flex-wrap items-center gap-2 min-w-0">
+            <Bell className="w-4 h-4 text-amber-200 animate-bounce shrink-0" />
+            <span className="truncate">
+              {alerts.gstAlarms[0]?.title || alerts.kycAlarms[0]?.title}:{' '}
+              <span className="font-normal text-amber-100">
+                {alerts.gstAlarms[0]?.message || alerts.kycAlarms[0]?.message}
+              </span>
+            </span>
+          </div>
+          <div className="flex items-center gap-2 shrink-0">
+            <button
+              type="button"
+              onClick={() => {
+                setBusinessMode('FTL');
+                setReportInitialTab('gstFilingHub');
+                setReportFocusNonce((n) => n + 1);
+                openOrSwitchTab('reports');
+                setAlarmPopupDismissed(true);
+              }}
+              className="px-2.5 py-1 rounded bg-amber-300 hover:bg-amber-200 text-slate-950 font-extrabold cursor-pointer"
+            >
+              Open GST &amp; KYC Vault &rarr;
+            </button>
+            <button
+              type="button"
+              onClick={() => setAlarmPopupDismissed(true)}
+              className="p-1 rounded hover:bg-white/15 cursor-pointer"
+              aria-label="Dismiss compliance alarm"
+            >
+              <X className="w-4 h-4" />
+            </button>
+          </div>
+        </div>
+      )}
 
       {/* Main Body: Isolated Division Workspace (LOGISTICS / PTL / COURIER) OR FTL Sidebar + Multi-Tab Workspace */}
       <div className="flex-1 flex min-h-0 relative max-w-full">
@@ -2687,9 +2968,14 @@ export default function App() {
                 key={`master_${masterInitialTab}_${masterFocusNonce}`}
                 ownerUid={workspaceUid}
                 readOnly={getSheetAccess('master') === 'view'}
+                activeFy={activeFy}
                 parties={parties}
                 vehicles={vehicles}
                 drivers={drivers}
+                invoices={visibleInvoices}
+                consignments={visibleConsignments}
+                lorryHires={visibleLorryHires}
+                transactions={visibleTransactions}
                 company={companySettings}
                 initialTab={masterInitialTab}
                 onPreviewPdf={handlePreviewPdf}
@@ -2818,6 +3104,7 @@ export default function App() {
                 isMasterAdmin={isEffectiveMasterAdmin}
                 readOnly={getSheetAccess(activeTab === 'accounts' ? 'accounts' : 'reports') === 'view'}
                 invoices={visibleInvoices}
+                logisticsInvoices={logisticsInvoices}
                 lorryHires={visibleLorryHires}
                 consignments={visibleConsignments}
                 transactions={visibleTransactions}
@@ -2825,6 +3112,8 @@ export default function App() {
                 parties={parties}
                 drivers={drivers}
                 company={companySettings}
+                driveAccessToken={driveAccessToken}
+                onConnectDrive={() => handleGoogleDriveConnect(true)}
                 initialSubTab={
                   activeTab === 'accounts'
                     ? 'accountBook'
@@ -2876,11 +3165,19 @@ export default function App() {
                 onSwitchStaffSession={setActiveStaffSession}
                 onUpdateAdminSession={(nextSession) => setErpSession(nextSession)}
                 onSelectFy={handleSelectFy}
+                onPreviewPdf={handlePreviewPdf}
                 onShowConfirm={handleShowConfirm}
               />
             )}
 
-            {activeTab === 'guide' && <UserGuideModule />}
+            {activeTab === 'guide' && (
+              <UserGuideModule
+                company={companySettings}
+                driveAccessToken={driveAccessToken}
+                onConnectDrive={() => handleGoogleDriveConnect(true)}
+                onPreviewPdf={handlePreviewPdf}
+              />
+            )}
 
             {activeTab === 'about' && (
               <div className="bg-white rounded-xl border border-slate-200 shadow-sm overflow-hidden max-w-4xl">
@@ -3429,6 +3726,114 @@ export default function App() {
                   Close
                 </button>
               </div>
+            </div>
+          </div>
+        </div>
+      )}
+
+      {/* Dynamic Repeating Watermark Overlay for Non-Master Staff Logins */}
+      {erpSession && (!isEffectiveMasterAdmin || Boolean(activeStaffSession)) && (
+        <div
+          aria-hidden="true"
+          className="fixed inset-0 z-[45] pointer-events-none select-none overflow-hidden opacity-[0.06] no-print flex flex-wrap items-center justify-around gap-12 p-8 -rotate-12"
+        >
+          {Array.from({ length: 12 }).map((_, idx) => (
+            <span
+              key={idx}
+              className="text-[11px] font-black tracking-wider text-slate-900 uppercase whitespace-nowrap font-mono-num"
+            >
+              {activeStaffCode} &bull; {activeStaffName} &bull; {activeOperationalBranch} &bull; {formattedClock}
+            </span>
+          ))}
+        </div>
+      )}
+
+      {/* Anti-Screenshot & Screen Capture Privacy Shield Curtain (Windows, Tablet & Android) */}
+      {privacyCurtainReason && (
+        <div className="fixed inset-0 z-[120] bg-black text-white flex items-center justify-center p-6 no-print">
+          <div className="w-full max-w-md rounded-2xl border border-red-500/60 bg-slate-950 p-6 space-y-4 text-center shadow-2xl">
+            <div className="w-14 h-14 mx-auto rounded-full bg-red-600/20 border border-red-500 flex items-center justify-center text-red-400">
+              <ShieldAlert className="w-7 h-7" />
+            </div>
+            <div className="space-y-1.5">
+              <h2 className="text-base font-extrabold text-red-400">
+                🚫 Screenshot &amp; Screen Capture Blocked by DRC Security Policy
+              </h2>
+              <p className="text-xs text-slate-300 leading-relaxed">
+                {privacyCurtainReason}
+              </p>
+              <p className="text-[11px] text-slate-400 font-mono-num">
+                Session: {activeOperatorLabel} &bull; {activeOperationalBranch} &bull; {formattedClock}
+              </p>
+            </div>
+
+            {shieldUnlockError && (
+              <div className="p-2 rounded bg-red-900/50 border border-red-500/60 text-xs text-red-200 font-bold">
+                {shieldUnlockError}
+              </div>
+            )}
+
+            <div className="flex flex-col gap-2 pt-1">
+              <button
+                type="button"
+                onClick={() => {
+                  setPrivacyCurtainReason(null);
+                  setShieldUnlockError(null);
+                  setShieldUnlockPin('');
+                }}
+                className="w-full px-4 py-2.5 rounded-lg bg-[#0D47A1] hover:bg-blue-700 text-white text-xs font-extrabold cursor-pointer"
+              >
+                Dismiss &amp; Resume Secure Workspace
+              </button>
+
+              {shieldTempUnlocked ? (
+                <button
+                  type="button"
+                  onClick={() => {
+                    lockScreenShieldImmediately();
+                    setShieldTempUnlocked(false);
+                  }}
+                  className="w-full px-3 py-2 rounded-lg border border-amber-400/50 text-amber-300 text-xs font-bold cursor-pointer"
+                >
+                  Re-Lock Anti-Screenshot Shield Now
+                </button>
+              ) : (
+                <form
+                  onSubmit={(e) => {
+                    e.preventDefault();
+                    const ok = unlockScreenShieldTemporarily(shieldUnlockPin, 5);
+                    if (!ok) {
+                      playAlertBeep();
+                      setShieldUnlockError('Invalid Admin PIN. Default PIN is 1234 unless changed in Settings.');
+                      return;
+                    }
+                    playVerifiedBeep();
+                    setShieldTempUnlocked(true);
+                    setShieldUnlockError(null);
+                    setShieldUnlockPin('');
+                    setPrivacyCurtainReason(null);
+                  }}
+                  className="flex items-center gap-2 pt-2 border-t border-slate-800"
+                >
+                  <input
+                    type="password"
+                    inputMode="numeric"
+                    value={shieldUnlockPin}
+                    onChange={(e) => {
+                      setShieldUnlockPin(e.target.value);
+                      setShieldUnlockError(null);
+                    }}
+                    placeholder="Admin PIN (5m temporary unlock)"
+                    className="flex-1 px-3 py-2 rounded-lg border border-slate-700 bg-slate-900 text-white text-xs font-mono-num"
+                  />
+                  <button
+                    type="submit"
+                    className="px-3 py-2 rounded-lg bg-amber-500 hover:bg-amber-400 text-slate-950 text-xs font-extrabold cursor-pointer whitespace-nowrap"
+                  >
+                    Unlock 5m
+                  </button>
+                </form>
+              )}
             </div>
           </div>
         </div>

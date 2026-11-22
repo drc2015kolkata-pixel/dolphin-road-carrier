@@ -35,6 +35,7 @@ import {
   Wrench,
 } from 'lucide-react';
 import {
+  AnyDriveFolderName,
   BankReceiptRecord,
   BRANCH_OPTIONS,
   CompanyBankAccount,
@@ -68,13 +69,19 @@ import {
   DriveFileSummary,
   getIsolatedDriveFileNames,
   INSTALLER_VAULT_FOLDER,
+  listAppDataBackupFiles,
   listDriveBackupFiles,
   runDailyDrive8FileCleanup,
+  uploadAppDataJsonSnapshot,
+  uploadBlueprintPdfToDrive,
   uploadIsolatedBusinessBackupsToDrive,
   uploadMasterBackupToDrive,
 } from '../lib/driveBackup';
 import {
+  BACKUP_ISOLATED_DRIVE_EMAIL,
+  DRIVE_APPDATA_SCOPE,
   getOAuthDomainStatus,
+  OFFICIAL_PARTY_EMAIL,
   VERCEL_APP_DOMAIN,
 } from '../lib/firebase';
 import {
@@ -92,6 +99,7 @@ import {
 import {
   bulkUpsertDocuments,
   CustomAuthSession,
+  forceTwoWaySyncAndMerge,
   removeDocument,
   restoreErpBackupBundle,
   restoreLogisticsBackupBundle,
@@ -99,6 +107,15 @@ import {
   updateMasterAdminCredentials,
   upsertDocument,
 } from '../lib/firestoreStore';
+import { hasLiveCompanyData } from '../lib/securityShield';
+import { validateIndianGstin, validateSafeUploadFile } from '../lib/gstinValidator';
+import {
+  downloadPdfDirect,
+  generateAppFormatBlueprintPDF,
+  GeneratedPdfResult,
+} from '../lib/pdfEngine';
+import { playAlertBeep, playVerifiedBeep } from '../lib/audioFeedback';
+import { GstinInputField } from './GstinInputField';
 import {
   computeFyClosingBalances,
   downloadSampleImportTemplate,
@@ -167,6 +184,7 @@ interface BackupSettingsModuleProps {
   onSwitchStaffSession: (staff: StaffAccount | null) => void;
   onUpdateAdminSession: (session: CustomAuthSession) => void;
   onSelectFy: (fy: string) => void;
+  onPreviewPdf?: (pdf: GeneratedPdfResult, folder: AnyDriveFolderName) => void;
   onShowConfirm: (opts: {
     title: string;
     description: string;
@@ -207,6 +225,7 @@ const BackupSettingsModuleInner: React.FC<BackupSettingsModuleProps> = ({
   onSwitchStaffSession,
   onUpdateAdminSession,
   onSelectFy,
+  onPreviewPdf,
   onShowConfirm,
 }) => {
   const stampInputRef = useRef<HTMLInputElement | null>(null);
@@ -518,12 +537,23 @@ const BackupSettingsModuleInner: React.FC<BackupSettingsModuleProps> = ({
 
   const handleAutoCollectSelected = async (fileList: FileList | null) => {
     if (!fileList || fileList.length === 0) return;
+    const rawFiles = Array.from(fileList);
+    // Security allowlist check on FoxPro / Spreadsheet files; flag any dangerous executables/scripts
+    for (const f of rawFiles) {
+      if (/\.(exe|bat|cmd|sh|msi|vbs|ps1|js|mjs|ts|html|htm|svg|php)$/i.test(f.name)) {
+        const chk = validateSafeUploadFile(f, 'foxpro_batch');
+        playAlertBeep();
+        setDriveError(chk.reason || `Blocked unsafe file "${f.name}" by DRC Security Policy.`);
+        return;
+      }
+    }
+    const safeFiles = rawFiles.filter((f) => validateSafeUploadFile(f, 'foxpro_batch').valid);
     setAutoCollecting(true);
     setDriveError(null);
     setDriveStatus(null);
     try {
       const res = await autoCollectOldDataFiles({
-        files: Array.from(fileList),
+        files: safeFiles,
         activeFy,
         bankAccountName: compState.bankName || 'PUNJAB NATIONAL BANK',
         ownerUid,
@@ -820,9 +850,42 @@ const BackupSettingsModuleInner: React.FC<BackupSettingsModuleProps> = ({
   const handleSaveCompanySettings = async (e: React.FormEvent) => {
     e.preventDefault();
     setDriveError(null);
+    if (compState.gstin.trim()) {
+      const gstChk = validateIndianGstin(compState.gstin);
+      if (!gstChk.valid) {
+        playAlertBeep();
+        setDriveError(`Company GSTIN Invalid: ${gstChk.error}`);
+        return;
+      }
+    }
+    for (const br of compState.branches || []) {
+      if (br.gstin && br.gstin.trim()) {
+        const brChk = validateIndianGstin(br.gstin);
+        if (!brChk.valid) {
+          playAlertBeep();
+          setDriveError(`Branch ${br.branchCode || br.branchName} GSTIN Invalid: ${brChk.error}`);
+          return;
+        }
+      }
+    }
     const mergedFys = Array.from(
       new Set([...PRECREATED_FYS, ...(compState.availableFys || []), normalizeFyLabel(compState.currentFy)])
     );
+    const cleanBankApi =
+      compState.bankApiConfig &&
+      (compState.bankApiConfig.enabled ||
+        compState.bankApiConfig.providerName ||
+        compState.bankApiConfig.apiKey ||
+        compState.bankApiConfig.clientId)
+        ? {
+            enabled: Boolean(compState.bankApiConfig.enabled),
+            providerName: compState.bankApiConfig.providerName || '',
+            apiKey: compState.bankApiConfig.apiKey || '',
+            clientId: compState.bankApiConfig.clientId || '',
+            webhookSecret: compState.bankApiConfig.webhookSecret || '',
+          }
+        : undefined;
+
     await saveSettingsDocument(
       'company',
       {
@@ -843,13 +906,20 @@ const BackupSettingsModuleInner: React.FC<BackupSettingsModuleProps> = ({
         upiId: compState.upiId || '',
         bankAccounts: compState.bankAccounts || [],
         branches: compState.branches || [],
-        whatsappCloud: compState.whatsappCloud || undefined,
-        last90DayAutoFixAt: compState.last90DayAutoFixAt || undefined,
+        ...(compState.whatsappCloud ? { whatsappCloud: compState.whatsappCloud } : {}),
+        ...(cleanBankApi ? { bankApiConfig: cleanBankApi } : {}),
+        ...(Array.isArray(compState.kycVault) ? { kycVault: compState.kycVault } : {}),
+        ...(compState.kycVaultPinEnabled !== undefined
+          ? { kycVaultPinEnabled: Boolean(compState.kycVaultPinEnabled) }
+          : {}),
+        ...(compState.last90DayAutoFixAt ? { last90DayAutoFixAt: compState.last90DayAutoFixAt } : {}),
         currentFy: normalizeFyLabel(compState.currentFy),
         availableFys: mergedFys,
         fyOpeningBalances: compState.fyOpeningBalances || {},
         customStampDataUrl: compState.customStampDataUrl || '',
         panCardPhotoDataUrl: compState.panCardPhotoDataUrl || '',
+        bholeBabaPhotoDataUrl: compState.bholeBabaPhotoDataUrl || '',
+        khatuShyamPhotoDataUrl: compState.khatuShyamPhotoDataUrl || '',
         autoLockMinutes: Number(compState.autoLockMinutes ?? 5),
         lockSourceInspection: compState.lockSourceInspection !== false,
         ...(compState.dropdownMaster ? { dropdownMaster: compState.dropdownMaster } : {}),
@@ -857,7 +927,7 @@ const BackupSettingsModuleInner: React.FC<BackupSettingsModuleProps> = ({
       },
       hasCustomSettings
     );
-    setDriveStatus('Company, Multi-Bank Accounts, UPI QR, Branches, Stamp & Security Settings saved cleanly.');
+    setDriveStatus('Company, Multi-Bank Accounts, Bank API, UPI QR, Branches, Stamp & Security Settings saved cleanly.');
   };
 
   const handleAddBankAccount = () => {
@@ -908,6 +978,12 @@ const BackupSettingsModuleInner: React.FC<BackupSettingsModuleProps> = ({
 
   const handleUploadStamp = (file: File | undefined) => {
     if (!file) return;
+    const uploadCheck = validateSafeUploadFile(file, 'image_only');
+    if (!uploadCheck.valid) {
+      playAlertBeep();
+      setDriveError(uploadCheck.reason || 'Unsupported Stamp image blocked by DRC Security.');
+      return;
+    }
     setDriveError(null);
     const reader = new FileReader();
     reader.onload = () => {
@@ -936,6 +1012,12 @@ const BackupSettingsModuleInner: React.FC<BackupSettingsModuleProps> = ({
 
   const handleUploadPanCard = (file: File | undefined) => {
     if (!file) return;
+    const uploadCheck = validateSafeUploadFile(file, 'image_only');
+    if (!uploadCheck.valid) {
+      playAlertBeep();
+      setDriveError(uploadCheck.reason || 'Unsupported PAN Card image blocked by DRC Security.');
+      return;
+    }
     setDriveError(null);
     const reader = new FileReader();
     reader.onload = () => {
@@ -974,6 +1056,12 @@ const BackupSettingsModuleInner: React.FC<BackupSettingsModuleProps> = ({
     file: File | undefined
   ) => {
     if (!file) return;
+    const uploadCheck = validateSafeUploadFile(file, 'image_only');
+    if (!uploadCheck.valid) {
+      playAlertBeep();
+      setDriveError(uploadCheck.reason || `Unsupported ${deityLabel} image blocked by DRC Security.`);
+      return;
+    }
     setDriveError(null);
     const reader = new FileReader();
     reader.onload = () => {
@@ -1042,6 +1130,12 @@ const BackupSettingsModuleInner: React.FC<BackupSettingsModuleProps> = ({
 
   const handleExcelFileSelected = async (file: File | undefined) => {
     if (!file) return;
+    const uploadCheck = validateSafeUploadFile(file, 'spreadsheet');
+    if (!uploadCheck.valid) {
+      playAlertBeep();
+      setDriveError(uploadCheck.reason || 'Unsupported file type blocked. Upload .xlsx, .xls, or .csv only.');
+      return;
+    }
     setDriveError(null);
     setDriveStatus(null);
     try {
@@ -1723,56 +1817,166 @@ const BackupSettingsModuleInner: React.FC<BackupSettingsModuleProps> = ({
                       Strictly uses <code className="font-mono-num">drive.file</code> scope (zero access to device photos or personal Drive files). Includes inactive folder <strong className="font-mono-num">{INSTALLER_VAULT_FOLDER}</strong>.
                     </p>
                   </div>
-                  <button
-                    type="button"
-                    disabled={busyDrive}
-                    onClick={() => void handleUploadIsolated5Files()}
-                    className="inline-flex items-center gap-1.5 px-3.5 py-2 rounded-lg bg-emerald-700 hover:bg-emerald-800 text-white text-xs font-extrabold cursor-pointer disabled:opacity-60 whitespace-nowrap"
-                  >
-                    <CloudUpload className="w-4 h-4" />
-                    Upload All 5 Isolated Drive Files
-                  </button>
-                </div>
-
-                <div className="grid grid-cols-1 md:grid-cols-2 lg:grid-cols-3 gap-2">
-                  {[
-                    { name: isolatedDriveNames.ftl, desc: 'FTL Business Data (LRs, Bills, Hire, Vouchers)' },
-                    { name: isolatedDriveNames.logistics, desc: 'Logistics Business Data (Dockets, Manifests, Bills)' },
-                    { name: isolatedDriveNames.ptl, desc: 'PTL Part-Load Data (Isolated)' },
-                    { name: isolatedDriveNames.courier, desc: 'Courier & Parcel Data (Isolated)' },
-                    { name: isolatedDriveNames.mastersVault, desc: 'All Masters, Parties, Fleet, Drivers & KYC Vault' },
-                  ].map((item) => (
-                    <div
-                      key={item.name}
-                      className="p-2.5 rounded-lg bg-white border border-emerald-200 flex items-center justify-between gap-2"
+                    <button
+                      type="button"
+                      disabled={busyDrive}
+                      onClick={() => void handleUploadIsolated5Files()}
+                      className="inline-flex items-center gap-1.5 px-3.5 py-2 rounded-lg bg-emerald-700 hover:bg-emerald-800 text-white text-xs font-extrabold cursor-pointer disabled:opacity-60 whitespace-nowrap"
                     >
-                      <div className="min-w-0">
-                        <div className="text-[11px] font-mono-num font-bold text-slate-900 truncate">
-                          {item.name}
+                      <CloudUpload className="w-4 h-4" />
+                      Upload All 5 Isolated Drive Files
+                    </button>
+                  </div>
+
+                  {/* Stage B: Email Lock, Hidden AppData Sandbox, No-Auto-Delete Shield, 2-Way Sync & 3-Page Blueprint PDF */}
+                  <div className="p-3 rounded-lg bg-white border border-emerald-200 space-y-2.5 text-[11px]">
+                    <div className="flex flex-wrap items-center justify-between gap-2">
+                      <div className="space-y-0.5">
+                        <div className="font-extrabold text-slate-900">
+                          Isolated App Backup Drive:{' '}
+                          <span className="font-mono-num text-blue-800">{BACKUP_ISOLATED_DRIVE_EMAIL}</span>{' '}
+                          <span className="text-slate-400">|</span>{' '}
+                          Official Party Email:{' '}
+                          <span className="font-mono-num text-emerald-800">{OFFICIAL_PARTY_EMAIL}</span>
                         </div>
-                        <div className="text-[10px] text-slate-500 truncate">{item.desc}</div>
+                        <div className="text-slate-600">
+                          App-Only Scope: <code className="font-mono-num">drive.file</code> +{' '}
+                          <code className="font-mono-num">{DRIVE_APPDATA_SCOPE}</code> ·{' '}
+                          <strong className="text-emerald-700">
+                            No-Auto-Delete Shield:{' '}
+                            {hasLiveCompanyData({
+                              parties: allData.parties.length,
+                              consignments: allData.consignments.length,
+                              invoices: allData.invoices.length,
+                              lorryHires: allData.lorryHires.length,
+                              transactions: allData.transactions.length,
+                            })
+                              ? 'LIVE COMPANY DATA PROTECTED'
+                              : 'ACTIVE'}
+                          </strong>
+                        </div>
                       </div>
-                      <button
-                        type="button"
-                        disabled={busyDrive}
-                        onClick={() => void handleRestoreIsolatedFile(item.name)}
-                        className="shrink-0 px-2.5 py-1 rounded border border-emerald-300 bg-emerald-50 hover:bg-emerald-100 text-emerald-900 text-[11px] font-bold cursor-pointer disabled:opacity-50"
-                      >
-                        Restore
-                      </button>
+                      <div className="flex flex-wrap gap-2">
+                        <button
+                          type="button"
+                          disabled={busyDrive}
+                          onClick={async () => {
+                            setBusyDrive(true);
+                            setDriveError(null);
+                            try {
+                              const syncRes = await forceTwoWaySyncAndMerge();
+                              let appDataMsg = '';
+                              if (driveAccessToken) {
+                                await uploadAppDataJsonSnapshot({
+                                  accessToken: driveAccessToken,
+                                  fileName: 'DRC_AppData_State_Snapshot.json',
+                                  payload: {
+                                    syncedAt: new Date().toISOString(),
+                                    fy: activeFy,
+                                    counts: {
+                                      parties: allData.parties.length,
+                                      consignments: allData.consignments.length,
+                                      invoices: allData.invoices.length,
+                                      lorryHires: allData.lorryHires.length,
+                                    },
+                                  },
+                                });
+                                const hiddenList = await listAppDataBackupFiles(driveAccessToken);
+                                appDataMsg = ` + synced hidden appDataFolder (${hiddenList.length} sandbox file(s)).`;
+                              }
+                              playVerifiedBeep();
+                              setDriveStatus(
+                                `2-Way Timestamp Sync Complete: Flushed ${syncRes.flushedQueue} offline write(s), merged ${syncRes.mergedCollections} collection(s), pushed ${syncRes.pushedLocalRecords} newer local edit(s)${appDataMsg}`
+                              );
+                            } catch (err) {
+                              playAlertBeep();
+                              setDriveError(err instanceof Error ? err.message : '2-Way Sync failed.');
+                            } finally {
+                              setBusyDrive(false);
+                            }
+                          }}
+                          className="inline-flex items-center gap-1 px-3 py-1.5 rounded-lg bg-blue-800 hover:bg-blue-900 text-white font-extrabold cursor-pointer disabled:opacity-60"
+                        >
+                          <RefreshCw className="w-3.5 h-3.5" />
+                          Force 2-Way Sync &amp; Merge
+                        </button>
+                        <button
+                          type="button"
+                          disabled={busyDrive}
+                          onClick={async () => {
+                            setBusyDrive(true);
+                            setDriveError(null);
+                            try {
+                              const pdf = await generateAppFormatBlueprintPDF(compState, 'p');
+                              if (onPreviewPdf) {
+                                onPreviewPdf(pdf, 'Reports_Ledgers');
+                              } else {
+                                downloadPdfDirect(pdf);
+                              }
+                              if (driveAccessToken) {
+                                await uploadBlueprintPdfToDrive(driveAccessToken, pdf.blob);
+                                setDriveStatus(
+                                  `3-Page DRC_APP_FORMAT_BLUEPRINT.pdf (${pdf.sizeKB} KB) uploaded to Reports_Ledgers & appDataFolder (${BACKUP_ISOLATED_DRIVE_EMAIL}).`
+                                );
+                              } else {
+                                setDriveStatus(`Generated 3-Page DRC_APP_FORMAT_BLUEPRINT.pdf (${pdf.sizeKB} KB).`);
+                              }
+                              playVerifiedBeep();
+                            } catch (err) {
+                              playAlertBeep();
+                              setDriveError(err instanceof Error ? err.message : 'Blueprint PDF failed.');
+                            } finally {
+                              setBusyDrive(false);
+                            }
+                          }}
+                          className="inline-flex items-center gap-1 px-3 py-1.5 rounded-lg bg-indigo-700 hover:bg-indigo-800 text-white font-extrabold cursor-pointer disabled:opacity-60"
+                        >
+                          <Sparkles className="w-3.5 h-3.5" />
+                          3-Page App Blueprint PDF &amp; Drive Sync
+                        </button>
+                      </div>
                     </div>
-                  ))}
-                  <div className="p-2.5 rounded-lg bg-slate-100 border border-slate-200 flex items-center gap-2">
-                    <FolderArchive className="w-4 h-4 text-slate-500 shrink-0" />
-                    <div className="min-w-0">
-                      <div className="text-[11px] font-mono-num font-bold text-slate-700 truncate">
-                        {INSTALLER_VAULT_FOLDER}
+                  </div>
+
+                  <div className="grid grid-cols-1 md:grid-cols-2 lg:grid-cols-3 gap-2">
+                    {[
+                      { name: isolatedDriveNames.ftl, desc: 'FTL Business Data (LRs, Bills, Hire, Vouchers)' },
+                      { name: isolatedDriveNames.logistics, desc: 'Logistics Business Data (Dockets, Manifests, Bills)' },
+                      { name: isolatedDriveNames.ptl, desc: 'PTL Part-Load Data (Isolated)' },
+                      { name: isolatedDriveNames.courier, desc: 'Courier & Parcel Data (Isolated)' },
+                      { name: isolatedDriveNames.mastersVault, desc: 'All Masters, Parties, Fleet, Drivers & KYC Vault' },
+                    ].map((item) => (
+                      <div
+                        key={item.name}
+                        className="p-2.5 rounded-lg bg-white border border-emerald-200 flex items-center justify-between gap-2"
+                      >
+                        <div className="min-w-0">
+                          <div className="text-[11px] font-mono-num font-bold text-slate-900 truncate">
+                            {item.name}
+                          </div>
+                          <div className="text-[10px] text-slate-500 truncate">{item.desc}</div>
+                        </div>
+                        <button
+                          type="button"
+                          disabled={busyDrive}
+                          onClick={() => void handleRestoreIsolatedFile(item.name)}
+                          className="shrink-0 px-2.5 py-1 rounded border border-emerald-300 bg-emerald-50 hover:bg-emerald-100 text-emerald-900 text-[11px] font-bold cursor-pointer disabled:opacity-50"
+                        >
+                          Restore
+                        </button>
                       </div>
-                      <div className="text-[10px] text-slate-500">Inactive Installer Vault Folder</div>
+                    ))}
+                    <div className="p-2.5 rounded-lg bg-slate-100 border border-slate-200 flex items-center gap-2">
+                      <FolderArchive className="w-4 h-4 text-slate-500 shrink-0" />
+                      <div className="min-w-0">
+                        <div className="text-[11px] font-mono-num font-bold text-slate-700 truncate">
+                          {INSTALLER_VAULT_FOLDER}
+                        </div>
+                        <div className="text-[10px] text-slate-500">Inactive Installer Vault Folder</div>
+                      </div>
                     </div>
                   </div>
                 </div>
-              </div>
             </div>
           </div>
 
@@ -2361,12 +2565,12 @@ const BackupSettingsModuleInner: React.FC<BackupSettingsModuleProps> = ({
                 />
               </div>
               <div>
-                <label className="block font-semibold text-slate-700 mb-1">GSTIN</label>
-                <input
-                  type="text"
+                <GstinInputField
+                  label="Company GSTIN (15-Char Checksum)"
                   value={compState.gstin}
-                  onChange={(e) => setCompState({ ...compState, gstin: e.target.value.toUpperCase() })}
-                  className="w-full px-2.5 py-1.5 rounded border border-slate-300 font-mono-num"
+                  onChange={(val) => setCompState({ ...compState, gstin: val })}
+                  compact
+                  placeholder="19DOTPS3540M1ZZ"
                 />
               </div>
               <div className="md:col-span-2">
@@ -2539,6 +2743,93 @@ const BackupSettingsModuleInner: React.FC<BackupSettingsModuleProps> = ({
                     </div>
                   </div>
                 </div>
+
+                {/* Optional Future Bank Connected API Key Box */}
+                <div className="p-3 rounded-lg bg-blue-50/70 border border-blue-200 space-y-2">
+                  <div className="flex flex-wrap items-center justify-between gap-2">
+                    <span className="font-bold text-blue-950">
+                      Bank Connected API Key (Optional Auto-Feed Integration)
+                    </span>
+                    <label className="inline-flex items-center gap-1.5 font-semibold text-blue-900 cursor-pointer">
+                      <input
+                        type="checkbox"
+                        checked={Boolean(compState.bankApiConfig?.enabled)}
+                        onChange={(e) =>
+                          setCompState({
+                            ...compState,
+                            bankApiConfig: {
+                              ...(compState.bankApiConfig || {}),
+                              enabled: e.target.checked,
+                            },
+                          })
+                        }
+                      />
+                      Enable Bank API Webhook
+                    </label>
+                  </div>
+                  <div className="grid grid-cols-1 sm:grid-cols-4 gap-2">
+                    <input
+                      type="text"
+                      value={compState.bankApiConfig?.providerName || ''}
+                      onChange={(e) =>
+                        setCompState({
+                          ...compState,
+                          bankApiConfig: {
+                            ...(compState.bankApiConfig || {}),
+                            providerName: e.target.value,
+                          },
+                        })
+                      }
+                      placeholder="Provider (PNB Corporate / Setu AA / HDFC)"
+                      className="px-2.5 py-1.5 rounded border border-slate-300 bg-white"
+                    />
+                    <input
+                      type="text"
+                      value={compState.bankApiConfig?.clientId || ''}
+                      onChange={(e) =>
+                        setCompState({
+                          ...compState,
+                          bankApiConfig: {
+                            ...(compState.bankApiConfig || {}),
+                            clientId: e.target.value,
+                          },
+                        })
+                      }
+                      placeholder="Client ID / Merchant ID"
+                      className="px-2.5 py-1.5 rounded border border-slate-300 font-mono-num bg-white"
+                    />
+                    <input
+                      type="password"
+                      value={compState.bankApiConfig?.apiKey || ''}
+                      onChange={(e) =>
+                        setCompState({
+                          ...compState,
+                          bankApiConfig: {
+                            ...(compState.bankApiConfig || {}),
+                            apiKey: e.target.value,
+                          },
+                        })
+                      }
+                      placeholder="Bank Connected API Key"
+                      className="px-2.5 py-1.5 rounded border border-slate-300 font-mono-num bg-white"
+                    />
+                    <input
+                      type="password"
+                      value={compState.bankApiConfig?.webhookSecret || ''}
+                      onChange={(e) =>
+                        setCompState({
+                          ...compState,
+                          bankApiConfig: {
+                            ...(compState.bankApiConfig || {}),
+                            webhookSecret: e.target.value,
+                          },
+                        })
+                      }
+                      placeholder="Webhook Signing Secret"
+                      className="px-2.5 py-1.5 rounded border border-slate-300 font-mono-num bg-white"
+                    />
+                  </div>
+                </div>
                 {(compState.bankAccounts || []).map((bank, idx) => (
                   <div key={bank.id} className="p-2.5 rounded-lg bg-white border border-slate-200 grid grid-cols-1 sm:grid-cols-6 gap-2 items-end">
                     <input
@@ -2691,19 +2982,19 @@ const BackupSettingsModuleInner: React.FC<BackupSettingsModuleProps> = ({
                       placeholder="Branch Office Name"
                       className="px-2 py-1 rounded border border-slate-300"
                     />
-                    <input
-                      type="text"
+                    <GstinInputField
+                      label="Branch GSTIN"
                       value={br.gstin || ''}
-                      onChange={(e) =>
+                      onChange={(val) =>
                         setCompState((prev) => ({
                           ...prev,
                           branches: (prev.branches || []).map((x, i) =>
-                            i === idx ? { ...x, gstin: e.target.value.toUpperCase() } : x
+                            i === idx ? { ...x, gstin: val } : x
                           ),
                         }))
                       }
+                      compact
                       placeholder="Branch GSTIN (Optional)"
-                      className="px-2 py-1 rounded border border-slate-300 font-mono-num"
                     />
                     <input
                       type="text"

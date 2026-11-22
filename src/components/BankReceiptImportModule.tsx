@@ -5,7 +5,9 @@ import {
   CloudUpload,
   FileSpreadsheet,
   Landmark,
+  MessageSquareText,
   Printer,
+  Sparkles,
   Trash2,
   Upload,
 } from 'lucide-react';
@@ -17,7 +19,9 @@ import {
   removeDocument,
   upsertDocument,
 } from '../lib/firestoreStore';
-import { formatDateDDMMYYYY, formatINR } from '../lib/formatters';
+import { formatDateDDMMYYYY, formatINR, makeSafeDocId, todayISO } from '../lib/formatters';
+import { playAlertBeep, playVerifiedBeep } from '../lib/audioFeedback';
+import { validateSafeUploadFile } from '../lib/gstinValidator';
 import {
   buildAutomaticNarration,
   extractPaymentMetadata,
@@ -240,6 +244,150 @@ export function extractCreditReceiptsFromRows(params: {
   return results;
 }
 
+const MONTH_ABBR: Record<string, string> = {
+  jan: '01',
+  feb: '02',
+  mar: '03',
+  apr: '04',
+  may: '05',
+  jun: '06',
+  jul: '07',
+  aug: '08',
+  sep: '09',
+  oct: '10',
+  nov: '11',
+  dec: '12',
+};
+
+export interface ParsedSmsCreditDraft {
+  receiptDate: string;
+  creditAmount: number;
+  partyName: string;
+  paymentMode: string;
+  utrNo: string;
+  upiRefId: string;
+  chequeNo: string;
+  matchedInvoiceId: string;
+  tdsAmount: number;
+  looksLikeDebit: boolean;
+}
+
+export function parseBankCreditAlertText(
+  rawText: string,
+  invoices: Invoice[],
+  activeFy: string
+): ParsedSmsCreditDraft {
+  const text = String(rawText || '').trim();
+  const looksLikeDebit =
+    /\b(debited|withdrawn|paid\s+to|dr\b|spent)\b/i.test(text) &&
+    !/\b(credited|received|deposited|cr\b)\b/i.test(text);
+
+  // Extract 2-decimal paise amount (e.g. INR 1,01,150.50 | Rs. 45000.00 | ₹25,400.75)
+  let creditAmount = 0;
+  const amtMatches = [
+    ...text.matchAll(
+      /(?:INR|Rs\.?|₹)\s*([0-9][0-9,]*(?:\.[0-9]{1,2})?)|(?:credited\s*(?:with|by|for)?\s*(?:INR|Rs\.?|₹)?\s*([0-9][0-9,]*(?:\.[0-9]{1,2})?))/gi
+    ),
+  ];
+  for (const m of amtMatches) {
+    const rawNum = (m[1] || m[2] || '').replace(/,/g, '');
+    const n = Math.round(Number(rawNum) * 100) / 100;
+    if (Number.isFinite(n) && n > 0) {
+      creditAmount = n;
+      break;
+    }
+  }
+
+  // Extract Date
+  let receiptDate = todayISO();
+  const isoHit = text.match(/\b(20\d{2})[\/\-](\d{1,2})[\/\-](\d{1,2})\b/);
+  const dmyHit = text.match(/\b(\d{1,2})[\/\-](\d{1,2})[\/\-](\d{2,4})\b/);
+  const dMonHit = text.match(/\b(\d{1,2})[\s\-]([A-Za-z]{3})[\s\-]?(\d{2,4})\b/);
+  if (isoHit) {
+    receiptDate = `${isoHit[1]}-${isoHit[2].padStart(2, '0')}-${isoHit[3].padStart(2, '0')}`;
+  } else if (dmyHit) {
+    const y = dmyHit[3].length === 2 ? `20${dmyHit[3]}` : dmyHit[3];
+    receiptDate = `${y}-${dmyHit[2].padStart(2, '0')}-${dmyHit[1].padStart(2, '0')}`;
+  } else if (dMonHit) {
+    const mon = MONTH_ABBR[dMonHit[2].toLowerCase()];
+    if (mon) {
+      const y = dMonHit[3].length === 2 ? `20${dMonHit[3]}` : dMonHit[3];
+      receiptDate = `${y}-${mon}-${dMonHit[1].padStart(2, '0')}`;
+    }
+  }
+
+  const meta = extractPaymentMetadata({ description: text, referenceNo: text });
+  const utrMatch = text.match(/(?:UTR(?:\s*No\.?)?|Ref(?:\s*No\.?)?|IMPS\s*Ref)[:\s#-]*([A-Z0-9]{6,26})/i);
+  const utrNo = meta.utrNo || (utrMatch ? utrMatch[1].toUpperCase() : '');
+
+  // Extract Party hint after "from" / "by"
+  let partyHint = '';
+  const fromMatch = text.match(
+    /(?:received\s+from|credited\s+by|from|by\s+party)\s+([A-Za-z0-9 &.,()\/-]{3,50}?)(?=\s+(?:via|on|ref|utr|upi|imps|neft|rtgs|info|a\/c|bal|avail|$))/i
+  );
+  if (fromMatch && fromMatch[1]) {
+    partyHint = fromMatch[1].replace(/[.,\s]+$/, '').trim();
+  }
+
+  const fyInvoices = invoices.filter(
+    (inv) => !inv.financialYear || inv.financialYear === activeFy
+  );
+  const searchPool = [
+    ...fyInvoices.filter((inv) => inv.status !== 'Paid'),
+    ...fyInvoices.filter((inv) => inv.status === 'Paid'),
+  ];
+  const lowered = `${partyHint} ${text}`.toLowerCase();
+  let matchedInv: Invoice | undefined;
+  for (const inv of searchPool) {
+    const invNoClean = (inv.invoiceNo || '').toLowerCase();
+    const tokens = (inv.partyName || '')
+      .toLowerCase()
+      .split(/\s+/)
+      .filter((w) => w.length >= 4);
+    const pending = Math.max(0, Number(inv.grandTotal || 0) - Number(inv.paidAmount || 0));
+    if (invNoClean && lowered.includes(invNoClean)) {
+      matchedInv = inv;
+      break;
+    }
+    if (tokens.some((tok) => lowered.includes(tok))) {
+      matchedInv = inv;
+      break;
+    }
+    if (creditAmount > 0 && pending > 0 && Math.abs(pending - creditAmount) <= pending * 0.025) {
+      matchedInv = inv;
+      break;
+    }
+  }
+
+  let tdsAmount = 0;
+  if (matchedInv && creditAmount > 0) {
+    const pending = Math.max(
+      0,
+      Number(matchedInv.grandTotal || 0) - Number(matchedInv.paidAmount || 0)
+    );
+    if (pending > creditAmount) {
+      const diff = Math.round((pending - creditAmount) * 100) / 100;
+      const pct = (diff / Math.max(1, pending)) * 100;
+      if (pct >= 0.8 && pct <= 2.3) {
+        tdsAmount = diff;
+      }
+    }
+  }
+
+  return {
+    receiptDate,
+    creditAmount,
+    partyName: matchedInv?.partyName || partyHint || '',
+    paymentMode: meta.paymentMode || 'NEFT',
+    utrNo,
+    upiRefId: meta.upiRefId || '',
+    chequeNo: meta.chequeNo || '',
+    matchedInvoiceId: matchedInv?.id || '',
+    tdsAmount,
+    looksLikeDebit,
+  };
+}
+
 export const BankReceiptImportModule: React.FC<BankReceiptImportModuleProps> = ({
   bankReceipts,
   invoices,
@@ -272,6 +420,12 @@ export const BankReceiptImportModule: React.FC<BankReceiptImportModuleProps> = (
   const [statusMsg, setStatusMsg] = useState<string | null>(null);
   const [deleteTarget, setDeleteTarget] = useState<BankReceiptRecord | null>(null);
 
+  // Smart Bank Credit Reader (SMS / Email Alert Auto-Parser)
+  const [smsAlertText, setSmsAlertText] = useState('');
+  const [smsDraft, setSmsDraft] = useState<ParsedSmsCreditDraft | null>(null);
+  const [smsWarn, setSmsWarn] = useState<string | null>(null);
+  const [savingSms, setSavingSms] = useState(false);
+
   const fyReceipts = useMemo(
     () =>
       bankReceipts
@@ -295,6 +449,12 @@ export const BankReceiptImportModule: React.FC<BankReceiptImportModuleProps> = (
 
   const handleFileUpload = async (file: File) => {
     if (readOnly) return;
+    const uploadCheck = validateSafeUploadFile(file, 'spreadsheet');
+    if (!uploadCheck.valid) {
+      playAlertBeep();
+      setStatusMsg(uploadCheck.reason || 'Blocked unsupported spreadsheet file.');
+      return;
+    }
     setImporting(true);
     setStatusMsg(null);
     try {
@@ -351,6 +511,7 @@ export const BankReceiptImportModule: React.FC<BankReceiptImportModuleProps> = (
         ownerUid,
       });
 
+      playVerifiedBeep();
       setStatusMsg(
         `Imported ${parsed.length} Credit party receipt(s) for ${activeFy}. All Debit/Withdrawal rows were strictly skipped.${
           mirrorDrive && driveAccessToken ? ' Also mirrored to Drive Bank_Statements folder.' : ''
@@ -360,6 +521,168 @@ export const BankReceiptImportModule: React.FC<BankReceiptImportModuleProps> = (
       setStatusMsg(err instanceof Error ? err.message : 'Failed to parse bank statement file.');
     } finally {
       setImporting(false);
+    }
+  };
+
+  const handleParseSmsAlert = () => {
+    setSmsWarn(null);
+    if (!smsAlertText.trim()) {
+      setSmsWarn('Paste a Bank Credit SMS or Email alert first.');
+      return;
+    }
+    const parsed = parseBankCreditAlertText(smsAlertText, fyInvoices, activeFy);
+    if (parsed.looksLikeDebit) {
+      setSmsWarn('Warning: This alert appears to be a DEBIT / Withdrawal notification. Only Customer Credit alerts should create Receipt Vouchers.');
+    }
+    if (parsed.creditAmount <= 0) {
+      setSmsWarn('Could not detect a valid numeric credit amount. Enter the Amount manually in the preview below.');
+    }
+    setSmsDraft(parsed);
+  };
+
+  const handleCreateSmsReceiptVoucher = async () => {
+    if (readOnly || !smsDraft) return;
+    if (smsDraft.creditAmount <= 0) {
+      setSmsWarn('Net Received Amount must be greater than Rs. 0.00.');
+      return;
+    }
+    if (!smsDraft.partyName.trim()) {
+      setSmsWarn('Enter or select a Customer / Party Name before creating Receipt Voucher.');
+      return;
+    }
+
+    setSavingSms(true);
+    setSmsWarn(null);
+    try {
+      const matchedInv = smsDraft.matchedInvoiceId
+        ? fyInvoices.find((i) => i.id === smsDraft.matchedInvoiceId)
+        : undefined;
+      const partyName = matchedInv?.partyName || smsDraft.partyName.trim();
+      const refPrimary =
+        smsDraft.utrNo || smsDraft.upiRefId || smsDraft.chequeNo || `SMS-${Date.now().toString().slice(-6)}`;
+      const tdsAmt = Math.round(Math.max(0, Number(smsDraft.tdsAmount || 0)) * 100) / 100;
+      const netAmt = Math.round(Number(smsDraft.creditAmount || 0) * 100) / 100;
+      const grossSettled = Math.round((netAmt + tdsAmt) * 100) / 100;
+
+      let nextStatus: Invoice['status'] | undefined;
+      let balanceRemaining = 0;
+
+      if (matchedInv) {
+        const nextPaid = Math.min(
+          Number(matchedInv.grandTotal || 0),
+          Math.round((Number(matchedInv.paidAmount || 0) + grossSettled) * 100) / 100
+        );
+        nextStatus = nextPaid >= Number(matchedInv.grandTotal || 0) - 1 ? 'Paid' : 'Partial';
+        balanceRemaining = Math.max(0, Math.round((Number(matchedInv.grandTotal || 0) - nextPaid) * 100) / 100);
+        await upsertDocument(
+          'invoices',
+          matchedInv.id,
+          {
+            ...matchedInv,
+            paidAmount: nextPaid,
+            status: nextStatus,
+          },
+          false
+        );
+      }
+
+      const autoNarration = buildAutomaticNarration({
+        txType: 'Income',
+        partyName,
+        amount: netAmt,
+        paymentMode: smsDraft.paymentMode || 'NEFT',
+        upiRefId: smsDraft.upiRefId,
+        utrNo: smsDraft.utrNo,
+        chequeNo: smsDraft.chequeNo,
+        referenceNo: refPrimary,
+        linkedInvoiceNo: matchedInv?.invoiceNo,
+        bankAccountName: selectedBank,
+        tdsAmount: tdsAmt,
+      });
+
+      const txId = makeSafeDocId('tx_sms');
+      await upsertDocument(
+        'transactions',
+        txId,
+        {
+          id: txId,
+          txCode: `SMS-${refPrimary}`,
+          txDate: smsDraft.receiptDate || todayISO(),
+          financialYear: activeFy,
+          txType: 'Income',
+          ledgerAccount: selectedBank,
+          partyName,
+          amount: netAmt,
+          narration: autoNarration,
+          paymentMode: smsDraft.paymentMode || 'NEFT',
+          referenceNo: refPrimary,
+          upiRefId: smsDraft.upiRefId || '',
+          utrNo: smsDraft.utrNo || '',
+          chequeNo: smsDraft.chequeNo || '',
+          tdsAmount: tdsAmt,
+          ...(matchedInv ? { linkedInvoiceNo: matchedInv.invoiceNo } : {}),
+          branchCode: currentBranchCode,
+          createdByStaff: currentStaffCode,
+          ownerUid,
+        },
+        true
+      );
+
+      const recId = makeSafeDocId('brec_sms');
+      await upsertDocument(
+        'bank_receipts',
+        recId,
+        {
+          id: recId,
+          financialYear: activeFy,
+          receiptDate: smsDraft.receiptDate || todayISO(),
+          bankAccountName: selectedBank,
+          partyName,
+          paymentMode: smsDraft.paymentMode || 'NEFT',
+          referenceNo: refPrimary,
+          upiRefId: smsDraft.upiRefId || '',
+          utrNo: smsDraft.utrNo || '',
+          chequeNo: smsDraft.chequeNo || '',
+          narration: autoNarration,
+          description: smsAlertText.trim().slice(0, 240),
+          creditAmount: netAmt,
+          tdsRatePct: matchedInv && netAmt + tdsAmt > 0 ? Math.round((tdsAmt / (netAmt + tdsAmt)) * 1000) / 10 : 0,
+          tdsAmount: tdsAmt,
+          grossSettled,
+          ...(matchedInv ? { matchedInvoiceId: matchedInv.id, matchedInvoiceNo: matchedInv.invoiceNo } : {}),
+          billAmount: matchedInv ? Number(matchedInv.grandTotal || 0) : netAmt,
+          balanceRemaining,
+          appliedToInvoice: Boolean(matchedInv),
+          sourceFileName: 'Smart_SMS_Email_Reader',
+          branchCode: currentBranchCode,
+          createdByStaff: currentStaffCode,
+          ownerUid,
+        },
+        true
+      );
+
+      await logBranchActivity({
+        action: 'CREATE_SMS_BANK_RECEIPT',
+        module: 'BANK_IMPORT',
+        docRefCode: refPrimary,
+        summary: `Auto-created Receipt Voucher Rs. ${formatINR(netAmt)} from ${partyName} (${smsDraft.paymentMode})${
+          matchedInv ? ` against ${matchedInv.invoiceNo} -> ${nextStatus}` : ''
+        }`,
+        staffCode: currentStaffCode,
+        branchCode: currentBranchCode,
+        ownerUid,
+      });
+
+      playVerifiedBeep();
+      setStatusMsg(
+        `Receipt Voucher Created & Party Ledger Updated: Rs. ${formatINR(netAmt)}${
+          tdsAmt > 0 ? ` + TDS Rs. ${formatINR(tdsAmt)}` : ''
+        } from ${partyName}${matchedInv ? ` (Invoice ${matchedInv.invoiceNo}: ${nextStatus})` : ''}.`
+      );
+      setSmsAlertText('');
+      setSmsDraft(null);
+    } finally {
+      setSavingSms(false);
     }
   };
 
@@ -486,6 +809,7 @@ export const BankReceiptImportModule: React.FC<BankReceiptImportModuleProps> = (
       false
     );
 
+    playVerifiedBeep();
     setStatusMsg(
       `Applied Rs. ${formatINR(rec.creditAmount)} + TDS Rs. ${formatINR(
         rec.tdsAmount
@@ -622,6 +946,163 @@ export const BankReceiptImportModule: React.FC<BankReceiptImportModuleProps> = (
             Print / PDF / Share Statement
           </button>
         </div>
+
+        {/* SMART BANK CREDIT SMS / EMAIL ALERT READER */}
+        {!readOnly && (
+          <div className="p-3.5 rounded-xl bg-blue-50/70 border border-blue-200 space-y-3">
+            <div className="flex flex-wrap items-center justify-between gap-2">
+              <div className="flex items-center gap-2 text-xs font-extrabold text-blue-950">
+                <MessageSquareText className="w-4 h-4 text-blue-700" />
+                <span>Smart Bank Credit Reader (Paste Bank SMS / Email Credit Alert &rarr; Auto-Receipt)</span>
+              </div>
+              <span className="text-[11px] font-semibold text-blue-700">
+                Auto-extracts Date, ₹ Amount (paise), Party Name, NEFT/RTGS/IMPS/UPI &amp; UTR No.
+              </span>
+            </div>
+
+            <div className="flex flex-col sm:flex-row gap-2">
+              <textarea
+                rows={2}
+                value={smsAlertText}
+                onChange={(e) => setSmsAlertText(e.target.value)}
+                placeholder='Paste Bank SMS/Email e.g.: "Ac X4252 credited with INR 1,01,150.50 on 15-11-2026 by NEFT UTR PUNBR52026111500912345 from TATA STEEL LTD against Inv KOL-0042."'
+                className="flex-1 px-3 py-2 rounded-lg border border-blue-300 bg-white text-xs focus:outline-none focus:ring-2 focus:ring-blue-600"
+              />
+              <button
+                type="button"
+                onClick={handleParseSmsAlert}
+                className="inline-flex items-center justify-center gap-1.5 px-4 py-2 rounded-lg bg-[#0D47A1] hover:bg-blue-900 text-white text-xs font-extrabold cursor-pointer whitespace-nowrap shrink-0"
+              >
+                <Sparkles className="w-4 h-4 text-amber-300" />
+                Extract Credit Alert
+              </button>
+            </div>
+
+            {smsWarn && (
+              <div className="px-3 py-1.5 rounded bg-amber-100 border border-amber-300 text-amber-950 text-[11px] font-bold">
+                {smsWarn}
+              </div>
+            )}
+
+            {smsDraft && (
+              <div className="p-3 rounded-lg bg-white border border-emerald-300 space-y-2.5 text-xs">
+                <div className="grid grid-cols-1 sm:grid-cols-6 gap-2.5">
+                  <div>
+                    <label className="block text-[11px] font-bold text-slate-700 mb-1">Credit Date</label>
+                    <input
+                      type="date"
+                      value={smsDraft.receiptDate}
+                      onChange={(e) => setSmsDraft({ ...smsDraft, receiptDate: e.target.value })}
+                      className="w-full px-2 py-1.5 rounded border border-slate-300 font-mono-num"
+                    />
+                  </div>
+                  <div className="sm:col-span-2">
+                    <label className="block text-[11px] font-bold text-slate-700 mb-1">Party / Customer Name *</label>
+                    <input
+                      type="text"
+                      value={smsDraft.partyName}
+                      onChange={(e) => setSmsDraft({ ...smsDraft, partyName: e.target.value })}
+                      placeholder="Customer / Payer Name"
+                      className="w-full px-2 py-1.5 rounded border border-slate-300 font-semibold"
+                    />
+                  </div>
+                  <div>
+                    <label className="block text-[11px] font-bold text-slate-700 mb-1">Payment Mode</label>
+                    <SearchableSelect
+                      ariaLabel="SMS Receipt Mode"
+                      value={smsDraft.paymentMode}
+                      onChange={(val) => setSmsDraft({ ...smsDraft, paymentMode: val })}
+                      options={PAYMENT_MODE_OPTIONS}
+                      triggerClassName="!py-1.5 !font-bold"
+                    />
+                  </div>
+                  <div>
+                    <label className="block text-[11px] font-bold text-slate-700 mb-1">UTR / Ref No.</label>
+                    <input
+                      type="text"
+                      value={smsDraft.utrNo || smsDraft.upiRefId || smsDraft.chequeNo}
+                      onChange={(e) => setSmsDraft({ ...smsDraft, utrNo: e.target.value.toUpperCase() })}
+                      placeholder="UTR / UPI Ref"
+                      className="w-full px-2 py-1.5 rounded border border-slate-300 font-mono-num uppercase"
+                    />
+                  </div>
+                  <div>
+                    <label className="block text-[11px] font-bold text-emerald-800 mb-1">Credit Amount (₹)</label>
+                    <input
+                      type="number"
+                      step="0.01"
+                      value={smsDraft.creditAmount}
+                      onChange={(e) =>
+                        setSmsDraft({ ...smsDraft, creditAmount: Math.max(0, Number(e.target.value || 0)) })
+                      }
+                      className="w-full px-2 py-1.5 rounded border border-emerald-400 font-mono-num font-extrabold text-emerald-900"
+                    />
+                  </div>
+                </div>
+
+                <div className="grid grid-cols-1 sm:grid-cols-6 gap-2.5 items-end">
+                  <div className="sm:col-span-3">
+                    <label className="block text-[11px] font-bold text-slate-700 mb-1">
+                      Match Unpaid / Partial Tax Invoice (Optional)
+                    </label>
+                    <SearchableSelect
+                      ariaLabel="Match Tax Invoice"
+                      value={smsDraft.matchedInvoiceId}
+                      onChange={(invId) => {
+                        const hit = fyInvoices.find((i) => i.id === invId);
+                        setSmsDraft({
+                          ...smsDraft,
+                          matchedInvoiceId: invId,
+                          partyName: hit?.partyName || smsDraft.partyName,
+                        });
+                      }}
+                      options={[
+                        { value: '', label: '-- Direct Advance / On-Account Receipt (No Bill) --', pinFirst: true },
+                        ...fyInvoices.map((inv) => ({
+                          value: inv.id,
+                          label: `${inv.invoiceNo} | ${inv.partyName} (Due ₹${formatINR(
+                            Math.max(0, Number(inv.grandTotal || 0) - Number(inv.paidAmount || 0))
+                          )})`,
+                        })),
+                      ]}
+                      triggerClassName="!py-1.5 !font-semibold"
+                    />
+                  </div>
+                  <div>
+                    <label className="block text-[11px] font-bold text-amber-800 mb-1">194C TDS Deducted (₹)</label>
+                    <input
+                      type="number"
+                      step="0.01"
+                      value={smsDraft.tdsAmount}
+                      onChange={(e) =>
+                        setSmsDraft({ ...smsDraft, tdsAmount: Math.max(0, Number(e.target.value || 0)) })
+                      }
+                      className="w-full px-2 py-1.5 rounded border border-amber-300 font-mono-num font-bold text-amber-900"
+                    />
+                  </div>
+                  <div className="sm:col-span-2 flex justify-end gap-2">
+                    <button
+                      type="button"
+                      onClick={() => setSmsDraft(null)}
+                      className="px-3 py-1.5 rounded-lg border border-slate-300 bg-white hover:bg-slate-100 text-slate-700 font-semibold cursor-pointer"
+                    >
+                      Clear
+                    </button>
+                    <button
+                      type="button"
+                      disabled={savingSms}
+                      onClick={() => void handleCreateSmsReceiptVoucher()}
+                      className="inline-flex items-center gap-1.5 px-4 py-1.5 rounded-lg bg-emerald-600 hover:bg-emerald-700 text-white font-extrabold cursor-pointer disabled:opacity-60"
+                    >
+                      <CheckCircle2 className="w-4 h-4" />
+                      {savingSms ? 'Posting...' : 'Auto-Create Receipt Voucher & Update Ledger'}
+                    </button>
+                  </div>
+                </div>
+              </div>
+            )}
+          </div>
+        )}
 
         {!readOnly && (
           <div className="grid grid-cols-1 md:grid-cols-12 gap-3 p-3.5 rounded-xl bg-slate-50 border border-slate-200 items-center">

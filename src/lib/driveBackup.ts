@@ -37,6 +37,10 @@ export const ESSENTIAL_DRIVE_MASTER_FILES = [
   'DRC_LorryHire_POD.json',
   'DRC_Staff_Commission_Ledger.json',
   'DRC_Bank_Receipts_TDS.json',
+  'DRC_GST_RETURNS.pdf',
+  'DRC_IT_RETURN_AUDIT.pdf',
+  'DRC_TRADE_LICENSE_PTAX.pdf',
+  'DRC_KYC_VAULT.pdf',
 ] as const;
 
 export interface DriveFileSummary {
@@ -746,5 +750,139 @@ export async function downloadIsolatedBusinessFileFromDrive(
   const buf = await res.arrayBuffer();
   return decompressGzipOrJsonBuffer(buf);
 }
+
+export async function uploadNamedPdfToDrive(params: {
+  accessToken: string;
+  folderName: 'Reports_Ledgers' | 'Declarations';
+  fileName: string;
+  blob: Blob;
+}): Promise<{ id: string; name: string; webViewLink?: string }> {
+  return uploadBlobToDriveFolder({
+    accessToken: params.accessToken,
+    folderName: params.folderName,
+    fileName: params.fileName,
+    blob: params.blob,
+    mimeType: params.blob.type || 'application/pdf',
+    overwriteIfExists: true,
+  });
+}
+
+// ============================================================================
+// GOOGLE DRIVE HIDDEN SANDBOX (appDataFolder) & APP BLUEPRINT PDF UPLOAD
+// ============================================================================
+
+async function findFileInAppDataFolder(
+  fileName: string,
+  accessToken: string
+): Promise<string | null> {
+  const escaped = fileName.replace(/'/g, "\\'");
+  const q = encodeURIComponent(`name = '${escaped}' and trashed = false`);
+  const res = await driveFetch(
+    `https://www.googleapis.com/drive/v3/files?spaces=appDataFolder&q=${q}&fields=files(id,name)`,
+    accessToken
+  );
+  const json = (await res.json()) as { files?: Array<{ id: string }> };
+  return json.files && json.files.length > 0 ? json.files[0].id : null;
+}
+
+export async function uploadBlobToAppDataFolder(params: {
+  accessToken: string;
+  fileName: string;
+  blob: Blob;
+  mimeType: string;
+}): Promise<{ id: string; name: string }> {
+  const { accessToken, fileName, blob, mimeType } = params;
+  const existingId = await findFileInAppDataFolder(fileName, accessToken);
+  const boundary = 'drc_appdata_' + Date.now() + '_' + Math.random().toString(36).slice(2, 6);
+  const metadata = existingId
+    ? { name: fileName, mimeType }
+    : { name: fileName, mimeType, parents: ['appDataFolder'] };
+
+  const arrayBuffer = await blob.arrayBuffer();
+  const base64Body = uint8ArrayToBase64(new Uint8Array(arrayBuffer));
+
+  const multipartBody =
+    `--${boundary}\r\n` +
+    `Content-Type: application/json; charset=UTF-8\r\n\r\n` +
+    `${JSON.stringify(metadata)}\r\n` +
+    `--${boundary}\r\n` +
+    `Content-Type: ${mimeType}\r\n` +
+    `Content-Transfer-Encoding: base64\r\n\r\n` +
+    `${base64Body}\r\n` +
+    `--${boundary}--`;
+
+  const url = existingId
+    ? `https://www.googleapis.com/upload/drive/v3/files/${existingId}?uploadType=multipart&fields=id,name`
+    : `https://www.googleapis.com/upload/drive/v3/files?uploadType=multipart&fields=id,name`;
+
+  const res = await driveFetch(url, accessToken, {
+    method: existingId ? 'PATCH' : 'POST',
+    headers: { 'Content-Type': `multipart/related; boundary=${boundary}` },
+    body: multipartBody,
+  });
+  return (await res.json()) as { id: string; name: string };
+}
+
+export async function listAppDataBackupFiles(accessToken: string): Promise<DriveFileSummary[]> {
+  try {
+    const res = await driveFetch(
+      `https://www.googleapis.com/drive/v3/files?spaces=appDataFolder&fields=files(id,name,mimeType,size,modifiedTime)&orderBy=modifiedTime desc&pageSize=30`,
+      accessToken
+    );
+    const json = (await res.json()) as { files?: DriveFileSummary[] };
+    return (json.files || []).map((f) => ({
+      ...f,
+      folderName: 'appDataFolder (Hidden Sandbox)',
+    }));
+  } catch {
+    return [];
+  }
+}
+
+export async function uploadAppDataJsonSnapshot(params: {
+  accessToken: string;
+  fileName: string;
+  payload: unknown;
+}): Promise<{ id: string; name: string }> {
+  const jsonText = JSON.stringify(params.payload);
+  const blob = new Blob([jsonText], { type: 'application/json' });
+  return uploadBlobToAppDataFolder({
+    accessToken: params.accessToken,
+    fileName: params.fileName,
+    blob,
+    mimeType: 'application/json',
+  });
+}
+
+export async function uploadBlueprintPdfToDrive(
+  accessToken: string,
+  blob: Blob
+): Promise<{
+  visibleFile: { id: string; name: string; webViewLink?: string };
+  appDataFileId?: string;
+}> {
+  const fileName = 'DRC_APP_FORMAT_BLUEPRINT.pdf';
+  const visibleFile = await uploadNamedPdfToDrive({
+    accessToken,
+    folderName: 'Reports_Ledgers',
+    fileName,
+    blob,
+  });
+  let appDataFileId: string | undefined;
+  try {
+    const hiddenRes = await uploadBlobToAppDataFolder({
+      accessToken,
+      fileName,
+      blob,
+      mimeType: 'application/pdf',
+    });
+    appDataFileId = hiddenRes.id;
+  } catch {
+    // Non-fatal if user granted drive.file prior to re-consenting drive.appdata
+  }
+  return { visibleFile, appDataFileId };
+}
+
+
 
 

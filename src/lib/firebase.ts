@@ -18,7 +18,10 @@ import {
 import firebaseConfig from '../../firebase-applet-config.json';
 
 export const DRIVE_SCOPE = 'https://www.googleapis.com/auth/drive.file';
+export const DRIVE_APPDATA_SCOPE = 'https://www.googleapis.com/auth/drive.appdata';
 export const MASTER_ADMIN_EMAIL = 'drc.2015kolkata@gmail.com';
+export const BACKUP_ISOLATED_DRIVE_EMAIL = 'drc.kolkata2015@gmail.com';
+export const OFFICIAL_PARTY_EMAIL = 'drc.kolkata1@gmail.com';
 export const VERCEL_APP_DOMAIN = 'dolphin-road-carrier.vercel.app';
 export const ALLOWLISTED_OAUTH_DOMAINS = [
   VERCEL_APP_DOMAIN,
@@ -82,6 +85,7 @@ let connectedGmailEmail: string | null = null;
 function createProvider(forceSelectAccount = false): GoogleAuthProvider {
   const provider = new GoogleAuthProvider();
   provider.addScope(DRIVE_SCOPE);
+  provider.addScope(DRIVE_APPDATA_SCOPE);
   if (forceSelectAccount) {
     provider.setCustomParameters({ prompt: 'select_account' });
   }

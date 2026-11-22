@@ -1,4 +1,5 @@
 import { CompanySettings, Invoice, Party } from '../types/erp';
+import { OFFICIAL_PARTY_EMAIL } from './firebase';
 
 export const PRIORITY_CORRIDOR_REGIONS = [
   'Assam',
@@ -38,7 +39,7 @@ export function buildEmailShareHref(params: {
   subject: string;
   body: string;
 }): string {
-  const to = String(params.email || '').trim();
+  const to = String(params.email || OFFICIAL_PARTY_EMAIL).trim() || OFFICIAL_PARTY_EMAIL;
   return `mailto:${encodeURIComponent(to)}?subject=${encodeURIComponent(
     params.subject
   )}&body=${encodeURIComponent(params.body)}`;

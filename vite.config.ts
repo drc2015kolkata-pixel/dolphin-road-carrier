@@ -30,6 +30,7 @@ export default defineConfig(() => {
           'pwa-512x512.png',
           'pwa-maskable-192x192.png',
           'pwa-maskable-512x512.png',
+          'sw-notifications.js',
         ],
         manifest: {
           id: '/',
@@ -40,6 +41,7 @@ export default defineConfig(() => {
           theme_color: '#0D47A1',
           background_color: '#FFFFFF',
           display: 'standalone',
+          orientation: 'any',
           start_url: '/',
           scope: '/',
           icons: [
@@ -74,6 +76,7 @@ export default defineConfig(() => {
           clientsClaim: true,
           cleanupOutdatedCaches: true,
           maximumFileSizeToCacheInBytes: 5 * 1024 * 1024,
+          importScripts: ['/sw-notifications.js'],
           globPatterns: ['**/*.{js,css,html,ico,png,jpg,jpeg,svg,woff,woff2}'],
           navigateFallbackDenylist: [/^\/api\//],
           runtimeCaching: [

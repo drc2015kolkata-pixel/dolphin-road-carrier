@@ -2,6 +2,8 @@ import React, { useEffect, useRef, useState } from 'react';
 import { Camera, CheckCircle2, QrCode, RefreshCw, RotateCw, Upload, X, ScanLine } from 'lucide-react';
 import { ParsedQrPayload, parseQrOrEwbPayload } from '../lib/ewayBillUtils';
 import { autoRotateAndCompressImage, rotateDataUrlDegrees } from '../lib/ocrEngine';
+import { validateSafeUploadFile } from '../lib/gstinValidator';
+import { playAlertBeep } from '../lib/audioFeedback';
 
 interface CameraPodQrScannerModalProps {
   open: boolean;
@@ -169,6 +171,12 @@ export const CameraPodQrScannerModal: React.FC<CameraPodQrScannerModalProps> = (
 
   const handleImageFileSelected = async (file: File | undefined) => {
     if (!file) return;
+    const uploadCheck = validateSafeUploadFile(file, 'image_only');
+    if (!uploadCheck.valid) {
+      playAlertBeep();
+      setCameraError(uploadCheck.reason || 'Blocked unsupported image file.');
+      return;
+    }
     try {
       const normalized = await autoRotateAndCompressImage(file, 1200, 0.78);
       if (mode !== 'qr') {

@@ -43,6 +43,8 @@ import {
   todayISO,
 } from '../lib/formatters';
 import { scanPhysicalLR } from '../lib/ocrEngine';
+import { validateIndianGstin, validateSafeUploadFile } from '../lib/gstinValidator';
+import { GstinInputField } from './GstinInputField';
 import {
   addDropdownItem,
   ALL_INDIA_BRANCH_OPTIONS,
@@ -346,6 +348,12 @@ const ConsignmentModuleInner: React.FC<ConsignmentModuleProps> = ({
   const handleOCRFile = useCallback(
     async (file: File | undefined) => {
       if (!file) return;
+      const uploadCheck = validateSafeUploadFile(file, 'image_only');
+      if (!uploadCheck.valid) {
+        playAlertBeep();
+        setOcrError(uploadCheck.reason || 'Blocked unsupported file.');
+        return;
+      }
       setOcrError(null);
       setOcrFyMismatch(null);
       setOcrMissingFields([]);
@@ -1039,6 +1047,22 @@ const ConsignmentModuleInner: React.FC<ConsignmentModuleProps> = ({
         'LOCKED: Select Mandatory "Payment Credit Days" (10, 15, 20, 30, or custom days) before proceeding.'
       );
       return false;
+    }
+    if (consignorGstin.trim()) {
+      const c1 = validateIndianGstin(consignorGstin);
+      if (!c1.valid) {
+        playAlertBeep();
+        setValidationError(`Blocked: Consignor GSTIN invalid — ${c1.error}`);
+        return false;
+      }
+    }
+    if (consigneeGstin.trim()) {
+      const c2 = validateIndianGstin(consigneeGstin);
+      if (!c2.valid) {
+        playAlertBeep();
+        setValidationError(`Blocked: Consignee GSTIN invalid — ${c2.error}`);
+        return false;
+      }
     }
     setValidationError(null);
     return true;
@@ -1878,12 +1902,10 @@ const ConsignmentModuleInner: React.FC<ConsignmentModuleProps> = ({
             />
           </div>
           <div>
-            <label className="block font-semibold text-slate-700 mb-1">Consignor GSTIN</label>
-            <input
-              type="text"
+            <GstinInputField
+              label="Consignor GSTIN"
               value={consignorGstin}
-              onChange={(e) => setConsignorGstin(e.target.value.toUpperCase())}
-              className="w-full px-2.5 py-1.5 rounded border border-slate-300 font-mono-num"
+              onChange={setConsignorGstin}
             />
           </div>
 
@@ -1939,12 +1961,10 @@ const ConsignmentModuleInner: React.FC<ConsignmentModuleProps> = ({
             />
           </div>
           <div>
-            <label className="block font-semibold text-slate-700 mb-1">Consignee GSTIN</label>
-            <input
-              type="text"
+            <GstinInputField
+              label="Consignee GSTIN"
               value={consigneeGstin}
-              onChange={(e) => setConsigneeGstin(e.target.value.toUpperCase())}
-              className="w-full px-2.5 py-1.5 rounded border border-slate-300 font-mono-num"
+              onChange={setConsigneeGstin}
             />
           </div>
 
