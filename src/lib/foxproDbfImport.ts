@@ -6,13 +6,14 @@ import {
   Invoice,
   LorryHire,
   Party,
+  TransactionRecord,
   Vehicle,
 } from '../types/erp';
-import { makeSafeDocId, normalizeFyLabel, resolveFinancialYearFromDate, todayISO } from './formatters';
+import { makeSafeDocId, normalizeFyLabel, resolveFinancialYearFromDate, roundPaise, todayISO } from './formatters';
 import { sheetToObjectsSmartHeader } from './excelImport';
 import { buildAutomaticNarration, extractPaymentMetadata } from './paymentNarration';
 import { extractCreditReceiptsFromRows } from '../components/BankReceiptImportModule';
-import { analyzeAndSeparateMisclassifiedParties, isKnownTransportBrokerName } from './partySeparation';
+import { normalizePartyMatchKey } from './partySeparation';
 
 export interface DbfFieldDescriptor {
   name: string;
@@ -195,20 +196,135 @@ function pickNum(row: Record<string, unknown>, keys: string[]): number {
   return Number.isFinite(n) ? n : 0;
 }
 
-function normDate(raw: string): string {
+function normOptionalDate(raw: string): string {
   const s = String(raw || '').trim();
-  if (!s) return todayISO();
-  if (/^\d{4}-\d{2}-\d{2}$/.test(s)) return s;
-  if (/^\d{8}$/.test(s)) return `${s.slice(0, 4)}-${s.slice(4, 6)}-${s.slice(6, 8)}`;
+  if (!s || /^(0000|1899|1900)[-\/]/.test(s) || /^[-–/\s]+$/.test(s)) return '';
+  if (/^\d{4}-\d{2}-\d{2}$/.test(s)) {
+    const yr = Number(s.slice(0, 4));
+    return yr >= 1990 && yr <= 2100 ? s : '';
+  }
+  if (/^\d{8}$/.test(s)) {
+    const yr = Number(s.slice(0, 4));
+    return yr >= 1990 && yr <= 2100 ? `${s.slice(0, 4)}-${s.slice(4, 6)}-${s.slice(6, 8)}` : '';
+  }
   const ddmmyyyy = s.match(/^(\d{1,2})[\/\-](\d{1,2})[\/\-](\d{2,4})$/);
   if (ddmmyyyy) {
     const dd = ddmmyyyy[1].padStart(2, '0');
     const mm = ddmmyyyy[2].padStart(2, '0');
     const yy = ddmmyyyy[3].length === 2 ? `20${ddmmyyyy[3]}` : ddmmyyyy[3];
-    return `${yy}-${mm}-${dd}`;
+    const yr = Number(yy);
+    return yr >= 1990 && yr <= 2100 ? `${yy}-${mm}-${dd}` : '';
   }
   const dt = new Date(s);
-  return Number.isFinite(dt.getTime()) ? dt.toISOString().slice(0, 10) : todayISO();
+  if (!Number.isFinite(dt.getTime())) return '';
+  const yr = dt.getFullYear();
+  return yr >= 1990 && yr <= 2100 ? dt.toISOString().slice(0, 10) : '';
+}
+
+function normDate(raw: string): string {
+  return normOptionalDate(raw) || todayISO();
+}
+
+function composeDbfAddress(row: Record<string, unknown>): string {
+  const parts = [
+    pickStr(row, ['add1', 'address1', 'addr1', 'address', 'padd1', 'hadd1', 'oadd1', 'badd1']),
+    pickStr(row, ['add2', 'address2', 'addr2', 'padd2', 'hadd2', 'oadd2', 'badd2']),
+    pickStr(row, ['add3', 'address3', 'addr3', 'padd3', 'hadd3', 'oadd3', 'badd3']),
+    pickStr(row, ['city', 'town', 'place', 'station', 'dist', 'district']),
+    pickStr(row, ['state', 'stname', 'statename']),
+    pickStr(row, ['pin', 'pincode', 'zip']),
+  ]
+    .map((s) => s.trim())
+    .filter(Boolean);
+  // Deduplicate adjacent identical segments (e.g. add2 === city)
+  const unique: string[] = [];
+  for (const p of parts) {
+    if (!unique.some((u) => u.toLowerCase() === p.toLowerCase())) {
+      unique.push(p);
+    }
+  }
+  return unique.join(', ').slice(0, 380);
+}
+
+interface DbfEnrichMeta {
+  code?: string;
+  name?: string;
+  address?: string;
+  gstin?: string;
+  pan?: string;
+  phone?: string;
+  email?: string;
+  bankName?: string;
+  bankAccountNo?: string;
+  bankIfsc?: string;
+}
+
+function mergeEnrich(target: DbfEnrichMeta | undefined, incoming: DbfEnrichMeta): DbfEnrichMeta {
+  if (!target) return { ...incoming };
+  return {
+    code: target.code || incoming.code,
+    name: target.name || incoming.name,
+    address: target.address || incoming.address,
+    gstin: target.gstin || incoming.gstin,
+    pan: target.pan || incoming.pan,
+    phone: target.phone || incoming.phone,
+    email: target.email || incoming.email,
+    bankName: target.bankName || incoming.bankName,
+    bankAccountNo: target.bankAccountNo || incoming.bankAccountNo,
+    bankIfsc: target.bankIfsc || incoming.bankIfsc,
+  };
+}
+
+function fileLeafName(pathOrName: string): string {
+  const parts = String(pathOrName || '').split(/[\/\\]/);
+  return (parts[parts.length - 1] || pathOrName).trim().toLowerCase();
+}
+
+function isHeadCustomerDbf(leaf: string): boolean {
+  return /^(head|party|partymast|acct|acmast|cust|customer).*\.dbf$/i.test(leaf);
+}
+
+function isBrokerDbf(leaf: string): boolean {
+  return /^(broker|brkrmast|brkr).*\.dbf$/i.test(leaf) || leaf.includes('brkrmast');
+}
+
+function isOwnerOrVehicleMasterDbf(leaf: string): boolean {
+  return (
+    /^(owner|ownmast|vhmain|vehmast|courvhl|lorry|truck).*\.dbf$/i.test(leaf) ||
+    leaf.includes('courvhl') ||
+    leaf.includes('vhmain') ||
+    leaf.includes('ownmast')
+  );
+}
+
+function isDriverDbf(leaf: string): boolean {
+  return /^(driver|drvrmast|drvmast).*\.dbf$/i.test(leaf) || leaf.includes('drvrmast');
+}
+
+function isDesmastDbf(leaf: string): boolean {
+  return /^(desmast|destmast|dest|station).*\.dbf$/i.test(leaf) || leaf.includes('desmast');
+}
+
+function isConsignmentDbf(leaf: string): boolean {
+  return (
+    /^(courtran|cnmast|bilty|lrmast).*\.dbf$/i.test(leaf) ||
+    leaf.includes('courtran') ||
+    leaf.includes('cnmast') ||
+    leaf.includes('bilty')
+  );
+}
+
+function isChallanDbf(leaf: string): boolean {
+  return /^(challan|challant|lhire).*\.dbf$/i.test(leaf) || leaf.includes('challant');
+}
+
+function isInvoiceDbf(leaf: string): boolean {
+  return /^(bilmast|billmast|inv|invoice|taxinv).*\.dbf$/i.test(leaf) || /^inv.*\.dbf$|^tax.*\.dbf$/i.test(leaf);
+}
+
+function isLedgerVoucherDbf(leaf: string): boolean {
+  if (isConsignmentDbf(leaf)) return false;
+  return /^(trn|trnmast|vouch|voucher|ledger|ledg|jour).*\.dbf$/i.test(leaf);
 }
 
 export interface AutoCollectedOldDataResult {
@@ -221,6 +337,7 @@ export interface AutoCollectedOldDataResult {
   consignments: ConsignmentNote[];
   invoices: Invoice[];
   lorryHires: LorryHire[];
+  transactions: TransactionRecord[];
   bankReceipts: BankReceiptRecord[];
   destinations: string[];
   warnings: string[];
@@ -246,21 +363,23 @@ export async function autoCollectOldDataFiles(params: {
     consignments: [],
     invoices: [],
     lorryHires: [],
+    transactions: [],
     bankReceipts: [],
     destinations: [],
     warnings: [],
   };
 
-  const dbfTables: Array<{ baseName: string; table: ParsedDbfTable }> = [];
+  const dbfTables: Array<{ baseName: string; leaf: string; table: ParsedDbfTable }> = [];
   const bankSpreadsheets: File[] = [];
 
   for (const file of fileArr) {
     const rawName = (file.name || '').trim();
     const baseName = rawName.toLowerCase();
+    const leaf = fileLeafName(baseName);
     if (!baseName) continue;
 
     // STRICT EXCLUSION RULE: Ignore scrap*.dbf & non-data index/binary files
-    if (/^scrap.*\.dbf$/i.test(baseName) || baseName.includes('scrap')) {
+    if (/^scrap.*\.dbf$/i.test(leaf) || leaf.includes('scrap')) {
       result.ignoredScrapFiles.push(rawName);
       continue;
     }
@@ -269,7 +388,7 @@ export async function autoCollectOldDataFiles(params: {
       try {
         const buf = await file.arrayBuffer();
         const table = parseFoxProDbfBuffer(buf, rawName);
-        dbfTables.push({ baseName, table });
+        dbfTables.push({ baseName, leaf, table });
         result.processedFiles.push(rawName);
       } catch (err) {
         result.warnings.push(
@@ -285,72 +404,230 @@ export async function autoCollectOldDataFiles(params: {
     }
   }
 
-  // First pass: map HEAD / desmast / drvrmast / brkrmast / courvhl
+  // Cross-table enrichment maps by Code & normalized Name
   const headCodeToName = new Map<string, string>();
   const destCodeToName = new Map<string, string>();
+  const enrichByCode = new Map<string, DbfEnrichMeta>();
+  const enrichByName = new Map<string, DbfEnrichMeta>();
 
-  for (const { baseName, table } of dbfTables) {
-    if (/(^|\/)head\.dbf$/i.test(baseName) || baseName === 'head.dbf') {
-      table.rows.forEach((row, idx) => {
-        const name = pickStr(row, ['hname', 'name', 'headname', 'acname', 'partyname', 'pname']);
-        if (!name) return;
-        const code = pickStr(row, ['hcode', 'code', 'acode', 'headcd', 'id']);
-        if (code) headCodeToName.set(code.toUpperCase(), name);
+  const recordEnrichFromRow = (row: Record<string, unknown>, explicitName?: string) => {
+    const code = pickStr(row, ['hcode', 'pcode', 'acode', 'bcode', 'ocode', 'code', 'headcd', 'brkrid', 'owncd', 'id']).toUpperCase();
+    const name =
+      explicitName ||
+      pickStr(row, ['hname', 'pname', 'bname', 'oname', 'brkrname', 'ownname', 'ownername', 'partyname', 'acname', 'headname', 'name']);
+    const meta: DbfEnrichMeta = {
+      code,
+      name,
+      address: composeDbfAddress(row),
+      gstin: pickStr(row, ['gstno', 'gstin', 'gst', 'tin']).toUpperCase(),
+      pan: pickStr(row, ['panno', 'itpan', 'pan', 'panno1']).toUpperCase(),
+      phone: pickStr(row, ['phone', 'mobile', 'mob', 'tel', 'phno', 'contact']),
+      email: pickStr(row, ['email', 'mail']),
+      bankName: pickStr(row, ['bankname', 'bank', 'bkname']),
+      bankAccountNo: pickStr(row, ['bankac', 'acno', 'accno', 'accountno']),
+      bankIfsc: pickStr(row, ['ifsc', 'ifsccode']).toUpperCase(),
+    };
+    if (code) {
+      enrichByCode.set(code, mergeEnrich(enrichByCode.get(code), meta));
+      if (name && !headCodeToName.has(code)) headCodeToName.set(code, name);
+    }
+    const nk = normalizePartyMatchKey(name);
+    if (nk) {
+      enrichByName.set(nk, mergeEnrich(enrichByName.get(nk), meta));
+    }
+    return { code, name, meta };
+  };
 
-        const opBal = Math.abs(pickNum(row, ['opbal', 'opening', 'openbal', 'op_bal', 'balance']));
-        const dcRaw = pickStr(row, ['opdc', 'drcr', 'dc', 'baltype']).toUpperCase();
-        const groupRaw = pickStr(row, [
-          'group',
-          'grp',
-          'grpname',
-          'groupname',
-          'acgroup',
-          'acgrp',
-          'grpcd',
-          'category',
-          'type',
-          'sch',
-          'schedule',
-          'headtype',
-        ]);
-        const combinedGroupAndName = `${groupRaw} ${name}`;
-        const rawGstin = pickStr(row, ['gstin', 'gstno', 'gst', 'tin']).toUpperCase();
-        const partyType: Party['partyType'] =
-          /broker|\bbrk\b|commission\s*agent|dalal/i.test(combinedGroupAndName) ||
-          (!rawGstin && isKnownTransportBrokerName(name))
-            ? 'Broker'
-            : /lorry\s*owner|truck\s*owner|vehicle\s*owner|owner|\bvhl\b/i.test(groupRaw)
-            ? 'TruckOwner'
-            : /vendor|fuel|diesel|pump|tyre/i.test(groupRaw)
-            ? 'Vendor'
-            : /consignor/i.test(groupRaw)
-            ? 'Consignor'
-            : /consignee/i.test(groupRaw)
-            ? 'Consignee'
-            : 'Customer';
-
-        result.parties.push({
-          id: makeSafeDocId(`dbf_head_${idx}`),
-          name,
-          partyType,
-          address: [
-            pickStr(row, ['add1', 'address', 'addr1']),
-            pickStr(row, ['add2', 'addr2', 'city']),
-            pickStr(row, ['city', 'place', 'state']),
-          ]
-            .filter(Boolean)
-            .join(', '),
-          gstin: pickStr(row, ['gstin', 'gstno', 'gst', 'tin']).toUpperCase(),
-          pan: pickStr(row, ['pan', 'panno']).toUpperCase(),
-          phone: pickStr(row, ['phone', 'mobile', 'tel', 'phno', 'contact']),
-          email: pickStr(row, ['email', 'mail']),
-          openingBalance: opBal,
-          currentBalance: opBal,
-          balanceType: dcRaw.startsWith('C') ? 'Cr' : 'Dr',
-          ownerUid: params.ownerUid,
-        });
+  // Pre-scan all master tables to populate cross-merge enrichment indexes
+  for (const { leaf, table } of dbfTables) {
+    if (
+      isHeadCustomerDbf(leaf) ||
+      isBrokerDbf(leaf) ||
+      isOwnerOrVehicleMasterDbf(leaf) ||
+      isDriverDbf(leaf)
+    ) {
+      table.rows.forEach((row) => {
+        recordEnrichFromRow(row);
       });
-    } else if (/desmast\.dbf$/i.test(baseName) || baseName.includes('desmast')) {
+    }
+  }
+
+  // First pass: map HEAD/PARTY/ACCT (Customer), BROKER (Broker), OWNER/VHMAIN (TruckOwner + Vehicle), DRIVER, DESMAST
+  const seenCustomerKeys = new Map<string, number>();
+  const seenBrokerKeys = new Map<string, number>();
+  const seenOwnerKeys = new Map<string, number>();
+  const seenVehicleTrucks = new Set<string>();
+
+  const applyEnrichmentToParty = (p: Party, code?: string): Party => {
+    const byCode = code ? enrichByCode.get(code.toUpperCase()) : undefined;
+    const byName = enrichByName.get(normalizePartyMatchKey(p.name));
+    return {
+      ...p,
+      address: p.address || byCode?.address || byName?.address || '',
+      gstin: p.gstin || byCode?.gstin || byName?.gstin || '',
+      pan: p.pan || byCode?.pan || byName?.pan || '',
+      phone: p.phone || byCode?.phone || byName?.phone || '',
+      email: p.email || byCode?.email || byName?.email || '',
+      bankName: p.bankName || byCode?.bankName || byName?.bankName || '',
+      bankAccountNo: p.bankAccountNo || byCode?.bankAccountNo || byName?.bankAccountNo || '',
+      bankIfsc: p.bankIfsc || byCode?.bankIfsc || byName?.bankIfsc || '',
+    };
+  };
+
+  for (const { leaf, table } of dbfTables) {
+    if (isHeadCustomerDbf(leaf)) {
+      table.rows.forEach((row, idx) => {
+        const name = pickStr(row, ['hname', 'pname', 'partyname', 'headname', 'acname', 'custname', 'name']);
+        if (!name) return;
+        const code = pickStr(row, ['hcode', 'pcode', 'acode', 'code', 'headcd', 'id']).toUpperCase();
+        if (code) headCodeToName.set(code, name);
+
+        const opBal = roundPaise(Math.abs(pickNum(row, ['opbal', 'opening', 'openbal', 'op_bal', 'balance'])));
+        const dcRaw = pickStr(row, ['opdc', 'drcr', 'dc', 'baltype']).toUpperCase();
+
+        // STRICT RULE: HEAD.DBF / PARTY.DBF / ACCT.DBF ALWAYS map to Customers / Billing Parties (never auto-moved to Brokers)
+        const rawParty: Party = applyEnrichmentToParty(
+          {
+            id: makeSafeDocId(`dbf_head_${idx}`),
+            name,
+            partyType: 'Customer',
+            address: composeDbfAddress(row),
+            gstin: pickStr(row, ['gstno', 'gstin', 'gst', 'tin']).toUpperCase(),
+            pan: pickStr(row, ['panno', 'itpan', 'pan']).toUpperCase(),
+            phone: pickStr(row, ['phone', 'mobile', 'mob', 'tel', 'phno', 'contact']),
+            email: pickStr(row, ['email', 'mail']),
+            bankName: pickStr(row, ['bankname', 'bank', 'bkname']),
+            bankAccountNo: pickStr(row, ['bankac', 'acno', 'accno', 'accountno']),
+            bankIfsc: pickStr(row, ['ifsc', 'ifsccode']).toUpperCase(),
+            openingBalance: opBal,
+            currentBalance: opBal,
+            balanceType: dcRaw.startsWith('C') ? 'Cr' : 'Dr',
+            ownerUid: params.ownerUid,
+          },
+          code
+        );
+
+        const dedupKey = `${normalizePartyMatchKey(rawParty.name)}::${rawParty.gstin || code}`;
+        const existingIdx = seenCustomerKeys.get(dedupKey);
+        if (existingIdx !== undefined) {
+          const prev = result.parties[existingIdx];
+          result.parties[existingIdx] = {
+            ...prev,
+            address: prev.address || rawParty.address,
+            gstin: prev.gstin || rawParty.gstin,
+            pan: prev.pan || rawParty.pan,
+            phone: prev.phone || rawParty.phone,
+            email: prev.email || rawParty.email,
+            bankName: prev.bankName || rawParty.bankName,
+            bankAccountNo: prev.bankAccountNo || rawParty.bankAccountNo,
+            bankIfsc: prev.bankIfsc || rawParty.bankIfsc,
+            openingBalance: prev.openingBalance || rawParty.openingBalance,
+            currentBalance: prev.currentBalance || rawParty.currentBalance,
+          };
+        } else {
+          seenCustomerKeys.set(dedupKey, result.parties.length);
+          result.parties.push(rawParty);
+        }
+      });
+    } else if (isBrokerDbf(leaf)) {
+      table.rows.forEach((row, idx) => {
+        const name = pickStr(row, ['bname', 'brkrname', 'brkname', 'brokername', 'pname', 'name']);
+        if (!name) return;
+        const code = pickStr(row, ['bcode', 'brkrcd', 'code', 'id']).toUpperCase();
+        if (code) headCodeToName.set(code, name);
+
+        const opBal = roundPaise(Math.abs(pickNum(row, ['opbal', 'opening', 'balance'])));
+        const rawBroker: Party = applyEnrichmentToParty(
+          {
+            id: makeSafeDocId(`dbf_brk_${idx}`),
+            name,
+            partyType: 'Broker',
+            address: composeDbfAddress(row),
+            gstin: pickStr(row, ['gstno', 'gstin', 'gst']).toUpperCase(),
+            pan: pickStr(row, ['panno', 'itpan', 'pan']).toUpperCase(),
+            phone: pickStr(row, ['phone', 'mobile', 'mob', 'tel', 'phno']),
+            email: pickStr(row, ['email', 'mail']),
+            bankName: pickStr(row, ['bankname', 'bank']),
+            bankAccountNo: pickStr(row, ['bankac', 'acno', 'accountno']),
+            bankIfsc: pickStr(row, ['ifsc', 'ifsccode']).toUpperCase(),
+            openingBalance: opBal,
+            currentBalance: opBal,
+            balanceType: 'Cr',
+            ownerUid: params.ownerUid,
+          },
+          code
+        );
+
+        const dedupKey = normalizePartyMatchKey(rawBroker.name);
+        if (!seenBrokerKeys.has(dedupKey)) {
+          seenBrokerKeys.set(dedupKey, result.parties.length);
+          result.parties.push(rawBroker);
+          result.brokersAddedCount += 1;
+        }
+      });
+    } else if (isOwnerOrVehicleMasterDbf(leaf)) {
+      table.rows.forEach((row, idx) => {
+        const truckNo = pickStr(row, ['vehno', 'lorryno', 'vhlno', 'truckno', 'regno'])
+          .toUpperCase()
+          .replace(/\s+/g, '');
+        const ownerName = pickStr(row, ['oname', 'ownname', 'ownername', 'owner', 'pname', 'name']);
+        const code = pickStr(row, ['ocode', 'owncd', 'code', 'id']).toUpperCase();
+
+        if (truckNo && !seenVehicleTrucks.has(truckNo)) {
+          seenVehicleTrucks.add(truckNo);
+          const fitStr = pickStr(row, ['fitdt', 'fitexp', 'fitness']);
+          const insStr = pickStr(row, ['insdt', 'insexp', 'insurance']);
+          const prmStr = pickStr(row, ['prmdt', 'permit']);
+          const taxStr = pickStr(row, ['taxdt', 'roadtax', 'taxexp']);
+          const pucStr = pickStr(row, ['pucdt', 'puc']);
+          result.vehicles.push({
+            id: makeSafeDocId(`dbf_vhl_${idx}`),
+            truckNo,
+            vehicleType: pickStr(row, ['vhltype', 'vehtype', 'type', 'model', 'capacity']) || 'Goods Carrier',
+            ownerName: ownerName || 'Market / Fleet Owner',
+            ownerPhone: pickStr(row, ['phone', 'mobile', 'ownerph', 'tel']),
+            engineNo: pickStr(row, ['engineno', 'engno', 'engine']),
+            chassisNo: pickStr(row, ['chassisno', 'chasno', 'chasisno', 'chassis']),
+            fitnessExpiry: fitStr ? normOptionalDate(fitStr) : '',
+            insuranceExpiry: insStr ? normOptionalDate(insStr) : '',
+            permitExpiry: prmStr ? normOptionalDate(prmStr) : '',
+            roadTaxExpiry: taxStr ? normOptionalDate(taxStr) : '',
+            pucExpiry: pucStr ? normOptionalDate(pucStr) : '',
+            ownerUid: params.ownerUid,
+          });
+        }
+
+        if (ownerName && !/^market\s*\/\s*fleet\s*owner$/i.test(ownerName)) {
+          const ownKey = normalizePartyMatchKey(ownerName);
+          if (!seenOwnerKeys.has(ownKey)) {
+            seenOwnerKeys.set(ownKey, result.parties.length);
+            const opBal = roundPaise(Math.abs(pickNum(row, ['opbal', 'opening', 'balance'])));
+            result.parties.push(
+              applyEnrichmentToParty(
+                {
+                  id: makeSafeDocId(`dbf_own_${idx}`),
+                  name: ownerName,
+                  partyType: 'TruckOwner',
+                  address: composeDbfAddress(row),
+                  gstin: pickStr(row, ['gstno', 'gstin']).toUpperCase(),
+                  pan: pickStr(row, ['panno', 'itpan', 'pan']).toUpperCase(),
+                  phone: pickStr(row, ['phone', 'mobile', 'ownerph', 'tel', 'phno']),
+                  email: pickStr(row, ['email', 'mail']),
+                  bankName: pickStr(row, ['bankname', 'bank']),
+                  bankAccountNo: pickStr(row, ['bankac', 'acno', 'accountno']),
+                  bankIfsc: pickStr(row, ['ifsc', 'ifsccode']).toUpperCase(),
+                  openingBalance: opBal,
+                  currentBalance: opBal,
+                  balanceType: 'Cr',
+                  ownerUid: params.ownerUid,
+                },
+                code
+              )
+            );
+          }
+        }
+      });
+    } else if (isDesmastDbf(leaf)) {
       table.rows.forEach((row) => {
         const name = pickStr(row, ['desname', 'destname', 'destination', 'city', 'place', 'name']);
         const code = pickStr(row, ['descode', 'destcd', 'code', 'id']);
@@ -359,81 +636,40 @@ export async function autoCollectOldDataFiles(params: {
           if (code) destCodeToName.set(code.toUpperCase(), name);
         }
       });
-    } else if (/drvrmast\.dbf$/i.test(baseName) || baseName.includes('drvrmast')) {
+    } else if (isDriverDbf(leaf)) {
       table.rows.forEach((row, idx) => {
         const name = pickStr(row, ['drvrname', 'drvname', 'drivername', 'name']);
         if (!name) return;
         const dlNo = pickStr(row, ['dlno', 'licno', 'license', 'lic_no']) || `DL-OLD-${idx + 1}`;
+        const rawDlExp = pickStr(row, ['dlexp', 'licexp', 'expiry', 'expdt', 'dlvalid']);
+        // Leave dlExpiry blank '' when DBF has no expiry date so missing dates don't inflate D/L alerts
+        const parsedDlExp = rawDlExp ? normOptionalDate(rawDlExp) : '';
         result.drivers.push({
           id: makeSafeDocId(`dbf_drv_${idx}`),
           name,
           dlNo,
-          dlExpiry: normDate(pickStr(row, ['dlexp', 'licexp', 'expiry', 'expdt'])),
+          dlExpiry: parsedDlExp,
           phone: pickStr(row, ['phone', 'mobile', 'tel', 'phno']),
-          address: pickStr(row, ['address', 'add1', 'addr']),
+          address: composeDbfAddress(row),
           aadhaarNo: pickStr(row, ['aadhaar', 'uid', 'aadhar']),
-          panNo: pickStr(row, ['pan', 'panno']).toUpperCase(),
+          panNo: pickStr(row, ['panno', 'itpan', 'pan']).toUpperCase(),
           bankName: pickStr(row, ['bankname', 'bank']),
           bankAccountNo: pickStr(row, ['bankac', 'acno', 'accountno']),
-          bankIfsc: pickStr(row, ['ifsc']).toUpperCase(),
-          ownerUid: params.ownerUid,
-        });
-      });
-    } else if (/brkrmast\.dbf$/i.test(baseName) || baseName.includes('brkrmast')) {
-      table.rows.forEach((row, idx) => {
-        const name = pickStr(row, ['brkrname', 'brkname', 'brokername', 'name']);
-        if (!name) return;
-        result.brokersAddedCount += 1;
-        result.parties.push({
-          id: makeSafeDocId(`dbf_brk_${idx}`),
-          name,
-          partyType: 'Broker',
-          address: [pickStr(row, ['add1', 'address']), pickStr(row, ['add2', 'city'])].filter(Boolean).join(', '),
-          gstin: pickStr(row, ['gstin', 'gstno']).toUpperCase(),
-          pan: pickStr(row, ['pan', 'panno']).toUpperCase(),
-          phone: pickStr(row, ['phone', 'mobile', 'tel', 'phno']),
-          email: pickStr(row, ['email', 'mail']),
-          bankName: pickStr(row, ['bankname', 'bank']),
-          bankAccountNo: pickStr(row, ['bankac', 'acno', 'accountno']),
-          bankIfsc: pickStr(row, ['ifsc']).toUpperCase(),
-          openingBalance: Math.abs(pickNum(row, ['opbal', 'opening', 'balance'])),
-          currentBalance: Math.abs(pickNum(row, ['opbal', 'opening', 'balance'])),
-          balanceType: 'Cr',
-          ownerUid: params.ownerUid,
-        });
-      });
-    } else if (/courvhl\.dbf$/i.test(baseName) || baseName.includes('courvhl')) {
-      table.rows.forEach((row, idx) => {
-        const truckNo = pickStr(row, ['vhlno', 'truckno', 'lorryno', 'vehno', 'regno'])
-          .toUpperCase()
-          .replace(/\s+/g, '');
-        if (!truckNo) return;
-        result.vehicles.push({
-          id: makeSafeDocId(`dbf_vhl_${idx}`),
-          truckNo,
-          vehicleType: pickStr(row, ['vhltype', 'type', 'model', 'capacity']) || 'Goods Carrier',
-          ownerName: pickStr(row, ['owner', 'ownername', 'ownname']) || 'Market / Fleet Owner',
-          ownerPhone: pickStr(row, ['phone', 'mobile', 'ownerph', 'tel']),
-          engineNo: pickStr(row, ['engineno', 'engno', 'engine']),
-          chassisNo: pickStr(row, ['chassisno', 'chasno', 'chasisno', 'chassis']),
-          fitnessExpiry: pickStr(row, ['fitdt', 'fitexp', 'fitness']) ? normDate(pickStr(row, ['fitdt', 'fitexp', 'fitness'])) : '',
-          insuranceExpiry: pickStr(row, ['insdt', 'insexp', 'insurance']) ? normDate(pickStr(row, ['insdt', 'insexp', 'insurance'])) : '',
-          permitExpiry: pickStr(row, ['prmdt', 'permit']) ? normDate(pickStr(row, ['prmdt', 'permit'])) : '',
-          pucExpiry: pickStr(row, ['pucdt', 'puc']) ? normDate(pickStr(row, ['pucdt', 'puc'])) : '',
+          bankIfsc: pickStr(row, ['ifsc', 'ifsccode']).toUpperCase(),
           ownerUid: params.ownerUid,
         });
       });
     }
   }
 
-  // Second pass: Consignments (`courtran.dbf` / `bilty*.dbf`), Invoices (`*inv*.dbf` / `tax*.dbf`), Challans (`challant.dbf`)
-  for (const { baseName, table } of dbfTables) {
-    if (/(^|\/)(courtran|bilty.*)\.dbf$/i.test(baseName) || baseName.includes('courtran') || baseName.includes('bilty')) {
+  // Second pass: Consignments (`courtran`/`cnmast`/`bilty`), Invoices (`bilmast`/`inv`/`tax`), Challans (`challan`/`challant`), Ledger (`trn`/`vouch`/`ledger`)
+  for (const { leaf, table } of dbfTables) {
+    if (isConsignmentDbf(leaf)) {
       table.rows.forEach((row, idx) => {
         const cnNo = pickStr(row, ['cnno', 'lrno', 'biltyno', 'grno', 'cno', 'docno']);
-        const rawConsignorCode = pickStr(row, ['cnorcd', 'consignor', 'cnor', 'party', 'hcode']).toUpperCase();
+        const rawConsignorCode = pickStr(row, ['cnorcd', 'hcode', 'pcode', 'consignor', 'cnor', 'party']).toUpperCase();
         const consignorName =
-          pickStr(row, ['cnorname', 'consignorname', 'consignor', 'partyname', 'sname']) ||
+          pickStr(row, ['cnorname', 'consignorname', 'consignor', 'partyname', 'pname', 'sname']) ||
           headCodeToName.get(rawConsignorCode) ||
           rawConsignorCode;
         if (!cnNo && !consignorName) return;
@@ -445,9 +681,9 @@ export async function autoCollectOldDataFiles(params: {
           pickStr(row, ['tocity', 'destname', 'destination', 'to', 'station']) ||
           rawToCode ||
           'DELIVERY';
-        const totalFreight = pickNum(row, ['totfrt', 'freight', 'totalfreight', 'frtamt', 'amount']);
-        const paidAmount = pickNum(row, ['paidamt', 'advance', 'paid']);
-        const toPayAmount = pickNum(row, ['topayamt', 'topay']) || Math.max(0, totalFreight - paidAmount);
+        const totalFreight = roundPaise(pickNum(row, ['totfrt', 'freight', 'totalfreight', 'frtamt', 'amount']));
+        const paidAmount = roundPaise(pickNum(row, ['paidamt', 'advance', 'paid']));
+        const toPayAmount = roundPaise(pickNum(row, ['topayamt', 'topay']) || Math.max(0, totalFreight - paidAmount));
         const nettWeight = pickNum(row, ['nett', 'netwt', 'weight', 'wt']);
         const grossWeight = pickNum(row, ['gross', 'grosswt', 'wt']) || nettWeight;
         const taxInvNo = pickStr(row, ['invno', 'billno', 'taxinvno', 'pino']);
@@ -462,7 +698,7 @@ export async function autoCollectOldDataFiles(params: {
           billingPartyName: consignorName || 'Customer',
           consignorName: consignorName || 'Customer',
           consignorAddress: pickStr(row, ['cnoradd', 'consignoraddr', 'address']),
-          consignorGstin: pickStr(row, ['cnorgst', 'gstin']).toUpperCase(),
+          consignorGstin: pickStr(row, ['cnorgst', 'gstno', 'gstin']).toUpperCase(),
           consigneeName:
             pickStr(row, ['cneename', 'consignee', 'cnee', 'rname']) || consignorName || 'Consignee',
           consigneeAddress: pickStr(row, ['cneeadd', 'consigneeaddr']),
@@ -471,10 +707,10 @@ export async function autoCollectOldDataFiles(params: {
           particulars: pickStr(row, ['item', 'particulars', 'goods', 'desc', 'descr']) || 'Goods Consignment',
           nettWeight,
           grossWeight,
-          loadingCharge: pickNum(row, ['loading', 'ldchg', 'hamali']),
-          unloadingCharge: pickNum(row, ['unloading', 'ulchg']),
-          returnLorryCharge: pickNum(row, ['return', 'detention']),
-          sttCharge: pickNum(row, ['stt', 'stchg', 'sur']),
+          loadingCharge: roundPaise(pickNum(row, ['loading', 'ldchg', 'hamali'])),
+          unloadingCharge: roundPaise(pickNum(row, ['unloading', 'ulchg'])),
+          returnLorryCharge: roundPaise(pickNum(row, ['return', 'detention'])),
+          sttCharge: roundPaise(pickNum(row, ['stt', 'stchg', 'sur'])),
           totalFreight,
           paidAmount,
           toPayAmount,
@@ -482,8 +718,8 @@ export async function autoCollectOldDataFiles(params: {
           taxInvDate: taxInvNo ? cnDate : '',
           ewayBillNo: pickStr(row, ['eway', 'ewbno', 'ewaybill']),
           ewayBillDate: pickStr(row, ['eway']) ? cnDate : '',
-          valueOfGoods: pickNum(row, ['valgoods', 'goodsval', 'invval', 'value']),
-          truckNo: pickStr(row, ['vhlno', 'truckno', 'lorryno', 'vehno']).toUpperCase().replace(/\s+/g, '') || '-',
+          valueOfGoods: roundPaise(pickNum(row, ['valgoods', 'goodsval', 'invval', 'value'])),
+          truckNo: pickStr(row, ['vehno', 'lorryno', 'vhlno', 'truckno']).toUpperCase().replace(/\s+/g, '') || '-',
           fromCity: pickStr(row, ['fromcity', 'from', 'origin']) || 'KOLKATA',
           toCity,
           driverName: pickStr(row, ['drvrname', 'driver', 'drvname']),
@@ -496,19 +732,20 @@ export async function autoCollectOldDataFiles(params: {
           ownerUid: params.ownerUid,
         });
       });
-    } else if (/challant\.dbf$/i.test(baseName) || baseName.includes('challant')) {
+    } else if (isChallanDbf(leaf)) {
       table.rows.forEach((row, idx) => {
         const cnNo = pickStr(row, ['cnno', 'lrno', 'challanno', 'chlnno', 'docno']);
-        const truckNo = pickStr(row, ['vhlno', 'truckno', 'lorryno', 'vehno']).toUpperCase().replace(/\s+/g, '');
+        const truckNo = pickStr(row, ['vehno', 'lorryno', 'vhlno', 'truckno']).toUpperCase().replace(/\s+/g, '');
         if (!cnNo && !truckNo) return;
         const cnDate = normDate(pickStr(row, ['chlndt', 'cndate', 'date', 'dt']));
-        const hireAmount = pickNum(row, ['hireamt', 'lorryhire', 'hire', 'freight', 'amount']);
-        const advancePaid = pickNum(row, ['advamt', 'advance', 'adv']);
-        const loadingCharge = pickNum(row, ['loading', 'ldchg']);
-        const unloadingCharge = pickNum(row, ['unloading', 'ulchg']);
-        const balancePayable =
+        const hireAmount = roundPaise(pickNum(row, ['hireamt', 'lorryhire', 'hire', 'freight', 'amount']));
+        const advancePaid = roundPaise(pickNum(row, ['advamt', 'advance', 'adv']));
+        const loadingCharge = roundPaise(pickNum(row, ['loading', 'ldchg']));
+        const unloadingCharge = roundPaise(pickNum(row, ['unloading', 'ulchg']));
+        const balancePayable = roundPaise(
           pickNum(row, ['balamt', 'balance']) ||
-          Math.max(0, hireAmount - advancePaid - loadingCharge - unloadingCharge);
+            Math.max(0, hireAmount - advancePaid - loadingCharge - unloadingCharge)
+        );
         const podDt = pickStr(row, ['poddt', 'poddate', 'recdt']);
 
         result.lorryHires.push({
@@ -517,8 +754,8 @@ export async function autoCollectOldDataFiles(params: {
           cnDate,
           financialYear: resolveFinancialYearFromDate(cnDate) || normalizeFyLabel(params.activeFy),
           truckNo: truckNo || '-',
-          ownerName: pickStr(row, ['owner', 'ownername', 'ownname', 'party']),
-          brokerName: pickStr(row, ['broker', 'brkrname', 'brokername']),
+          ownerName: pickStr(row, ['oname', 'owner', 'ownername', 'ownname', 'party']),
+          brokerName: pickStr(row, ['bname', 'broker', 'brkrname', 'brokername']),
           fromCity: pickStr(row, ['fromcity', 'from', 'origin']) || 'KOLKATA',
           toCity: pickStr(row, ['tocity', 'to', 'dest', 'destination']) || 'DELIVERY',
           hireAmount,
@@ -527,38 +764,42 @@ export async function autoCollectOldDataFiles(params: {
           unloadingCharge,
           balancePayable,
           podReceived: Boolean(podDt),
-          podReceiveDate: podDt ? normDate(podDt) : '',
+          podReceiveDate: podDt ? normOptionalDate(podDt) : '',
           balancePaid: balancePayable <= 0,
           branchCode: params.branchCode,
           createdByStaff: params.staffCode,
           ownerUid: params.ownerUid,
         });
       });
-    } else if (/inv.*\.dbf$|tax.*\.dbf$/i.test(baseName)) {
+    } else if (isInvoiceDbf(leaf)) {
       table.rows.forEach((row, idx) => {
         const invoiceNo = pickStr(row, ['invno', 'billno', 'taxinvno', 'docno']);
-        const rawPartyCode = pickStr(row, ['hcode', 'partycd', 'custcd']).toUpperCase();
+        const rawPartyCode = pickStr(row, ['hcode', 'pcode', 'acode', 'partycd', 'custcd']).toUpperCase();
         const partyName =
-          pickStr(row, ['partyname', 'pname', 'custname', 'customer', 'name']) ||
+          pickStr(row, ['partyname', 'pname', 'hname', 'custname', 'customer', 'name']) ||
           headCodeToName.get(rawPartyCode) ||
           rawPartyCode;
         if (!invoiceNo && !partyName) return;
 
         const invoiceDate = normDate(pickStr(row, ['invdate', 'billdate', 'bdate', 'date', 'dt']));
-        const freightCharges = pickNum(row, ['freight', 'frtamt', 'taxable', 'basicamt', 'amount']);
-        const detentionCharges = pickNum(row, ['detention', 'detamt']);
-        const unloadingCharges = pickNum(row, ['unloading', 'ulamt']);
-        const stCharges = pickNum(row, ['stt', 'stchg', 'otherchg']);
-        const cgstAmt = pickNum(row, ['cgst', 'cgstamt']);
-        const sgstAmt = pickNum(row, ['sgst', 'sgstamt']);
-        const igstAmt = pickNum(row, ['igst', 'igstamt']);
-        const totalTax =
-          pickNum(row, ['tottax', 'gstamt', 'taxamt']) || cgstAmt + sgstAmt + igstAmt;
-        const grandTotal =
+        const freightCharges = roundPaise(pickNum(row, ['freight', 'frtamt', 'taxable', 'basicamt', 'amount']));
+        const detentionCharges = roundPaise(pickNum(row, ['detention', 'detamt']));
+        const unloadingCharges = roundPaise(pickNum(row, ['unloading', 'ulamt']));
+        const stCharges = roundPaise(pickNum(row, ['stt', 'stchg', 'otherchg']));
+        const cgstAmt = roundPaise(pickNum(row, ['cgst', 'cgstamt']));
+        const sgstAmt = roundPaise(pickNum(row, ['sgst', 'sgstamt']));
+        const igstAmt = roundPaise(pickNum(row, ['igst', 'igstamt']));
+        const totalTax = roundPaise(
+          pickNum(row, ['tottax', 'gstamt', 'taxamt']) || cgstAmt + sgstAmt + igstAmt
+        );
+        const grandTotal = roundPaise(
           pickNum(row, ['grandtot', 'netamt', 'billamt', 'totamt', 'total']) ||
-          freightCharges + detentionCharges + unloadingCharges + stCharges + totalTax;
-        const paidAmount = pickNum(row, ['paidamt', 'recdamt', 'paid', 'received']);
-        const gstRate = pickNum(row, ['gstrate', 'gstpct']) || (totalTax > 0 && freightCharges > 0 ? Math.round((totalTax / freightCharges) * 100) : 5);
+            freightCharges + detentionCharges + unloadingCharges + stCharges + totalTax
+        );
+        const paidAmount = roundPaise(pickNum(row, ['paidamt', 'recdamt', 'paid', 'received']));
+        const gstRate =
+          pickNum(row, ['gstrate', 'gstpct']) ||
+          (totalTax > 0 && freightCharges > 0 ? Math.round((totalTax / freightCharges) * 100) : 5);
         const status: Invoice['status'] =
           paidAmount >= grandTotal && grandTotal > 0 ? 'Paid' : paidAmount > 0 ? 'Partial' : 'Unpaid';
 
@@ -569,6 +810,10 @@ export async function autoCollectOldDataFiles(params: {
             (invoiceNo && (c.taxInvNo || '').toLowerCase() === invoiceNo.toLowerCase())
         );
 
+        const enrichParty =
+          enrichByCode.get(rawPartyCode) ||
+          enrichByName.get(normalizePartyMatchKey(partyName));
+
         result.invoices.push({
           id: makeSafeDocId(`dbf_inv_${idx}`),
           invoiceNo: invoiceNo || `OLD-INV-${idx + 1}`,
@@ -576,9 +821,9 @@ export async function autoCollectOldDataFiles(params: {
           dueDate: invoiceDate,
           financialYear: resolveFinancialYearFromDate(invoiceDate) || normalizeFyLabel(params.activeFy),
           partyName: partyName || 'Customer',
-          partyAddress: pickStr(row, ['address', 'add1', 'partyadd']),
-          partyGstin: pickStr(row, ['gstin', 'partygst', 'gst']).toUpperCase(),
-          partyPan: pickStr(row, ['pan']).toUpperCase(),
+          partyAddress: composeDbfAddress(row) || enrichParty?.address || '',
+          partyGstin: pickStr(row, ['gstno', 'gstin', 'partygst', 'gst']).toUpperCase() || enrichParty?.gstin || '',
+          partyPan: pickStr(row, ['panno', 'itpan', 'pan']).toUpperCase() || enrichParty?.pan || '',
           sac: '996791',
           reverseCharge: totalTax <= 0,
           gstRate,
@@ -614,7 +859,7 @@ export async function autoCollectOldDataFiles(params: {
                 {
                   cnNo: linkedCnNo || '-',
                   cnDate: invoiceDate,
-                  vehicle: pickStr(row, ['vhlno', 'truckno']) || '-',
+                  vehicle: pickStr(row, ['vehno', 'lorryno', 'vhlno', 'truckno']) || '-',
                   from: pickStr(row, ['fromcity', 'from']) || 'KOLKATA',
                   to: pickStr(row, ['tocity', 'route', 'to']) || 'All-India FTL',
                   weight: pickNum(row, ['weight', 'wt']),
@@ -625,6 +870,68 @@ export async function autoCollectOldDataFiles(params: {
                   description: pickStr(row, ['particulars', 'goods']) || 'Road Freight Charges',
                 },
               ],
+          branchCode: params.branchCode,
+          createdByStaff: params.staffCode,
+          ownerUid: params.ownerUid,
+        });
+      });
+    } else if (isLedgerVoucherDbf(leaf)) {
+      table.rows.forEach((row, idx) => {
+        const rawCode = pickStr(row, ['hcode', 'acode', 'pcode', 'bcode', 'ocode', 'partycd', 'code']).toUpperCase();
+        const partyName =
+          pickStr(row, ['partyname', 'hname', 'pname', 'acname', 'bname', 'oname', 'name']) ||
+          headCodeToName.get(rawCode) ||
+          rawCode;
+        if (!partyName) return;
+
+        const drAmt = roundPaise(Math.abs(pickNum(row, ['dramt', 'debit', 'dr'])));
+        const crAmt = roundPaise(Math.abs(pickNum(row, ['cramt', 'credit', 'cr'])));
+        const genericAmt = roundPaise(Math.abs(pickNum(row, ['amount', 'amt', 'vamt', 'netamt', 'total'])));
+        const drcrFlag = pickStr(row, ['drcr', 'dc', 'trtype', 'vtype', 'type']).toUpperCase();
+
+        const isDebit =
+          drAmt > 0 && crAmt === 0
+            ? true
+            : crAmt > 0 && drAmt === 0
+            ? false
+            : drcrFlag.startsWith('D') || /bill|sale|inv|debit|\bdr\b/i.test(drcrFlag);
+
+        const amount = roundPaise(isDebit ? drAmt || genericAmt : crAmt || genericAmt);
+        if (amount <= 0) return;
+
+        const txDate = normDate(pickStr(row, ['vdate', 'trndate', 'date', 'dt', 'docdt']));
+        const vNo =
+          pickStr(row, ['vno', 'vouchno', 'vchno', 'trno', 'docno', 'refno', 'billno']) ||
+          `DBF-${idx + 1}`;
+        const rawNarr = pickStr(row, ['narration', 'narr', 'particulars', 'desc', 'remarks', 'note']);
+        const modeRaw = pickStr(row, ['mode', 'paymode', 'pmode', 'bank']);
+        const refNo = pickStr(row, ['refno', 'utr', 'cheque', 'chqno', 'billno', 'cnno']);
+        const resolvedFy = resolveFinancialYearFromDate(txDate) || normalizeFyLabel(params.activeFy);
+
+        const meta = extractPaymentMetadata({
+          description: rawNarr || modeRaw,
+          referenceNo: refNo || vNo,
+          rawMode: modeRaw,
+        });
+
+        result.transactions.push({
+          id: makeSafeDocId(`dbf_trn_${idx}`),
+          txCode: vNo.slice(0, 40),
+          txDate,
+          financialYear: resolvedFy,
+          txType: isDebit ? 'Expense' : 'Income',
+          ledgerAccount: isDebit ? 'Party Ledger Receivable (Dr)' : 'Party Ledger Receipt (Cr)',
+          partyName: partyName.slice(0, 120),
+          amount,
+          narration: (rawNarr || `${isDebit ? 'Debit' : 'Credit'} Voucher ${vNo} (${resolvedFy})`).slice(0, 300),
+          paymentMode: meta.paymentMode || 'Cash',
+          referenceNo: refNo.slice(0, 60),
+          upiRefId: meta.upiRefId || '',
+          utrNo: meta.utrNo || '',
+          chequeNo: meta.chequeNo || '',
+          tdsAmount: roundPaise(pickNum(row, ['tds', 'tdsamt'])),
+          linkedCnNo: pickStr(row, ['cnno', 'lrno']).slice(0, 40),
+          linkedInvoiceNo: '',
           branchCode: params.branchCode,
           createdByStaff: params.staffCode,
           ownerUid: params.ownerUid,
@@ -689,35 +996,8 @@ export async function autoCollectOldDataFiles(params: {
     }
   }
 
-  // Cross-reference FoxPro masters & transactions so Brokers, Vehicle Owners, and Drivers never leak into Customer Billing Parties
-  const extraBrokerNames = [
-    ...result.parties.filter((p) => p.partyType === 'Broker').map((p) => p.name),
-    ...result.lorryHires.map((lh) => lh.brokerName || ''),
-  ].filter(Boolean);
-  const extraOwnerNames = [
-    ...result.vehicles.map((v) => v.ownerName || ''),
-    ...result.lorryHires.map((lh) => lh.ownerName || ''),
-  ].filter(Boolean);
-  const extraDriverNames = result.drivers.map((d) => d.name).filter(Boolean);
-  const extraCustomerNames = [
-    ...result.invoices.map((inv) => inv.partyName),
-    ...result.consignments.map((cn) => cn.billingPartyName || cn.consignorName),
-  ].filter(Boolean);
-
-  const separated = analyzeAndSeparateMisclassifiedParties({
-    parties: result.parties,
-    drivers: result.drivers,
-    lorryHires: result.lorryHires,
-    invoices: result.invoices,
-    consignments: result.consignments,
-    extraBrokerNames,
-    extraOwnerNames,
-    extraDriverNames,
-    extraCustomerNames,
-  });
-  result.parties = separated.cleanParties;
+  // Final count sync: preserve exact role mapping without reclassifying HEAD customers into Brokers
   result.brokersAddedCount = result.parties.filter((p) => p.partyType === 'Broker').length;
-
   result.destinations = Array.from(new Set(result.destinations.filter(Boolean))).sort();
   return result;
 }

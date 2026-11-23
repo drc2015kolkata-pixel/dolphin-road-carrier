@@ -1,4 +1,4 @@
-import React, { Suspense, lazy, useCallback, useEffect, useMemo, useRef, useState } from 'react';
+import React, { Suspense, lazy, startTransition, useCallback, useDeferredValue, useEffect, useMemo, useRef, useState } from 'react';
 import { User } from 'firebase/auth';
 import {
   Activity,
@@ -29,7 +29,11 @@ import {
   Lock,
   LogOut,
   MapPin,
+  Maximize2,
   Menu,
+  Mic,
+  MicOff,
+  Minimize2,
   PackageCheck,
   PieChart,
   Power,
@@ -82,9 +86,11 @@ import {
   Vehicle,
 } from './types/erp';
 import {
+  BACKUP_ISOLATED_DRIVE_EMAIL,
   getConnectedGmail,
   googleSignIn,
   initAuth,
+  isAuthorizedBackupDriveEmail,
   MASTER_ADMIN_EMAIL,
   testConnection,
 } from './lib/firebase';
@@ -98,6 +104,7 @@ import {
   resetAdminToDefaultAndLogin,
   subscribeCollection,
   upsertStaffPresence,
+  verifySessionPasswordInstant,
 } from './lib/firestoreStore';
 import {
   daysSinceDate,
@@ -109,8 +116,12 @@ import {
   PRECREATED_FYS,
 } from './lib/formatters';
 import {
+  getDailySnapshotFileName,
   isLogisticsDriveFolder,
+  resetDriveSyncSessionCache,
   runDailyDrive8FileCleanup,
+  sealBackupPayloadWithSha256,
+  syncAutoBackupBundleToDrive,
   uploadBlobToDriveFolder,
   uploadLogisticsBlobToDriveFolder,
 } from './lib/driveBackup';
@@ -154,14 +165,35 @@ import {
 } from './lib/kycVaultStorage';
 import { playAlertBeep, playVerifiedBeep } from './lib/audioFeedback';
 import {
+  acknowledgeNewDeviceAlert,
+  checkAndRegisterCurrentDevice,
+  DeviceTrustCheckResult,
   dispatchBackgroundNotification,
+  getActiveTwoFactorOtpChallenge,
   getPhoneAlarmPermissionState,
   installScreenCaptureShield,
+  isBackupVaultUnlocked,
   isScreenShieldTemporarilyUnlocked,
+  issueTwoFactorOtpChallenge,
+  lockBackupVault,
   lockScreenShieldImmediately,
   requestPhoneAlarmPermission,
+  TwoFactorOtpChallenge,
+  unlockBackupVaultWithPinAndOtp,
   unlockScreenShieldTemporarily,
 } from './lib/securityShield';
+import {
+  getStaffReadOnlyVoiceHint,
+  getStoredVoicePilotLang,
+  isVoicePilotUnlocked,
+  lockVoicePilot,
+  parseVoiceCommandIntent,
+  setStoredVoicePilotLang,
+  speakCalmVoice,
+  startVoiceListening,
+  unlockVoicePilotWithPin,
+  VoicePilotLang,
+} from './lib/voicePilot';
 
 const A4PreviewModal = lazy(() =>
   import('./components/A4PreviewModal').then((m) => ({ default: m.A4PreviewModal }))
@@ -196,6 +228,25 @@ const BankReceiptImportModule = lazy(() =>
 const UserGuideModule = lazy(() =>
   import('./components/UserGuideModule').then((m) => ({ default: m.UserGuideModule }))
 );
+const LiveClockText = React.memo(function LiveClockText() {
+  const [now, setNow] = useState(() => new Date());
+  useEffect(() => {
+    const timer = window.setInterval(() => setNow(new Date()), 30000);
+    return () => window.clearInterval(timer);
+  }, []);
+  const dateStr = now.toLocaleDateString('en-GB', {
+    day: '2-digit',
+    month: 'short',
+    year: 'numeric',
+  });
+  const timeStr = now.toLocaleTimeString('en-US', {
+    hour: '2-digit',
+    minute: '2-digit',
+    hour12: true,
+  });
+  return <>{`${dateStr}  ${timeStr}`}</>;
+});
+
 const LogisticsWorkspace = lazy(() =>
   import('./components/LogisticsWorkspace').then((m) => ({ default: m.LogisticsWorkspace }))
 );
@@ -330,6 +381,12 @@ export default function App() {
   const [iosGuideOpen, setIosGuideOpen] = useState(false);
   const [appClosedOverlay, setAppClosedOverlay] = useState(false);
   const [rotateMode, setRotateMode] = useState<'auto' | 'landscape' | 'portrait'>('auto');
+  const [isFullscreen, setIsFullscreen] = useState(false);
+  const [voiceLang, setVoiceLang] = useState<VoicePilotLang>(() => getStoredVoicePilotLang());
+  const [voiceListening, setVoiceListening] = useState(false);
+  const [voicePinUnlocked, setVoicePinUnlocked] = useState(() => isVoicePilotUnlocked());
+  const [voiceFeedbackMsg, setVoiceFeedbackMsg] = useState<string | null>(null);
+  const voiceStopRef = useRef<(() => void) | null>(null);
   const [alarmPopupDismissed, setAlarmPopupDismissed] = useState(false);
   const alarmBeepedRef = useRef(false);
   const [eway8hBannerDismissed, setEway8hBannerDismissed] = useState(false);
@@ -346,13 +403,57 @@ export default function App() {
     NotificationPermission | 'unsupported'
   >(() => getPhoneAlarmPermissionState());
 
-  // Startup & Monthly Formula Health Guard + Admin PIN Modal
+  // Startup & Monthly Formula Health Guard + Admin PIN & 2FA OTP Modal + Drive Auto-Backup
   const [formulaHealthReport, setFormulaHealthReport] = useState<FormulaHealthReport | null>(null);
   const [formulaHealthModalOpen, setFormulaHealthModalOpen] = useState(false);
   const [adminPinModalOpen, setAdminPinModalOpen] = useState(false);
   const [adminPinInput, setAdminPinInput] = useState('');
+  const [adminPinOtpInput, setAdminPinOtpInput] = useState('');
+  const [adminPinOtpChallenge, setAdminPinOtpChallenge] = useState<TwoFactorOtpChallenge | null>(null);
   const [adminPinError, setAdminPinError] = useState<string | null>(null);
-  const [pendingPinTargetTab, setPendingPinTargetTab] = useState<SheetTabId | null>(null);
+  const [pendingPinTargetTab, setPendingPinTargetTab] = useState<SheetTabId | 'voicePilot' | null>(null);
+  const [deviceTrust, setDeviceTrust] = useState<DeviceTrustCheckResult | null>(null);
+  const [newDeviceBannerDismissed, setNewDeviceBannerDismissed] = useState(false);
+  const [autoBackupInfo, setAutoBackupInfo] = useState<{
+    status: 'idle' | 'pending' | 'syncing' | 'synced' | 'offline_sealed' | 'error';
+    lastBackedUpAt?: number;
+    sha256?: string;
+    snapshotName?: string;
+    recordCount?: number;
+    message?: string;
+  }>(() => {
+    try {
+      const raw = localStorage.getItem('drc_last_backup_seal_v1');
+      if (raw) {
+        const parsed = JSON.parse(raw) as {
+          at?: number;
+          sha256?: string;
+          snapshotName?: string;
+          recordCount?: number;
+        };
+        return {
+          status: 'offline_sealed',
+          lastBackedUpAt: parsed.at,
+          sha256: parsed.sha256,
+          snapshotName: parsed.snapshotName,
+          recordCount: parsed.recordCount,
+          message: 'SHA-256 local vault seal active',
+        };
+      }
+    } catch {
+      // Ignore storage availability
+    }
+    return { status: 'idle' };
+  });
+  const [switchOffSummary, setSwitchOffSummary] = useState<{
+    backedUpAt: number;
+    sha256: string;
+    snapshotName: string;
+    recordCount: number;
+    driveSynced: boolean;
+    email: string;
+  } | null>(null);
+  const autoBackupTimerRef = useRef<number | null>(null);
 
   // Universal Search (Ctrl+K)
   const [globalSearch, setGlobalSearch] = useState('');
@@ -397,15 +498,8 @@ export default function App() {
     onConfirm: () => {},
   });
 
-  // Live Date/Time Clock
-  const [now, setNow] = useState(() => new Date());
   const isOnline = useOnlineStatus();
   const { isInstallable, isInstalled, isIOS, install } = usePWAInstall();
-
-  useEffect(() => {
-    const timer = setInterval(() => setNow(new Date()), 15000);
-    return () => clearInterval(timer);
-  }, []);
 
   useEffect(() => {
     const unsub = subscribeOfflineSyncStatus(setOfflineSyncStatus);
@@ -449,7 +543,7 @@ export default function App() {
     if (!erpSession) return;
     const t = window.setTimeout(() => {
       runFormulaGuardScan(false);
-    }, 30);
+    }, 260);
     return () => window.clearTimeout(t);
   }, [erpSession, runFormulaGuardScan]);
 
@@ -497,9 +591,17 @@ export default function App() {
     }
   }, [erpSession, driveAccessToken]);
 
-  // Passive listener for optional Google Drive OAuth connection
+  // Passive listener for Google Drive OAuth connection (strictly locked to drc.2015kolkata@gmail.com)
   useEffect(() => {
     const unsub = initAuth((nextUser, token) => {
+      if (nextUser && nextUser.email && !isAuthorizedBackupDriveEmail(nextUser.email)) {
+        setGoogleUser(null);
+        setDriveAccessToken(null);
+        setDriveBannerError(
+          `Drive Security Lock: Account "${nextUser.email}" is blocked. Connect strictly as ${BACKUP_ISOLATED_DRIVE_EMAIL}.`
+        );
+        return;
+      }
       setGoogleUser(nextUser);
       if (token) setDriveAccessToken(token);
     });
@@ -580,6 +682,31 @@ export default function App() {
     if (activeStaffSession) return activeStaffSession.role === 'Admin';
     return Boolean(erpSession.isMasterAdmin);
   }, [erpSession, activeStaffSession]);
+
+  // New-Device Login Detection & Immediate Security Alert Shield
+  useEffect(() => {
+    if (!erpSession) {
+      setDeviceTrust(null);
+      setNewDeviceBannerDismissed(false);
+      return;
+    }
+    const trustRes = checkAndRegisterCurrentDevice({
+      operatorLabel: activeStaffSession ? activeStaffSession.displayName : erpSession.displayName,
+      email: connectedEmail || MASTER_ADMIN_EMAIL,
+    });
+    setDeviceTrust(trustRes);
+    if (trustRes.isNewDevice) {
+      setNewDeviceBannerDismissed(false);
+      playAlertBeep();
+    }
+  }, [erpSession, activeStaffSession, connectedEmail]);
+
+  const handleAcknowledgeNewDevice = useCallback(() => {
+    acknowledgeNewDeviceAlert(deviceTrust?.deviceId);
+    setDeviceTrust((prev) => (prev ? { ...prev, isNewDevice: false } : prev));
+    setNewDeviceBannerDismissed(true);
+    playVerifiedBeep();
+  }, [deviceTrust?.deviceId]);
 
   // Branch Isolation & Master Admin Filter
   const isBranchLocked = Boolean(
@@ -675,6 +802,184 @@ export default function App() {
       // Ignore storage quota issues
     }
   }, []);
+
+  const buildCompleteVaultBundle = useCallback(
+    (): Record<string, unknown> => ({
+      exportedAt: new Date().toISOString(),
+      authorizedEmail: BACKUP_ISOLATED_DRIVE_EMAIL,
+      company: companySettings,
+      parties,
+      vehicles,
+      drivers,
+      consignments,
+      invoices,
+      quotations,
+      lorryHires,
+      transactions,
+      declarations,
+      bankReceipts,
+      staffCommissions,
+      logisticsParties,
+      logisticsVehicles,
+      logisticsDrivers,
+      logisticsDockets,
+      logisticsManifests,
+      logisticsInvoices,
+      logisticsLedgers,
+    }),
+    [
+      companySettings,
+      parties,
+      vehicles,
+      drivers,
+      consignments,
+      invoices,
+      quotations,
+      lorryHires,
+      transactions,
+      declarations,
+      bankReceipts,
+      staffCommissions,
+      logisticsParties,
+      logisticsVehicles,
+      logisticsDrivers,
+      logisticsDockets,
+      logisticsManifests,
+      logisticsInvoices,
+      logisticsLedgers,
+    ]
+  );
+
+  const runSealedAutoBackup = useCallback(
+    async (forceRemotePull = false) => {
+      if (!erpSession) {
+        return {
+          backedUpAt: Date.now(),
+          sha256: '',
+          snapshotName: getDailySnapshotFileName(),
+          recordCount: 0,
+          driveSynced: false,
+        };
+      }
+      const bundle = buildCompleteVaultBundle();
+      const emailForSeal =
+        connectedEmail && isAuthorizedBackupDriveEmail(connectedEmail)
+          ? connectedEmail
+          : BACKUP_ISOLATED_DRIVE_EMAIL;
+      setAutoBackupInfo((prev) => ({
+        ...prev,
+        status: 'syncing',
+        message: 'Sealing SHA-256 & backing up...',
+      }));
+      try {
+        const localSeal = await sealBackupPayloadWithSha256(bundle, emailForSeal);
+        const snapshotName = getDailySnapshotFileName();
+        const sealedAt = Date.now();
+        try {
+          localStorage.setItem(
+            'drc_last_backup_seal_v1',
+            JSON.stringify({
+              at: sealedAt,
+              sha256: localSeal.sha256,
+              snapshotName,
+              recordCount: localSeal.recordCount,
+              email: emailForSeal,
+            })
+          );
+        } catch {
+          // Ignore storage quota issues
+        }
+
+        if (isOnline && driveAccessToken && isAuthorizedBackupDriveEmail(connectedEmail)) {
+          const syncRes = await syncAutoBackupBundleToDrive({
+            accessToken: driveAccessToken,
+            connectedEmail,
+            localBundle: bundle,
+            includeDailySnapshot: true,
+            forceRemotePull,
+          });
+          setAutoBackupInfo({
+            status: 'synced',
+            lastBackedUpAt: sealedAt,
+            sha256: syncRes.sha256,
+            snapshotName: syncRes.snapshotFileName || snapshotName,
+            recordCount: syncRes.recordCount,
+            message: `Synced ${syncRes.masterFileName} + ${syncRes.snapshotFileName || snapshotName}`,
+          });
+          return {
+            backedUpAt: sealedAt,
+            sha256: syncRes.sha256,
+            snapshotName: syncRes.snapshotFileName || snapshotName,
+            recordCount: syncRes.recordCount,
+            driveSynced: true,
+          };
+        }
+
+        setAutoBackupInfo({
+          status: 'offline_sealed',
+          lastBackedUpAt: sealedAt,
+          sha256: localSeal.sha256,
+          snapshotName,
+          recordCount: localSeal.recordCount,
+          message: driveAccessToken
+            ? `Drive sync locked strictly to ${BACKUP_ISOLATED_DRIVE_EMAIL}`
+            : 'SHA-256 local vault sealed (connect Google Drive for cloud sync)',
+        });
+        return {
+          backedUpAt: sealedAt,
+          sha256: localSeal.sha256,
+          snapshotName,
+          recordCount: localSeal.recordCount,
+          driveSynced: false,
+        };
+      } catch (err) {
+        const msg = err instanceof Error ? err.message : 'Auto-backup seal failed';
+        setAutoBackupInfo((prev) => ({
+          ...prev,
+          status: 'error',
+          message: msg,
+        }));
+        return {
+          backedUpAt: Date.now(),
+          sha256: '',
+          snapshotName: getDailySnapshotFileName(),
+          recordCount: 0,
+          driveSynced: false,
+        };
+      }
+    },
+    [erpSession, buildCompleteVaultBundle, connectedEmail, isOnline, driveAccessToken]
+  );
+
+  const runSealedAutoBackupRef = useRef(runSealedAutoBackup);
+  runSealedAutoBackupRef.current = runSealedAutoBackup;
+
+  // Silent 3-Second Auto-Backup after every ERP save ('drc:data-saved')
+  useEffect(() => {
+    if (!erpSession) return;
+    const handleDataSaved = () => {
+      setAutoBackupInfo((prev) => ({
+        ...prev,
+        status: 'pending',
+        message: 'Change saved — 3s auto-backup queued...',
+      }));
+      if (autoBackupTimerRef.current !== null) {
+        window.clearTimeout(autoBackupTimerRef.current);
+      }
+      autoBackupTimerRef.current = window.setTimeout(() => {
+        autoBackupTimerRef.current = null;
+        void runSealedAutoBackupRef.current(false);
+      }, 2200);
+    };
+    window.addEventListener('drc:data-saved', handleDataSaved);
+    return () => {
+      window.removeEventListener('drc:data-saved', handleDataSaved);
+      if (autoBackupTimerRef.current !== null) {
+        window.clearTimeout(autoBackupTimerRef.current);
+        autoBackupTimerRef.current = null;
+      }
+    };
+  }, [erpSession]);
 
   // Scoped datasets based on branch isolation / Master Admin branch filter + Active Financial Year
   const filterByBranch = useCallback(
@@ -951,14 +1256,63 @@ export default function App() {
     try {
       const orient = window.screen?.orientation as ScreenOrientation & {
         lock?: (o: string) => Promise<void>;
+        unlock?: () => void;
       };
-      if (orient && typeof orient.lock === 'function') {
-        await orient.lock(nextMode);
+      if (nextMode === 'landscape' && orient && typeof orient.lock === 'function') {
+        await orient.lock('landscape');
+      } else if (nextMode === 'portrait' && orient && typeof orient.unlock === 'function') {
+        orient.unlock();
       }
     } catch {
-      // Desktop browsers or OS blocks OS-level lock; CSS layout toggle remains active cleanly
+      // Desktop / iOS / unsupported portrait locks gracefully fall back to CSS landscape rotation (.drc-css-landscape-fallback)
     }
   }, [rotateMode]);
+
+  useEffect(() => {
+    const handleFsChange = () => {
+      setIsFullscreen(Boolean(document.fullscreenElement));
+    };
+    document.addEventListener('fullscreenchange', handleFsChange);
+    return () => document.removeEventListener('fullscreenchange', handleFsChange);
+  }, []);
+
+  const handleToggleFullscreen = useCallback(async () => {
+    try {
+      if (!document.fullscreenElement) {
+        await document.documentElement.requestFullscreen();
+      } else {
+        await document.exitFullscreen();
+      }
+    } catch {
+      // Ignore browser fullscreen restriction
+    }
+  }, []);
+
+  const handleCycleVoiceLang = useCallback(() => {
+    const order: VoicePilotLang[] = ['bn', 'en', 'off'];
+    const next = order[(order.indexOf(voiceLang) + 1) % order.length];
+    setVoiceLang(next);
+    setStoredVoicePilotLang(next);
+    if (next === 'off') {
+      if (voiceStopRef.current) {
+        voiceStopRef.current();
+        voiceStopRef.current = null;
+      }
+      setVoiceListening(false);
+      setVoiceFeedbackMsg('Voice Pilot: OFF');
+    } else if (!isEffectiveMasterAdmin) {
+      const hint = getStaffReadOnlyVoiceHint(next, activeTab, businessMode);
+      setVoiceFeedbackMsg(hint);
+      speakCalmVoice(hint, next);
+    } else {
+      const msg =
+        next === 'bn'
+          ? 'বাংলা ভয়েস পাইলট সক্রিয় হয়েছে (শুধুমাত্র ড্রাফট পূরণ)।'
+          : 'English Voice Pilot ready (Draft-only assistant).';
+      setVoiceFeedbackMsg(msg);
+      speakCalmVoice(msg, next);
+    }
+  }, [voiceLang, isEffectiveMasterAdmin, activeTab, businessMode]);
 
   const getSheetAccess = useCallback(
     (sheetKey: SheetPermissionKey) => {
@@ -991,7 +1345,7 @@ export default function App() {
       if (!isEffectiveMasterAdmin && (perm === 'settings' || perm === 'mis')) return false;
       if (isEffectiveMasterAdmin || activeStaffSession?.role === 'Admin') return true;
       if (perm === 'backup') {
-        return (activeStaffSession?.permissions || []).includes('backup');
+        return isEffectiveMasterAdmin;
       }
       if (perm === 'allInOne') {
         return getSheetAccess('lr') !== 'blocked' || getSheetAccess('billing') !== 'blocked';
@@ -1095,21 +1449,23 @@ export default function App() {
 
   const openOrSwitchTab = useCallback(
     (tabId: SheetTabId) => {
-      setTabHistory((prev) => {
-        if (activeTab === tabId) return prev;
-        return [...prev.slice(-19), activeTab];
-      });
-      setOpenTabs((prev) => {
-        if (prev.some((t) => t.id === tabId)) return prev;
-        return [...prev, { id: tabId, label: TAB_LABELS[tabId] }];
-      });
-      if (tabId === 'dashboard') {
-        setBannerExpanded(false);
-      } else {
-        setDashboardFocusTx(false);
-      }
-      setActiveTab(tabId);
       setSidebarOpen(false);
+      startTransition(() => {
+        setTabHistory((prev) => {
+          if (activeTab === tabId) return prev;
+          return [...prev.slice(-19), activeTab];
+        });
+        setOpenTabs((prev) => {
+          if (prev.some((t) => t.id === tabId)) return prev;
+          return [...prev, { id: tabId, label: TAB_LABELS[tabId] }];
+        });
+        if (tabId === 'dashboard') {
+          setBannerExpanded(false);
+        } else {
+          setDashboardFocusTx(false);
+        }
+        setActiveTab(tabId);
+      });
     },
     [activeTab]
   );
@@ -1117,13 +1473,26 @@ export default function App() {
   const requestProtectedTab = useCallback(
     (tabId: SheetTabId) => {
       if (!isEffectiveMasterAdmin) return;
+      if (tabId === 'backup' && isBackupVaultUnlocked()) {
+        openOrSwitchTab('backup');
+        return;
+      }
+      const challenge =
+        tabId === 'backup'
+          ? getActiveTwoFactorOtpChallenge() ||
+            issueTwoFactorOtpChallenge(
+              `Backup / Restore Vault (${BACKUP_ISOLATED_DRIVE_EMAIL})`
+            )
+          : null;
       setPendingPinTargetTab(tabId);
       setAdminPinInput('');
+      setAdminPinOtpInput('');
+      setAdminPinOtpChallenge(challenge);
       setAdminPinError(null);
       setAdminPinModalOpen(true);
       setSidebarOpen(false);
     },
-    [isEffectiveMasterAdmin]
+    [isEffectiveMasterAdmin, openOrSwitchTab]
   );
 
   const handleReturnToCurrentBusinessDashboard = useCallback(() => {
@@ -1212,8 +1581,15 @@ export default function App() {
   const handleUnlockScreen = async (e: React.FormEvent) => {
     e.preventDefault();
     if (!erpSession || unlocking) return;
-    setUnlocking(true);
     setUnlockError(null);
+    if (verifySessionPasswordInstant(erpSession, activeStaffSession, unlockPassword)) {
+      lastActivityRef.current = Date.now();
+      setUnlockPassword('');
+      setIsScreenLocked(false);
+      window.setTimeout(() => playVerifiedBeep(), 0);
+      return;
+    }
+    setUnlocking(true);
     try {
       const operatorId = activeStaffSession ? activeStaffSession.staffCode : erpSession.userId;
       await loginWithCredentials(operatorId, unlockPassword);
@@ -1231,8 +1607,18 @@ export default function App() {
     setDriveBannerError(null);
     try {
       const res = await googleSignIn(forceAccountSelect);
+      if (res.user?.email && !isAuthorizedBackupDriveEmail(res.user.email)) {
+        setGoogleUser(null);
+        setDriveAccessToken(null);
+        playAlertBeep();
+        setDriveBannerError(
+          `Drive Security Lock: Connected email "${res.user.email}" rejected. Sync is strictly locked to ${BACKUP_ISOLATED_DRIVE_EMAIL}.`
+        );
+        return;
+      }
       setGoogleUser(res.user);
       if (res.accessToken) setDriveAccessToken(res.accessToken);
+      playVerifiedBeep();
     } catch (err) {
       setDriveBannerError(
         err instanceof Error ? err.message : 'Google Drive connection failed.'
@@ -1258,6 +1644,10 @@ export default function App() {
   };
 
   const handleSwitchOffExitApp = useCallback(async () => {
+    if (autoBackupTimerRef.current !== null) {
+      window.clearTimeout(autoBackupTimerRef.current);
+      autoBackupTimerRef.current = null;
+    }
     try {
       if (isOnline && offlineSyncStatus.pendingCount > 0) {
         await Promise.race([
@@ -1268,6 +1658,43 @@ export default function App() {
     } catch {
       // Ignore network timeout on exit
     }
+    const finalBackup = await Promise.race([
+      runSealedAutoBackupRef.current(false),
+      new Promise<{
+        backedUpAt: number;
+        sha256: string;
+        snapshotName: string;
+        recordCount: number;
+        driveSynced: boolean;
+      }>((resolve) =>
+        setTimeout(
+          () =>
+            resolve({
+              backedUpAt: Date.now(),
+              sha256: autoBackupInfo.sha256 || 'LOCAL-SEALED',
+              snapshotName: getDailySnapshotFileName(),
+              recordCount: autoBackupInfo.recordCount || 0,
+              driveSynced: false,
+            }),
+          4500
+        )
+      ),
+    ]);
+    setSwitchOffSummary({
+      backedUpAt: finalBackup.backedUpAt,
+      sha256: finalBackup.sha256 || autoBackupInfo.sha256 || 'LOCAL-SEALED',
+      snapshotName: finalBackup.snapshotName,
+      recordCount: finalBackup.recordCount,
+      driveSynced: finalBackup.driveSynced,
+      email:
+        connectedEmail && isAuthorizedBackupDriveEmail(connectedEmail)
+          ? connectedEmail
+          : BACKUP_ISOLATED_DRIVE_EMAIL,
+    });
+    lockBackupVault();
+    lockVoicePilot();
+    setVoicePinUnlocked(false);
+    resetDriveSyncSessionCache();
     try {
       runDailyLocalJunkCleanup();
       revokeThermalMemoryCooledUrls();
@@ -1307,6 +1734,7 @@ export default function App() {
     setBusinessMode('FTL');
     setOpenTabs([{ id: 'dashboard', label: 'Dashboard' }]);
     setActiveTab('dashboard');
+    playVerifiedBeep();
     setAppClosedOverlay(true);
     try {
       window.close();
@@ -1316,6 +1744,9 @@ export default function App() {
   }, [
     isOnline,
     offlineSyncStatus.pendingCount,
+    autoBackupInfo.sha256,
+    autoBackupInfo.recordCount,
+    connectedEmail,
     erpSession,
     workspaceUid,
     activeStaffCode,
@@ -1393,8 +1824,8 @@ export default function App() {
       openOrSwitchTab('dashboard');
       return;
     }
-    if (navId === 'staffAccess') {
-      requestProtectedTab('staffAccess');
+    if (navId === 'staffAccess' || navId === 'backup') {
+      requestProtectedTab(navId);
       return;
     }
     setDashboardFocusTx(false);
@@ -1417,9 +1848,11 @@ export default function App() {
     openOrSwitchTab(navId);
   };
 
+  const deferredGlobalSearch = useDeferredValue(globalSearch);
+
   // Universal Search (Ctrl+K) matching Pages, Bills, CNs, Quotations, Lorries
   const universalSearchResults = useMemo(() => {
-    const q = globalSearch.trim().toLowerCase();
+    const q = deferredGlobalSearch.trim().toLowerCase();
     if (!q) return [];
     const results: Array<{
       id: string;
@@ -1544,9 +1977,16 @@ export default function App() {
         action: () => requestProtectedTab('staffAccess'),
       },
       {
+        id: 'pg-backup',
+        title: 'Backup / Restore Vault (PIN + 2FA OTP + Drive)',
+        keywords: 'backup restore drive json snapshot sha256 2fa otp',
+        allowed: isEffectiveMasterAdmin,
+        action: () => requestProtectedTab('backup'),
+      },
+      {
         id: 'pg-set',
         title: 'Settings, Multi-Bank & UPI QR',
-        keywords: 'settings bank upi branch backup drive',
+        keywords: 'settings bank upi branch company',
         allowed: hasPermission('settings'),
         action: () => openOrSwitchTab('settings'),
       },
@@ -1639,7 +2079,7 @@ export default function App() {
 
     return results.slice(0, 14);
   }, [
-    globalSearch,
+    deferredGlobalSearch,
     invoices,
     consignments,
     quotations,
@@ -1653,33 +2093,49 @@ export default function App() {
     isEffectiveMasterAdmin,
   ]);
 
-  const formattedClock = useMemo(() => {
-    const dateStr = now.toLocaleDateString('en-GB', {
-      day: '2-digit',
-      month: 'short',
-      year: 'numeric',
-    });
-    const timeStr = now.toLocaleTimeString('en-US', {
-      hour: '2-digit',
-      minute: '2-digit',
-      hour12: true,
-    });
-    return `${dateStr}  ${timeStr}`;
-  }, [now]);
-
   if (appClosedOverlay) {
     return (
       <div className="min-h-screen flex items-center justify-center bg-slate-950 p-4">
-        <div className="w-full max-w-sm bg-white rounded-2xl border border-slate-300 shadow-2xl p-6 text-center space-y-4">
+        <div className="w-full max-w-md bg-white rounded-2xl border border-slate-300 shadow-2xl p-6 text-center space-y-4">
           <DrcTriangleLogo className="w-16 h-16 mx-auto" />
+          <div className="inline-flex items-center gap-1.5 px-3 py-1 rounded-full bg-emerald-100 border border-emerald-300 text-emerald-900 text-xs font-extrabold">
+            <CheckCircle2 className="w-4 h-4 text-emerald-700 shrink-0" />
+            <span>✅ All Data Backed Up</span>
+          </div>
           <div>
             <h2 className="text-base font-extrabold text-slate-900">
               DRC ERP Safely Switched Off
             </h2>
             <p className="text-xs text-slate-600 mt-1.5 leading-relaxed">
-              Final offline sync flushed, temporary memory cleaned, session logged out, and all background listeners stopped. You may close this window or sign back in below.
+              Final SHA-256 sealed union backup completed, offline queue flushed, vault locked, and all background listeners stopped.
             </p>
           </div>
+          {switchOffSummary && (
+            <div className="rounded-xl bg-emerald-50 border border-emerald-200 p-3 text-left text-[11px] text-emerald-950 space-y-1">
+              <div className="flex items-center justify-between gap-2">
+                <span className="font-bold">Authorized Vault:</span>
+                <span className="font-mono-num font-bold">{switchOffSummary.email}</span>
+              </div>
+              <div className="flex items-center justify-between gap-2">
+                <span className="font-bold">Snapshot File:</span>
+                <span className="font-mono-num font-bold">{switchOffSummary.snapshotName}</span>
+              </div>
+              <div className="flex items-center justify-between gap-2">
+                <span className="font-bold">SHA-256 Seal:</span>
+                <span className="font-mono-num font-bold">
+                  {switchOffSummary.sha256.slice(0, 18)}... ({switchOffSummary.recordCount} recs)
+                </span>
+              </div>
+              <div className="flex items-center justify-between gap-2">
+                <span className="font-bold">Cloud Drive Sync:</span>
+                <span className="font-extrabold">
+                  {switchOffSummary.driveSynced
+                    ? 'Uploaded to Google Drive'
+                    : 'Local SHA-256 Vault Sealed'}
+                </span>
+              </div>
+            </div>
+          )}
           <button
             type="button"
             onClick={() => setAppClosedOverlay(false)}
@@ -1754,16 +2210,119 @@ export default function App() {
       ? TAB_LABELS[activeTab] || activeTab
       : `${activeBusinessMeta.shortLabel} · ${logiActiveTab.toUpperCase()}`;
 
+  const handleVoiceSpeakClick = () => {
+    const effectiveLang: VoicePilotLang = voiceLang === 'off' ? 'en' : voiceLang;
+    if (voiceLang === 'off') {
+      setVoiceLang('en');
+      setStoredVoicePilotLang('en');
+    }
+
+    // Staff receives read-only spoken voice hints ONLY (zero draft mutation, zero admin unlock)
+    if (!isEffectiveMasterAdmin) {
+      const hint = getStaffReadOnlyVoiceHint(effectiveLang, activeTab, businessMode);
+      setVoiceFeedbackMsg(hint);
+      speakCalmVoice(hint, effectiveLang);
+      return;
+    }
+
+    // Master Admin must unlock Admin PIN for Voice Pilot command execution
+    if (!voicePinUnlocked) {
+      setPendingPinTargetTab('voicePilot');
+      setAdminPinInput('');
+      setAdminPinOtpInput('');
+      setAdminPinOtpChallenge(null);
+      setAdminPinError(null);
+      setAdminPinModalOpen(true);
+      return;
+    }
+
+    if (voiceListening && voiceStopRef.current) {
+      voiceStopRef.current();
+      voiceStopRef.current = null;
+      setVoiceListening(false);
+      return;
+    }
+
+    setVoiceListening(true);
+    setVoiceFeedbackMsg(
+      effectiveLang === 'bn'
+        ? 'শুনছি... স্ক্রিন বা ড্রাফট নির্দেশ বলুন...'
+        : 'Listening... Speak screen or draft command...'
+    );
+    const stopFn = startVoiceListening({
+      lang: effectiveLang,
+      onResult: (transcript) => {
+        const intent = parseVoiceCommandIntent(transcript);
+        const reply = effectiveLang === 'bn' ? intent.spokenReplyBn : intent.spokenReplyEn;
+        setVoiceFeedbackMsg(`"${intent.transcript}" -> ${reply}`);
+        if (intent.blockedAction) {
+          playAlertBeep();
+          speakCalmVoice(reply, effectiveLang);
+          return;
+        }
+        if (intent.targetBusinessMode && intent.targetBusinessMode !== businessMode) {
+          setBusinessMode(intent.targetBusinessMode);
+          if (intent.targetBusinessMode !== 'FTL') {
+            setLogiActiveTab('docket');
+          }
+        }
+        if (intent.targetTab) {
+          if (intent.targetTab === 'master' && intent.targetSubTab) {
+            setMasterInitialTab(intent.targetSubTab as MasterTabId);
+            setMasterFocusNonce((n) => n + 1);
+          } else if (intent.targetTab === 'billing' && intent.targetSubTab) {
+            setBillingInitialSubTab(
+              intent.targetSubTab as 'invoice' | 'quotation' | '194c'
+            );
+            setBillingFocusNonce((n) => n + 1);
+          }
+          openOrSwitchTab(intent.targetTab);
+        }
+        if (Object.keys(intent.draftFields).length > 0) {
+          window.setTimeout(() => {
+            window.dispatchEvent(
+              new CustomEvent('drc:voice-draft-fill', { detail: intent.draftFields })
+            );
+          }, 120);
+        }
+        playVerifiedBeep();
+        speakCalmVoice(reply, effectiveLang);
+      },
+      onError: (msg) => {
+        setVoiceFeedbackMsg(msg);
+        setVoiceListening(false);
+      },
+      onEnd: () => {
+        setVoiceListening(false);
+        voiceStopRef.current = null;
+      },
+    });
+    voiceStopRef.current = stopFn;
+  };
+
   return (
     <ErrorBoundary>
       <div
         className={`min-h-screen w-full max-w-full overflow-x-clip flex flex-col bg-[#E2E8F0] text-slate-900 select-none ${
-          rotateMode === 'landscape' ? 'min-w-[820px] sm:min-w-0' : ''
+          rotateMode === 'landscape' ? 'drc-css-landscape-fallback' : ''
         }`}
       >
+      {voiceFeedbackMsg && (
+        <div className="bg-slate-900 text-amber-200 px-3 py-1 text-[11px] font-bold flex items-center justify-between gap-2 no-print border-b border-amber-500/40">
+          <span className="truncate">🎙️ {voiceFeedbackMsg}</span>
+          <button
+            type="button"
+            onClick={() => setVoiceFeedbackMsg(null)}
+            className="text-slate-300 hover:text-white px-1 cursor-pointer shrink-0"
+            aria-label="Dismiss Voice Message"
+          >
+            ✕
+          </button>
+        </div>
+      )}
       {/* Slim 36px 1-Line Sticky Bar when ANY Form is Open | Full Compact 2-Row Header on Dashboard */}
       {isFormFocused && !bannerExpanded ? (
-        <header className="sticky top-0 z-30 w-full h-[36px] bg-[#0B3B8C] text-white border-b border-blue-900 px-2 sm:px-3 flex items-center justify-between gap-2 shadow-sm no-print">
+        <header className="sticky top-0 z-30 w-full min-h-[36px] bg-[#0B3B8C] text-white border-b border-blue-900 px-2 sm:px-3 py-0.5 flex flex-wrap items-center justify-between gap-1.5 shadow-sm no-print">
           <div className="flex items-center gap-1.5 min-w-0">
             <button
               type="button"
@@ -1794,15 +2353,83 @@ export default function App() {
             </h1>
           </div>
 
-          <div className="flex items-center gap-1.5 shrink-0">
+          <div className="flex items-center gap-1 shrink-0 flex-wrap">
+            <button
+              type="button"
+              onClick={() => isEffectiveMasterAdmin && requestProtectedTab('backup')}
+              className={`hidden xl:inline-flex items-center gap-1 px-2 py-0.5 rounded text-[10px] font-extrabold whitespace-nowrap cursor-pointer ${
+                autoBackupInfo.status === 'error'
+                  ? 'bg-red-500 text-white'
+                  : autoBackupInfo.status === 'syncing'
+                  ? 'bg-amber-400 text-slate-950'
+                  : 'bg-emerald-500/25 border border-emerald-300/60 text-emerald-100'
+              }`}
+              title={
+                autoBackupInfo.message ||
+                `Live 3s Auto-Backup Active (${BACKUP_ISOLATED_DRIVE_EMAIL})`
+              }
+            >
+              <ShieldCheck className="w-3 h-3 shrink-0" />
+              <span>
+                {autoBackupInfo.status === 'syncing'
+                  ? 'Syncing Backup...'
+                  : 'Live Auto-Backup Active'}
+              </span>
+            </button>
+            <button
+              type="button"
+              onClick={handleVoiceSpeakClick}
+              className={`inline-flex items-center gap-1 px-2 py-0.5 rounded text-[10px] font-extrabold cursor-pointer whitespace-nowrap ${
+                voiceListening
+                  ? 'bg-rose-500 text-white animate-pulse'
+                  : isEffectiveMasterAdmin && voicePinUnlocked
+                  ? 'bg-emerald-400 text-slate-950'
+                  : 'bg-white/20 hover:bg-white/30 text-white'
+              }`}
+              title={
+                isEffectiveMasterAdmin
+                  ? 'Admin Voice Pilot (Draft Fill & Navigation only)'
+                  : 'Read-only Staff Voice Hints'
+              }
+            >
+              {voiceListening ? <Mic className="w-3 h-3" /> : <MicOff className="w-3 h-3" />}
+              <span>🎙️ বলুন / Speak</span>
+            </button>
+            <button
+              type="button"
+              onClick={handleCycleVoiceLang}
+              className="inline-flex items-center gap-1 px-2 py-0.5 rounded bg-white/15 hover:bg-white/25 text-amber-200 text-[10px] font-extrabold cursor-pointer whitespace-nowrap"
+              title="Toggle Voice Language: বাংলা | English | OFF"
+            >
+              <span>
+                🎙️ Voice:{' '}
+                {voiceLang === 'bn' ? 'বাংলা' : voiceLang === 'en' ? 'English' : 'OFF'}
+              </span>
+            </button>
             <button
               type="button"
               onClick={() => void handleToggleRotateScreen()}
-              className="inline-flex items-center gap-1 px-2 py-0.5 rounded bg-white/15 hover:bg-white/25 text-white text-[10px] font-bold cursor-pointer whitespace-nowrap"
-              title="Rotate Landscape / Portrait View"
+              className={`inline-flex items-center gap-1 px-2 py-0.5 rounded text-[10px] font-extrabold cursor-pointer whitespace-nowrap ${
+                rotateMode === 'landscape'
+                  ? 'bg-amber-300 text-slate-950'
+                  : 'bg-white/15 hover:bg-white/25 text-white'
+              }`}
+              title="Rotate Landscape / Portrait View (with 90-deg fallback)"
             >
-              <RefreshCw className="w-3 h-3 text-amber-300" />
-              <span className="hidden md:inline">Rotate</span>
+              <span>🔄 ঘোরান / Rotate</span>
+            </button>
+            <button
+              type="button"
+              onClick={() => void handleToggleFullscreen()}
+              className="inline-flex items-center gap-1 px-2 py-0.5 rounded bg-white/15 hover:bg-white/25 text-white text-[10px] font-extrabold cursor-pointer whitespace-nowrap"
+              title="Toggle Fullscreen Mode"
+            >
+              {isFullscreen ? (
+                <Minimize2 className="w-3 h-3 text-amber-200" />
+              ) : (
+                <Maximize2 className="w-3 h-3 text-amber-200" />
+              )}
+              <span>⛶ বড় স্ক্রিন / Fullscreen</span>
             </button>
             <button
               type="button"
@@ -1947,6 +2574,39 @@ export default function App() {
                 {formulaHealthReport?.badgeLabel || 'System Health: 100% Error-Free'}
               </span>
               <span className="xl:hidden">100% Health</span>
+            </button>
+
+            {/* Silent 3-Second SHA-256 Google Drive Live Auto-Backup Active Badge */}
+            <button
+              type="button"
+              onClick={() => isEffectiveMasterAdmin && requestProtectedTab('backup')}
+              className={`inline-flex items-center gap-1 px-2 py-1 rounded-lg border text-[10px] sm:text-[11px] font-extrabold whitespace-nowrap shrink-0 cursor-pointer ${
+                autoBackupInfo.status === 'error'
+                  ? 'bg-red-50 border-red-300 text-red-900'
+                  : autoBackupInfo.status === 'syncing'
+                  ? 'bg-amber-50 border-amber-300 text-amber-900'
+                  : 'bg-emerald-50 hover:bg-emerald-100 border-emerald-300 text-emerald-900'
+              }`}
+              title={`${
+                autoBackupInfo.message ||
+                `Silent 3-second SHA-256 Auto-Backup Active (${BACKUP_ISOLATED_DRIVE_EMAIL})`
+              }${autoBackupInfo.sha256 ? ` · SHA-256: ${autoBackupInfo.sha256.slice(0, 14)}...` : ''}`}
+            >
+              <CheckCircle2
+                className={`w-3.5 h-3.5 shrink-0 ${
+                  autoBackupInfo.status === 'error'
+                    ? 'text-red-700'
+                    : autoBackupInfo.status === 'syncing'
+                    ? 'text-amber-700 animate-spin'
+                    : 'text-emerald-700'
+                }`}
+              />
+              <span className="hidden xl:inline">
+                {autoBackupInfo.status === 'syncing'
+                  ? 'Auto-Backup Syncing...'
+                  : 'Live Auto-Backup Active'}
+              </span>
+              <span className="xl:hidden">Live Auto-Backup Active</span>
             </button>
 
             {/* High-Contrast Active Financial Year Badge */}
@@ -2211,19 +2871,64 @@ export default function App() {
               )}
             </div>
 
-            {/* Rotate Screen Button (Android/Tablet Landscape + Portrait) */}
+            {/* Admin PIN-Locked Voice Pilot: Speak + Language Toggle */}
+            <button
+              type="button"
+              onClick={handleVoiceSpeakClick}
+              className={`inline-flex items-center gap-1 px-2 py-1 rounded-lg border text-[11px] font-extrabold cursor-pointer shrink-0 ${
+                voiceListening
+                  ? 'border-rose-500 bg-rose-600 text-white animate-pulse'
+                  : isEffectiveMasterAdmin && voicePinUnlocked
+                  ? 'border-emerald-400 bg-emerald-50 text-emerald-900'
+                  : 'border-indigo-300 bg-indigo-50 hover:bg-indigo-100 text-indigo-900'
+              }`}
+              title={
+                isEffectiveMasterAdmin
+                  ? 'Admin Voice Pilot (Speak to open screen & fill draft fields)'
+                  : 'Staff Read-Only Voice Hints'
+              }
+            >
+              {voiceListening ? <Mic className="w-3.5 h-3.5" /> : <MicOff className="w-3.5 h-3.5" />}
+              <span>🎙️ বলুন / Speak</span>
+            </button>
+
+            <button
+              type="button"
+              onClick={handleCycleVoiceLang}
+              className="inline-flex items-center gap-1 px-2 py-1 rounded-lg border border-slate-300 bg-slate-50 hover:bg-slate-100 text-slate-800 text-[11px] font-extrabold cursor-pointer shrink-0"
+              title="Toggle Voice Pilot Language: বাংলা | English | OFF"
+            >
+              <span>
+                🎙️ Voice:{' '}
+                {voiceLang === 'bn' ? 'বাংলা' : voiceLang === 'en' ? 'English' : 'OFF'}
+              </span>
+            </button>
+
+            {/* Labeled Rotate Screen & Fullscreen Pills (Android/Tablet/Desktop) */}
             <button
               type="button"
               onClick={() => void handleToggleRotateScreen()}
-              className={`inline-flex items-center gap-1 px-2 py-1 rounded-lg border text-[11px] font-bold cursor-pointer shrink-0 ${
-                rotateMode !== 'auto'
-                  ? 'border-indigo-400 bg-indigo-50 text-indigo-800'
-                  : 'border-slate-200 bg-white hover:bg-slate-100 text-slate-700'
+              className={`inline-flex items-center gap-1 px-2 py-1 rounded-lg border text-[11px] font-extrabold cursor-pointer shrink-0 ${
+                rotateMode === 'landscape'
+                  ? 'border-indigo-500 bg-indigo-100 text-indigo-950'
+                  : 'border-slate-300 bg-white hover:bg-slate-100 text-slate-800'
               }`}
-              title="Rotate Landscape / Portrait View"
+              title="Rotate Landscape / Portrait View (with 90-deg fallback)"
             >
-              <RefreshCw className="w-3.5 h-3.5 text-indigo-700" />
-              <span className="hidden md:inline">Rotate</span>
+              <span>🔄 ঘোরান / Rotate</span>
+            </button>
+
+            <button
+              type="button"
+              onClick={() => void handleToggleFullscreen()}
+              className={`inline-flex items-center gap-1 px-2 py-1 rounded-lg border text-[11px] font-extrabold cursor-pointer shrink-0 ${
+                isFullscreen
+                  ? 'border-blue-500 bg-blue-50 text-blue-900'
+                  : 'border-slate-300 bg-white hover:bg-slate-100 text-slate-800'
+              }`}
+              title="Toggle Fullscreen Display"
+            >
+              <span>⛶ বড় স্ক্রিন / Fullscreen</span>
             </button>
 
             {/* Manual Screen Lock */}
@@ -2647,6 +3352,36 @@ export default function App() {
         </div>
       )}
 
+      {/* New-Device Login Security Alert Shield */}
+      {deviceTrust?.isNewDevice && !newDeviceBannerDismissed && (
+        <div className="bg-gradient-to-r from-slate-950 via-red-900 to-amber-900 text-white px-3 py-2 flex flex-wrap items-center justify-between gap-2 text-xs font-bold shadow no-print">
+          <div className="flex flex-wrap items-center gap-2 min-w-0">
+            <ShieldAlert className="w-4 h-4 text-amber-300 animate-pulse shrink-0" />
+            <span className="truncate">
+              New-Device Security Alert: {deviceTrust.deviceLabel} [{deviceTrust.deviceId}] detected for{' '}
+              {activeOperatorLabel}. Verify authorized access or change Admin PIN immediately.
+            </span>
+          </div>
+          <div className="flex items-center gap-2 shrink-0">
+            <button
+              type="button"
+              onClick={handleAcknowledgeNewDevice}
+              className="px-2.5 py-1 rounded bg-emerald-400 hover:bg-emerald-300 text-slate-950 font-extrabold cursor-pointer whitespace-nowrap"
+            >
+              Trust This Device
+            </button>
+            <button
+              type="button"
+              onClick={() => setNewDeviceBannerDismissed(true)}
+              className="p-1 rounded hover:bg-white/15 cursor-pointer"
+              aria-label="Dismiss new device alert"
+            >
+              <X className="w-4 h-4" />
+            </button>
+          </div>
+        </div>
+      )}
+
       {/* Main Body: Isolated Division Workspace (LOGISTICS / PTL / COURIER) OR FTL Sidebar + Multi-Tab Workspace */}
       <div className="flex-1 flex min-h-0 relative max-w-full">
         {businessMode !== 'FTL' ? (
@@ -2852,6 +3587,10 @@ export default function App() {
                 <div
                   key={t.id}
                   onClick={() => {
+                    if (t.id === 'backup' && !isBackupVaultUnlocked()) {
+                      requestProtectedTab('backup');
+                      return;
+                    }
                     if (t.id === 'dashboard') {
                       setDashboardFocusTx(false);
                       setBannerExpanded(false);
@@ -2862,6 +3601,10 @@ export default function App() {
                   tabIndex={0}
                   onKeyDown={(e) => {
                     if (e.key === 'Enter' || e.key === ' ') {
+                      if (t.id === 'backup' && !isBackupVaultUnlocked()) {
+                        requestProtectedTab('backup');
+                        return;
+                      }
                       if (t.id === 'dashboard') {
                         setDashboardFocusTx(false);
                         setBannerExpanded(false);
@@ -3160,6 +3903,12 @@ export default function App() {
                   manifests: logisticsManifests,
                   invoices: logisticsInvoices,
                   ledgers: logisticsLedgers,
+                }}
+                autoBackupInfo={autoBackupInfo}
+                deviceTrust={deviceTrust}
+                onAcknowledgeNewDevice={handleAcknowledgeNewDevice}
+                onManualSyncNow={async () => {
+                  await runSealedAutoBackup(true);
                 }}
                 onSwitchGmail={() => handleGoogleDriveConnect(true)}
                 onSwitchStaffSession={setActiveStaffSession}
@@ -3491,14 +4240,18 @@ export default function App() {
         </div>
       )}
 
-      {/* Admin PIN Verification Modal (Protects Staff Sheet Access Control) */}
+      {/* Admin PIN + 2FA OTP Verification Modal (Protects Backup Vault & Staff Sheet Access Control) */}
       {adminPinModalOpen && (
         <div className="fixed inset-0 z-[96] flex items-center justify-center bg-slate-900/65 p-4 no-print">
           <div className="w-full max-w-sm bg-white rounded-2xl border border-amber-300 shadow-2xl overflow-hidden text-xs">
             <div className="bg-gradient-to-r from-[#0D47A1] to-amber-700 text-white px-4 py-3 flex items-center justify-between">
               <div className="flex items-center gap-2">
                 <KeyRound className="w-4 h-4 text-amber-200" />
-                <h3 className="text-sm font-extrabold">Admin PIN Verification</h3>
+                <h3 className="text-sm font-extrabold">
+                  {pendingPinTargetTab === 'backup'
+                    ? 'Backup Vault PIN + 2FA OTP Lock'
+                    : 'Admin PIN Verification'}
+                </h3>
               </div>
               <button
                 type="button"
@@ -3506,6 +4259,7 @@ export default function App() {
                   setAdminPinModalOpen(false);
                   setPendingPinTargetTab(null);
                   setAdminPinInput('');
+                  setAdminPinOtpInput('');
                   setAdminPinError(null);
                 }}
                 className="p-1 rounded hover:bg-white/15 cursor-pointer"
@@ -3517,22 +4271,107 @@ export default function App() {
             <form
               onSubmit={(e) => {
                 e.preventDefault();
+                const target = pendingPinTargetTab || 'staffAccess';
+                if (target === 'voicePilot') {
+                  if (unlockVoicePilotWithPin(adminPinInput)) {
+                    setVoicePinUnlocked(true);
+                    setAdminPinModalOpen(false);
+                    setPendingPinTargetTab(null);
+                    setAdminPinInput('');
+                    setAdminPinOtpInput('');
+                    setAdminPinError(null);
+                    const readyMsg =
+                      voiceLang === 'bn'
+                        ? 'ভয়েস পাইলট আনলক হয়েছে। এখন বলুন বাটনে চাপ দিন।'
+                        : 'Admin Voice Pilot unlocked. Tap Speak now.';
+                    setVoiceFeedbackMsg(readyMsg);
+                    window.setTimeout(() => {
+                      playVerifiedBeep();
+                      speakCalmVoice(readyMsg, voiceLang === 'off' ? 'en' : voiceLang);
+                    }, 0);
+                  } else {
+                    playAlertBeep();
+                    setAdminPinError('Invalid Admin PIN for Voice Pilot unlock.');
+                  }
+                  return;
+                }
+                if (target === 'backup') {
+                  const res = unlockBackupVaultWithPinAndOtp({
+                    pin: adminPinInput,
+                    otp: adminPinOtpInput,
+                  });
+                  if (res.unlocked) {
+                    setAdminPinModalOpen(false);
+                    setPendingPinTargetTab(null);
+                    setAdminPinInput('');
+                    setAdminPinOtpInput('');
+                    setAdminPinError(null);
+                    openOrSwitchTab('backup');
+                    window.setTimeout(() => playVerifiedBeep(), 0);
+                  } else {
+                    playAlertBeep();
+                    setAdminPinError(res.error || 'Invalid Admin PIN or 2FA OTP.');
+                  }
+                  return;
+                }
                 if (verifyAdminPin(adminPinInput)) {
-                  const target = pendingPinTargetTab || 'staffAccess';
                   setAdminPinModalOpen(false);
                   setPendingPinTargetTab(null);
                   setAdminPinInput('');
+                  setAdminPinOtpInput('');
                   setAdminPinError(null);
                   openOrSwitchTab(target);
+                  window.setTimeout(() => playVerifiedBeep(), 0);
                 } else {
+                  playAlertBeep();
                   setAdminPinError('Invalid Admin PIN. Enter valid PIN (default: 1234).');
                 }
               }}
               className="p-4 space-y-3"
             >
               <p className="text-slate-600 leading-relaxed">
-                Enter your <strong>Admin Security PIN</strong> to unlock <strong>Staff Sheet Access Control</strong>. (PIN can be customized inside Admin Settings.)
+                {pendingPinTargetTab === 'voicePilot' ? (
+                  <>
+                    Enter your <strong>Master Admin PIN</strong> to unlock{' '}
+                    <strong>Bilingual Voice Pilot (বাংলা / English Draft Assistant)</strong>.
+                  </>
+                ) : pendingPinTargetTab === 'backup' ? (
+                  <>
+                    Enter your <strong>Master Admin PIN</strong> and <strong>6-digit 2FA OTP</strong> to unlock{' '}
+                    <strong>Backup / Restore Vault ({BACKUP_ISOLATED_DRIVE_EMAIL})</strong>.
+                  </>
+                ) : (
+                  <>
+                    Enter your <strong>Admin Security PIN</strong> to unlock{' '}
+                    <strong>Staff Sheet Access Control</strong>. (PIN can be customized inside Admin Settings.)
+                  </>
+                )}
               </p>
+              {pendingPinTargetTab === 'backup' && adminPinOtpChallenge && (
+                <div className="p-2.5 rounded-lg bg-indigo-50 border border-indigo-200 flex items-center justify-between gap-2">
+                  <div>
+                    <p className="text-[10px] font-bold uppercase text-indigo-700">
+                      Active 2FA Security OTP (5m TTL)
+                    </p>
+                    <p className="text-sm font-black font-mono-num tracking-widest text-indigo-950">
+                      {adminPinOtpChallenge.code}
+                    </p>
+                  </div>
+                  <button
+                    type="button"
+                    onClick={() =>
+                      setAdminPinOtpChallenge(
+                        issueTwoFactorOtpChallenge(
+                          `Backup / Restore Vault (${BACKUP_ISOLATED_DRIVE_EMAIL})`
+                        )
+                      )
+                    }
+                    className="px-2 py-1 rounded bg-white border border-indigo-300 text-indigo-800 text-[10px] font-bold hover:bg-indigo-100 cursor-pointer"
+                  >
+                    New OTP
+                  </button>
+                </div>
+              )}
               {adminPinError && (
                 <div className="p-2 rounded bg-red-50 border border-red-200 text-red-700 font-bold">
                   {adminPinError}
@@ -3546,11 +4385,26 @@ export default function App() {
                   setAdminPinInput(e.target.value);
                   setAdminPinError(null);
                 }}
-                placeholder="Enter Admin PIN (default: 1234)"
+                placeholder="Enter Master Admin PIN (default: 1234)"
                 autoFocus
                 required
                 className="w-full px-3 py-2 rounded-lg border border-slate-300 text-sm font-mono-num focus:outline-none focus:ring-2 focus:ring-blue-600"
               />
+              {pendingPinTargetTab === 'backup' && (
+                <input
+                  type="text"
+                  inputMode="numeric"
+                  maxLength={6}
+                  value={adminPinOtpInput}
+                  onChange={(e) => {
+                    setAdminPinOtpInput(e.target.value.replace(/\D/g, '').slice(0, 6));
+                    setAdminPinError(null);
+                  }}
+                  placeholder="Enter 6-digit 2FA OTP"
+                  required
+                  className="w-full px-3 py-2 rounded-lg border border-slate-300 text-sm font-mono-num tracking-widest focus:outline-none focus:ring-2 focus:ring-indigo-600"
+                />
+              )}
               <div className="flex items-center justify-end gap-2 pt-1">
                 <button
                   type="button"
@@ -3558,6 +4412,7 @@ export default function App() {
                     setAdminPinModalOpen(false);
                     setPendingPinTargetTab(null);
                     setAdminPinInput('');
+                    setAdminPinOtpInput('');
                     setAdminPinError(null);
                   }}
                   className="px-3 py-1.5 rounded-lg border border-slate-300 text-slate-700 font-bold hover:bg-slate-100 cursor-pointer"
@@ -3569,7 +4424,9 @@ export default function App() {
                   className="inline-flex items-center gap-1.5 px-4 py-1.5 rounded-lg bg-[#0D47A1] hover:bg-[#0A3882] text-white font-bold cursor-pointer"
                 >
                   <ShieldCheck className="w-3.5 h-3.5" />
-                  <span>Verify &amp; Unlock</span>
+                  <span>
+                    {pendingPinTargetTab === 'backup' ? 'Verify PIN + 2FA' : 'Verify & Unlock'}
+                  </span>
                 </button>
               </div>
             </form>
@@ -3742,7 +4599,7 @@ export default function App() {
               key={idx}
               className="text-[11px] font-black tracking-wider text-slate-900 uppercase whitespace-nowrap font-mono-num"
             >
-              {activeStaffCode} &bull; {activeStaffName} &bull; {activeOperationalBranch} &bull; {formattedClock}
+              {activeStaffCode} &bull; {activeStaffName} &bull; {activeOperationalBranch} &bull; <LiveClockText />
             </span>
           ))}
         </div>
@@ -3763,7 +4620,7 @@ export default function App() {
                 {privacyCurtainReason}
               </p>
               <p className="text-[11px] text-slate-400 font-mono-num">
-                Session: {activeOperatorLabel} &bull; {activeOperationalBranch} &bull; {formattedClock}
+                Session: {activeOperatorLabel} &bull; {activeOperationalBranch} &bull; <LiveClockText />
               </p>
             </div>
 
@@ -3839,11 +4696,15 @@ export default function App() {
         </div>
       )}
 
-      {/* Close App Overlay (Closes workspace without signing out) */}
+      {/* Close App Overlay (Closes workspace safely with All Data Backed Up verification) */}
       {appClosedOverlay && (
         <div className="fixed inset-0 z-[110] flex items-center justify-center bg-slate-950/95 p-4 no-print">
-          <div className="w-full max-w-sm bg-white rounded-2xl border border-slate-300 shadow-2xl p-6 text-center space-y-4">
+          <div className="w-full max-w-md bg-white rounded-2xl border border-slate-300 shadow-2xl p-6 text-center space-y-4">
             <DrcTriangleLogo className="w-16 h-16 mx-auto" />
+            <div className="inline-flex items-center gap-1.5 px-3 py-1 rounded-full bg-emerald-100 border border-emerald-300 text-emerald-900 text-xs font-extrabold">
+              <CheckCircle2 className="w-4 h-4 text-emerald-700 shrink-0" />
+              <span>✅ All Data Backed Up</span>
+            </div>
             <div>
               <h3 className="text-base font-extrabold text-slate-900">
                 DRC ERP Workspace Closed

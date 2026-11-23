@@ -8,6 +8,8 @@ import {
   FileCode2,
   FilePlus2,
   Lock,
+  Mail,
+  MessageSquare,
   Plus,
   Printer,
   QrCode,
@@ -75,6 +77,10 @@ import { downloadNicPartBJson, getEwayBillExpiryState, ParsedQrPayload } from '.
 import { filterBillingCustomerParties } from '../lib/partySeparation';
 import { CameraPodQrScannerModal } from './CameraPodQrScannerModal';
 import { playAlertBeep, playVerifiedBeep } from '../lib/audioFeedback';
+import { sharePdfDirect } from '../lib/shareUtils';
+import { SupportedCountry } from '../lib/postalPinLookup';
+import { VoiceDraftFields } from '../lib/voicePilot';
+import { PinCountryInputs, useAutoPinLookup } from './CityPinCountryAutoFill';
 import {
   EntityQuickPreviewCard,
   formatDriverDetailsLine,
@@ -166,14 +172,19 @@ const ConsignmentModuleInner: React.FC<ConsignmentModuleProps> = ({
   const [creditDaysOption, setCreditDaysOption] = useState<string>('');
   const [customCreditDays, setCustomCreditDays] = useState<string>('');
   const [validationError, setValidationError] = useState<string | null>(null);
+  const [shareStatusMsg, setShareStatusMsg] = useState<string | null>(null);
 
   const [consignorName, setConsignorName] = useState('');
   const [selectedConsignorId, setSelectedConsignorId] = useState('');
   const [consignorAddress, setConsignorAddress] = useState('');
+  const [consignorPinCode, setConsignorPinCode] = useState('');
+  const [consignorCountry, setConsignorCountry] = useState<SupportedCountry>('India');
   const [consignorGstin, setConsignorGstin] = useState('');
   const [consigneeName, setConsigneeName] = useState('');
   const [selectedConsigneeId, setSelectedConsigneeId] = useState('');
   const [consigneeAddress, setConsigneeAddress] = useState('');
+  const [consigneePinCode, setConsigneePinCode] = useState('');
+  const [consigneeCountry, setConsigneeCountry] = useState<SupportedCountry>('India');
   const [consigneeGstin, setConsigneeGstin] = useState('');
   const [packages, setPackages] = useState('');
   const [packageMode, setPackageMode] = useState('NOS');
@@ -207,6 +218,8 @@ const ConsignmentModuleInner: React.FC<ConsignmentModuleProps> = ({
   const [ewayBillNo, setEwayBillNo] = useState('');
   const [ewayBillDate, setEwayBillDate] = useState('');
   const [ewayBillValidUpto, setEwayBillValidUpto] = useState('');
+  const [ewayPlace, setEwayPlace] = useState('');
+  const [ewayPinCode, setEwayPinCode] = useState('');
   const [ewbQrModalOpen, setEwbQrModalOpen] = useState(false);
   const [ewbTrackerMsg, setEwbTrackerMsg] = useState<string | null>(null);
   const [extraTaxInvoices, setExtraTaxInvoices] = useState<ExtraTaxInvoice[]>([]);
@@ -220,9 +233,55 @@ const ConsignmentModuleInner: React.FC<ConsignmentModuleProps> = ({
   const [fromState, setFromState] = useState('19 - West Bengal');
   const [fromDistrict, setFromDistrict] = useState('Kolkata');
   const [fromCity, setFromCity] = useState('KOLKATA');
+  const [fromPinCode, setFromPinCode] = useState('700001');
+  const [fromCountry, setFromCountry] = useState<SupportedCountry>('India');
   const [toState, setToState] = useState('');
   const [toDistrict, setToDistrict] = useState('');
   const [toCity, setToCity] = useState('');
+  const [toPinCode, setToPinCode] = useState('');
+  const [toCountry, setToCountry] = useState<SupportedCountry>('India');
+
+  useAutoPinLookup(consignorAddress, consignorPinCode, consignorCountry, (pin, country) => {
+    setConsignorPinCode(pin);
+    setConsignorCountry(country);
+  });
+  useAutoPinLookup(consigneeAddress, consigneePinCode, consigneeCountry, (pin, country) => {
+    setConsigneePinCode(pin);
+    setConsigneeCountry(country);
+  });
+  useAutoPinLookup(fromCity, fromPinCode, fromCountry, (pin, country) => {
+    setFromPinCode(pin);
+    setFromCountry(country);
+  });
+  useAutoPinLookup(toCity, toPinCode, toCountry, (pin, country) => {
+    setToPinCode(pin);
+    setToCountry(country);
+    if (!ewayPlace.trim()) setEwayPinCode(pin);
+  });
+  useAutoPinLookup(ewayPlace, ewayPinCode, toCountry, (pin) => {
+    setEwayPinCode(pin);
+  });
+
+  useEffect(() => {
+    const onVoiceDraft = (evt: Event) => {
+      const detail = (evt as CustomEvent<VoiceDraftFields>).detail;
+      if (!detail) return;
+      if (detail.consignorName) setConsignorName(detail.consignorName);
+      if (detail.consigneeName) setConsigneeName(detail.consigneeName);
+      if (detail.partyName && !detail.consignorName) setBillingPartyName(detail.partyName);
+      if (detail.fromCity) setFromCity(detail.fromCity);
+      if (detail.toCity) setToCity(detail.toCity);
+      if (detail.truckNo) {
+        setHasVehicleNo(true);
+        setTruckNo(detail.truckNo);
+      }
+      if (detail.ewayBillNo) setEwayBillNo(detail.ewayBillNo);
+      if (detail.freight) setTotalFreight(detail.freight);
+      if (detail.goodsDesc) setParticulars(detail.goodsDesc);
+    };
+    window.addEventListener('drc:voice-draft-fill', onVoiceDraft);
+    return () => window.removeEventListener('drc:voice-draft-fill', onVoiceDraft);
+  }, []);
 
   const [engineNo, setEngineNo] = useState('');
   const [chassisNo, setChassisNo] = useState('');
@@ -901,9 +960,19 @@ const ConsignmentModuleInner: React.FC<ConsignmentModuleProps> = ({
     setFromState('19 - West Bengal');
     setFromDistrict('Kolkata');
     setFromCity('KOLKATA');
+    setFromPinCode('700001');
+    setFromCountry('India');
     setToState('');
     setToDistrict('');
     setToCity('');
+    setToPinCode('');
+    setToCountry('India');
+    setConsignorPinCode('');
+    setConsignorCountry('India');
+    setConsigneePinCode('');
+    setConsigneeCountry('India');
+    setEwayPlace('');
+    setEwayPinCode('');
     setEngineNo('');
     setChassisNo('');
     setOwnerName('');
@@ -959,9 +1028,13 @@ const ConsignmentModuleInner: React.FC<ConsignmentModuleProps> = ({
     setValidationError(null);
     setConsignorName(cn.consignorName || '');
     setConsignorAddress(cn.consignorAddress || '');
+    setConsignorPinCode(cn.consignorPinCode || '');
+    setConsignorCountry((cn.consignorCountry as SupportedCountry) || 'India');
     setConsignorGstin(cn.consignorGstin || '');
     setConsigneeName(cn.consigneeName || '');
     setConsigneeAddress(cn.consigneeAddress || '');
+    setConsigneePinCode(cn.consigneePinCode || '');
+    setConsigneeCountry((cn.consigneeCountry as SupportedCountry) || 'India');
     setConsigneeGstin(cn.consigneeGstin || '');
     setPackages(cn.packages || '');
     setPackageMode(cn.packageMode || 'NOS');
@@ -991,6 +1064,8 @@ const ConsignmentModuleInner: React.FC<ConsignmentModuleProps> = ({
     setEwayBillNo(cn.ewayBillNo || '');
     setEwayBillDate(cn.ewayBillDate || '');
     setEwayBillValidUpto(cn.ewayBillValidUpto || '');
+    setEwayPlace(cn.ewayPlace || '');
+    setEwayPinCode(cn.ewayPinCode || '');
     setEwbTrackerMsg(null);
     setExtraTaxInvoices(cn.extraTaxInvoices || []);
     setExtraEwayBills(cn.extraEwayBills || []);
@@ -1000,9 +1075,13 @@ const ConsignmentModuleInner: React.FC<ConsignmentModuleProps> = ({
     setFromState(cn.fromState || '19 - West Bengal');
     setFromDistrict(cn.fromDistrict || 'Kolkata');
     setFromCity(cn.fromCity || 'KOLKATA');
+    setFromPinCode(cn.fromPinCode || '');
+    setFromCountry((cn.fromCountry as SupportedCountry) || 'India');
     setToState(cn.toState || '');
     setToDistrict(cn.toDistrict || '');
     setToCity(cn.toCity || '');
+    setToPinCode(cn.toPinCode || '');
+    setToCountry((cn.toCountry as SupportedCountry) || 'India');
     setEngineNo(cn.engineNo || '');
     setChassisNo(cn.chassisNo || '');
     setOwnerName(cn.ownerName || '');
@@ -1081,9 +1160,13 @@ const ConsignmentModuleInner: React.FC<ConsignmentModuleProps> = ({
     creditDays: resolvedCreditDays,
     consignorName: consignorName.trim().slice(0, 180),
     consignorAddress: consignorAddress.trim().slice(0, 350),
+    consignorPinCode: consignorPinCode.trim(),
+    consignorCountry,
     consignorGstin: consignorGstin.trim().slice(0, 24),
     consigneeName: consigneeName.trim().slice(0, 180),
     consigneeAddress: consigneeAddress.trim().slice(0, 350),
+    consigneePinCode: consigneePinCode.trim(),
+    consigneeCountry,
     consigneeGstin: consigneeGstin.trim().slice(0, 24),
     packages: packages.trim().slice(0, 40),
     packageMode: packageMode.trim().slice(0, 60),
@@ -1144,6 +1227,8 @@ const ConsignmentModuleInner: React.FC<ConsignmentModuleProps> = ({
     ewayBillNo: ewayBillNo.trim().slice(0, 60),
     ewayBillDate: ewayBillDate.trim().slice(0, 20),
     ewayBillValidUpto: ewayBillValidUpto.trim().slice(0, 30),
+    ewayPlace: ewayPlace.trim().slice(0, 120),
+    ewayPinCode: ewayPinCode.trim().slice(0, 10),
     extraTaxInvoices: hasTaxInvoice
       ? extraTaxInvoices
           .filter((x) => x.no.trim())
@@ -1167,9 +1252,13 @@ const ConsignmentModuleInner: React.FC<ConsignmentModuleProps> = ({
     fromState: fromState.trim().slice(0, 80),
     fromDistrict: fromDistrict.trim().slice(0, 80),
     fromCity: (fromCity || fromDistrict).trim().slice(0, 120),
+    fromPinCode: fromPinCode.trim(),
+    fromCountry,
     toState: toState.trim().slice(0, 80),
     toDistrict: toDistrict.trim().slice(0, 80),
     toCity: (toCity || toDistrict).trim().slice(0, 120),
+    toPinCode: toPinCode.trim(),
+    toCountry,
     engineNo: hasVehicleNo ? engineNo.trim().slice(0, 40) : '',
     chassisNo: hasVehicleNo ? chassisNo.trim().slice(0, 40) : '',
     ownerName: hasVehicleNo ? ownerName.trim().slice(0, 140) : '',
@@ -1273,6 +1362,28 @@ const ConsignmentModuleInner: React.FC<ConsignmentModuleProps> = ({
     const pdf = await generateLR3CopyPDF(tempCn, company);
     onPreviewPdf(pdf, 'LR Copy');
   };
+
+  const handleShareCnPdf = useCallback(
+    async (cn: ConsignmentNote, channel: 'whatsapp' | 'email') => {
+      const targetParty = cn.billingPartyName || cn.consignorName || cn.consigneeName;
+      const partyRec = parties.find(
+        (p) => p.name.trim().toLowerCase() === (targetParty || '').trim().toLowerCase()
+      );
+      const pdf = await generateLR3CopyPDF(cn, company);
+      const res = await sharePdfDirect({
+        pdf,
+        channel,
+        phone: partyRec?.phone,
+        email: partyRec?.email,
+        partyName: targetParty,
+        docNo: cn.cnNo,
+        docLabel: 'LR',
+        company,
+      });
+      setShareStatusMsg(res.message);
+    },
+    [parties, company]
+  );
 
   const cnColumns = useMemo<Array<TableColumn<ConsignmentNote>>>(
     () => [
@@ -1402,6 +1513,22 @@ const ConsignmentModuleInner: React.FC<ConsignmentModuleProps> = ({
                 <Printer className="w-3 h-3" />
                 4-Copy
               </button>
+              <button
+                type="button"
+                onClick={() => void handleShareCnPdf(cn, 'whatsapp')}
+                className="inline-flex items-center gap-1 px-1.5 py-1 rounded bg-emerald-600 hover:bg-emerald-700 text-white text-[11px] font-bold cursor-pointer"
+                title="Share Real LR PDF on WhatsApp"
+              >
+                <MessageSquare className="w-3 h-3" />
+              </button>
+              <button
+                type="button"
+                onClick={() => void handleShareCnPdf(cn, 'email')}
+                className="inline-flex items-center gap-1 px-1.5 py-1 rounded bg-indigo-600 hover:bg-indigo-700 text-white text-[11px] font-bold cursor-pointer"
+                title="Share Real LR PDF via Email"
+              >
+                <Mail className="w-3 h-3" />
+              </button>
                 <button
                 type="button"
                 onClick={() => onSendCnToInvoice(cn)}
@@ -1453,7 +1580,7 @@ const ConsignmentModuleInner: React.FC<ConsignmentModuleProps> = ({
         },
       },
     ],
-    [company, isMasterAdmin, readOnly, onPreviewPdf, onSendCnToInvoice, onShowConfirm]
+    [company, isMasterAdmin, readOnly, onPreviewPdf, onSendCnToInvoice, onShowConfirm, handleShareCnPdf]
   );
 
   return (
@@ -1503,6 +1630,12 @@ const ConsignmentModuleInner: React.FC<ConsignmentModuleProps> = ({
             <p className="text-xs text-blue-800 font-semibold mt-1.5 flex items-center gap-1.5">
               <Usb className="w-3.5 h-3.5 shrink-0" />
               <span>{usbStatus}</span>
+            </p>
+          )}
+          {shareStatusMsg && (
+            <p className="text-xs text-emerald-800 font-semibold mt-1.5 flex items-center gap-1.5">
+              <CheckCircle2 className="w-3.5 h-3.5 shrink-0" />
+              <span>{shareStatusMsg}</span>
             </p>
           )}
           {ocrError && <p className="text-xs text-red-600 font-semibold mt-1.5">{ocrError}</p>}
@@ -1893,12 +2026,21 @@ const ConsignmentModuleInner: React.FC<ConsignmentModuleProps> = ({
             />
           </div>
           <div>
-            <label className="block font-semibold text-slate-700 mb-1">Consignor Address</label>
+            <label className="block font-semibold text-slate-700 mb-1">Consignor Address (Auto-fills PIN &amp; Country)</label>
             <input
               type="text"
               value={consignorAddress}
               onChange={(e) => setConsignorAddress(e.target.value)}
+              placeholder="City / Address (India, BD, Nepal, Bhutan)"
               className="w-full px-2.5 py-1.5 rounded border border-slate-300"
+            />
+            <PinCountryInputs
+              labelPrefix="Consignor"
+              pinCode={consignorPinCode}
+              country={consignorCountry}
+              onPinChange={setConsignorPinCode}
+              onCountryChange={setConsignorCountry}
+              compact
             />
           </div>
           <div>
@@ -1952,12 +2094,21 @@ const ConsignmentModuleInner: React.FC<ConsignmentModuleProps> = ({
             />
           </div>
           <div>
-            <label className="block font-semibold text-slate-700 mb-1">Consignee Address</label>
+            <label className="block font-semibold text-slate-700 mb-1">Consignee Address (Auto-fills PIN &amp; Country)</label>
             <input
               type="text"
               value={consigneeAddress}
               onChange={(e) => setConsigneeAddress(e.target.value)}
+              placeholder="City / Address (India, BD, Nepal, Bhutan)"
               className="w-full px-2.5 py-1.5 rounded border border-slate-300"
+            />
+            <PinCountryInputs
+              labelPrefix="Consignee"
+              pinCode={consigneePinCode}
+              country={consigneeCountry}
+              onPinChange={setConsigneePinCode}
+              onCountryChange={setConsigneeCountry}
+              compact
             />
           </div>
           <div>
@@ -2013,6 +2164,14 @@ const ConsignmentModuleInner: React.FC<ConsignmentModuleProps> = ({
                 onChange={(e) => setFromCity(e.target.value)}
                 className="w-full px-2.5 py-1.5 rounded border border-slate-300 bg-white"
               />
+              <PinCountryInputs
+                labelPrefix="From"
+                pinCode={fromPinCode}
+                country={fromCountry}
+                onPinChange={setFromPinCode}
+                onCountryChange={setFromCountry}
+                compact
+              />
             </div>
 
             <div>
@@ -2064,6 +2223,14 @@ const ConsignmentModuleInner: React.FC<ConsignmentModuleProps> = ({
                 }}
                 placeholder="SILIGURI / BIRGUNJ / DHAKA"
                 className="w-full px-2.5 py-1.5 rounded border border-slate-300 bg-white"
+              />
+              <PinCountryInputs
+                labelPrefix="To"
+                pinCode={toPinCode}
+                country={toCountry}
+                onPinChange={setToPinCode}
+                onCountryChange={setToCountry}
+                compact
               />
             </div>
           </div>
@@ -2810,6 +2977,24 @@ const ConsignmentModuleInner: React.FC<ConsignmentModuleProps> = ({
                 className="w-full px-2 py-1.5 rounded border border-slate-300 bg-white font-mono-num text-[11px]"
               />
             </div>
+            <div className="grid grid-cols-1 sm:grid-cols-2 gap-2">
+              <input
+                type="text"
+                value={ewayPlace}
+                onChange={(e) => setEwayPlace(e.target.value)}
+                placeholder="EWB Dispatch / ICP Place (e.g. Petrapole / Jaigaon / Raxaul)"
+                className="w-full px-2.5 py-1.5 rounded border border-slate-300 bg-white text-xs"
+              />
+              <input
+                type="text"
+                inputMode="numeric"
+                maxLength={6}
+                value={ewayPinCode}
+                onChange={(e) => setEwayPinCode(e.target.value.replace(/\D/g, '').slice(0, 6))}
+                placeholder="EWB PIN (Auto-Filled 6-digit)"
+                className="w-full px-2.5 py-1.5 rounded border border-emerald-400 bg-emerald-50/40 font-mono-num font-bold text-xs"
+              />
+            </div>
             {ewbTrackerMsg && (
               <p className="text-[11px] font-semibold text-emerald-800">{ewbTrackerMsg}</p>
             )}
@@ -3138,9 +3323,39 @@ const ConsignmentModuleInner: React.FC<ConsignmentModuleProps> = ({
             )}
             <button
               type="button"
+              onClick={() => {
+                if (!cnNo.trim() || !consignorName.trim()) {
+                  setValidationError('Enter C/N No and Consignor Name before sharing LR PDF.');
+                  return;
+                }
+                void handleShareCnPdf({ id: editingId || 'preview', ...buildPayload() }, 'whatsapp');
+              }}
+              className="inline-flex items-center gap-1.5 px-3 py-1.5 rounded-md bg-emerald-600 hover:bg-emerald-700 text-white text-xs font-bold cursor-pointer"
+              title="Share Real LR PDF on WhatsApp"
+            >
+              <MessageSquare className="w-3.5 h-3.5" />
+              <span>WhatsApp PDF</span>
+            </button>
+            <button
+              type="button"
+              onClick={() => {
+                if (!cnNo.trim() || !consignorName.trim()) {
+                  setValidationError('Enter C/N No and Consignor Name before sharing LR PDF.');
+                  return;
+                }
+                void handleShareCnPdf({ id: editingId || 'preview', ...buildPayload() }, 'email');
+              }}
+              className="inline-flex items-center gap-1.5 px-3 py-1.5 rounded-md bg-indigo-600 hover:bg-indigo-700 text-white text-xs font-bold cursor-pointer"
+              title="Share Real LR PDF via Email"
+            >
+              <Mail className="w-3.5 h-3.5" />
+              <span>Email PDF</span>
+            </button>
+            <button
+              type="button"
               disabled={saving || readOnly}
               onClick={(e) => void handleSave(e, true)}
-              className="inline-flex items-center gap-1.5 px-3.5 py-1.5 rounded-md bg-emerald-600 hover:bg-emerald-700 text-white text-xs font-bold cursor-pointer disabled:opacity-50"
+              className="inline-flex items-center gap-1.5 px-3.5 py-1.5 rounded-md bg-emerald-700 hover:bg-emerald-800 text-white text-xs font-bold cursor-pointer disabled:opacity-50"
             >
               <FilePlus2 className="w-3.5 h-3.5" />
               <span>Save &amp; Send to Bill</span>

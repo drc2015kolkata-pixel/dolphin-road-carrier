@@ -49,6 +49,8 @@ import { SearchableSelect } from './SearchableSelect';
 import { PAYMENT_MODE_OPTIONS, sortAlphaList } from '../lib/dropdownMasterStore';
 import { playAlertBeep, playVerifiedBeep } from '../lib/audioFeedback';
 import { validateSafeUploadFile } from '../lib/gstinValidator';
+import { PinCountryInputs, useAutoPinLookup } from './CityPinCountryAutoFill';
+import { SupportedCountry } from '../lib/postalPinLookup';
 
 interface LorryHirePodModuleProps {
   ownerUid: string;
@@ -204,7 +206,20 @@ const LorryHirePodModuleInner: React.FC<LorryHirePodModuleProps> = ({
   const [brokerName, setBrokerName] = useState('');
   const [selectedBrokerId, setSelectedBrokerId] = useState('');
   const [fromCity, setFromCity] = useState('KOLKATA');
+  const [fromPinCode, setFromPinCode] = useState('700001');
+  const [fromCountry, setFromCountry] = useState<SupportedCountry>('India');
   const [toCity, setToCity] = useState('');
+  const [toPinCode, setToPinCode] = useState('');
+  const [toCountry, setToCountry] = useState<SupportedCountry>('India');
+
+  useAutoPinLookup(fromCity, fromPinCode, fromCountry, (pin, country) => {
+    setFromPinCode(pin);
+    setFromCountry(country);
+  });
+  useAutoPinLookup(toCity, toPinCode, toCountry, (pin, country) => {
+    setToPinCode(pin);
+    setToCountry(country);
+  });
   const [weightMt, setWeightMt] = useState('');
   const [rateMode, setRateMode] = useState<'Fixed' | 'Per MT'>('Fixed');
   const [ratePerUnit, setRatePerUnit] = useState('');
@@ -392,7 +407,11 @@ const LorryHirePodModuleInner: React.FC<LorryHirePodModuleProps> = ({
     setBrokerName('');
     setSelectedBrokerId('');
     setFromCity('KOLKATA');
+    setFromPinCode('700001');
+    setFromCountry('India');
     setToCity('');
+    setToPinCode('');
+    setToCountry('India');
     setWeightMt('');
     setRateMode('Fixed');
     setRatePerUnit('');
@@ -428,7 +447,15 @@ const LorryHirePodModuleInner: React.FC<LorryHirePodModuleProps> = ({
     setOwnerName(h.ownerName || '');
     setBrokerName(h.brokerName || '');
     setFromCity(h.fromCity || 'KOLKATA');
+    setFromPinCode(h.fromPinCode || '');
+    setFromCountry(
+      (h.fromCountry as SupportedCountry) || 'India'
+    );
     setToCity(h.toCity || '');
+    setToPinCode(h.toPinCode || '');
+    setToCountry(
+      (h.toCountry as SupportedCountry) || 'India'
+    );
     setWeightMt(h.weightMt != null ? String(h.weightMt) : '');
     setRateMode(h.rateMode === 'Per MT' ? 'Per MT' : 'Fixed');
     setRatePerUnit(h.ratePerUnit != null ? String(h.ratePerUnit) : '');
@@ -508,7 +535,11 @@ const LorryHirePodModuleInner: React.FC<LorryHirePodModuleProps> = ({
           ownerName: ownerName.trim().slice(0, 140),
           brokerName: brokerName.trim().slice(0, 140),
           fromCity: fromCity.trim().slice(0, 120),
+          fromPinCode: fromPinCode.trim(),
+          fromCountry,
           toCity: toCity.trim().slice(0, 120),
+          toPinCode: toPinCode.trim(),
+          toCountry,
           weightMt: Number(weightMt) || 0,
           rateMode,
           ratePerUnit: Number(ratePerUnit) || 0,
@@ -806,6 +837,8 @@ const LorryHirePodModuleInner: React.FC<LorryHirePodModuleProps> = ({
         totalsLabel: 'NET PAYABLE BALANCE IN RUPEES :',
         totalsLine1: ['', '', `Total Deductions: ${formatINR(totalDed)}`, formatINR(h.balancePayable)],
         totalAmountForWords: h.balancePayable,
+        legalNotice:
+          'INDEMNITY CLAUSE: 100% Leakage, Breakage, Wet Damage & Shortage Indemnity by Lorry Owner & Broker (Indian Contract Act Sec 124). Transporter liability NIL; full shortage, wet/leakage damage & delay claim recoverable from Lorry Hire balance & security.',
       },
       effectiveCompany,
       'p'
@@ -1298,6 +1331,14 @@ const LorryHirePodModuleInner: React.FC<LorryHirePodModuleProps> = ({
                 onChange={(e) => setFromCity(e.target.value)}
                 className="w-full px-2.5 py-1.5 rounded border border-slate-300"
               />
+              <PinCountryInputs
+                labelPrefix="From"
+                pinCode={fromPinCode}
+                country={fromCountry}
+                onPinChange={setFromPinCode}
+                onCountryChange={setFromCountry}
+                compact
+              />
             </div>
             <div>
               <label className="block font-semibold text-slate-700 mb-1">To</label>
@@ -1306,6 +1347,14 @@ const LorryHirePodModuleInner: React.FC<LorryHirePodModuleProps> = ({
                 value={toCity}
                 onChange={(e) => setToCity(e.target.value)}
                 className="w-full px-2.5 py-1.5 rounded border border-slate-300"
+              />
+              <PinCountryInputs
+                labelPrefix="To"
+                pinCode={toPinCode}
+                country={toCountry}
+                onPinChange={setToPinCode}
+                onCountryChange={setToCountry}
+                compact
               />
             </div>
             <div>
@@ -1343,7 +1392,11 @@ const LorryHirePodModuleInner: React.FC<LorryHirePodModuleProps> = ({
                   if (rateMode === 'Per MT') {
                     const wt = Number(e.target.value) || 0;
                     const rt = Number(ratePerUnit) || 0;
-                    if (wt > 0 && rt > 0) setHireAmount(String(Math.round(wt * rt * 100) / 100));
+                    if (wt > 0 && rt > 0) {
+                      const nextHire = Math.round(wt * rt * 100) / 100;
+                      setHireAmount(String(nextHire));
+                      if (Number(tdsRatePct) > 0) handleTdsPctChange(tdsRatePct, nextHire);
+                    }
                   }
                 }}
                 placeholder="20.00"
@@ -1360,7 +1413,11 @@ const LorryHirePodModuleInner: React.FC<LorryHirePodModuleProps> = ({
                   if (m === 'Per MT') {
                     const wt = Number(weightMt) || 0;
                     const rt = Number(ratePerUnit) || 0;
-                    if (wt > 0 && rt > 0) setHireAmount(String(Math.round(wt * rt * 100) / 100));
+                    if (wt > 0 && rt > 0) {
+                      const nextHire = Math.round(wt * rt * 100) / 100;
+                      setHireAmount(String(nextHire));
+                      if (Number(tdsRatePct) > 0) handleTdsPctChange(tdsRatePct, nextHire);
+                    }
                   }
                 }}
                 className="w-full px-2 py-1.5 rounded border border-slate-300 bg-white font-semibold"
@@ -1381,7 +1438,11 @@ const LorryHirePodModuleInner: React.FC<LorryHirePodModuleProps> = ({
                   if (rateMode === 'Per MT') {
                     const wt = Number(weightMt) || 0;
                     const rt = Number(e.target.value) || 0;
-                    if (wt > 0 && rt > 0) setHireAmount(String(Math.round(wt * rt * 100) / 100));
+                    if (wt > 0 && rt > 0) {
+                      const nextHire = Math.round(wt * rt * 100) / 100;
+                      setHireAmount(String(nextHire));
+                      if (Number(tdsRatePct) > 0) handleTdsPctChange(tdsRatePct, nextHire);
+                    }
                   }
                 }}
                 className="w-full px-2 py-1.5 rounded border border-slate-300 bg-white font-mono-num"
@@ -1617,7 +1678,8 @@ const LorryHirePodModuleInner: React.FC<LorryHirePodModuleProps> = ({
                           )
                         }
                         options={sortAlphaList(
-                          !accountBankOptions.includes(adv.accountName) && adv.accountName
+                          adv.accountName &&
+                            !accountBankOptions.some((o) => o.toLowerCase() === adv.accountName.toLowerCase())
                             ? [...accountBankOptions, adv.accountName]
                             : accountBankOptions
                         ).map((opt) => ({ value: opt, label: opt }))}

@@ -20,9 +20,14 @@ import firebaseConfig from '../../firebase-applet-config.json';
 export const DRIVE_SCOPE = 'https://www.googleapis.com/auth/drive.file';
 export const DRIVE_APPDATA_SCOPE = 'https://www.googleapis.com/auth/drive.appdata';
 export const MASTER_ADMIN_EMAIL = 'drc.2015kolkata@gmail.com';
-export const BACKUP_ISOLATED_DRIVE_EMAIL = 'drc.kolkata2015@gmail.com';
+export const BACKUP_ISOLATED_DRIVE_EMAIL = 'drc.2015kolkata@gmail.com';
 export const OFFICIAL_PARTY_EMAIL = 'drc.kolkata1@gmail.com';
 export const VERCEL_APP_DOMAIN = 'dolphin-road-carrier.vercel.app';
+
+export function isAuthorizedBackupDriveEmail(email?: string | null): boolean {
+  const clean = String(email || '').trim().toLowerCase();
+  return clean === MASTER_ADMIN_EMAIL.toLowerCase();
+}
 export const ALLOWLISTED_OAUTH_DOMAINS = [
   VERCEL_APP_DOMAIN,
   'dolphin-road-carrier.firebaseapp.com',
@@ -86,9 +91,10 @@ function createProvider(forceSelectAccount = false): GoogleAuthProvider {
   const provider = new GoogleAuthProvider();
   provider.addScope(DRIVE_SCOPE);
   provider.addScope(DRIVE_APPDATA_SCOPE);
-  if (forceSelectAccount) {
-    provider.setCustomParameters({ prompt: 'select_account' });
-  }
+  provider.setCustomParameters({
+    login_hint: MASTER_ADMIN_EMAIL,
+    ...(forceSelectAccount ? { prompt: 'select_account' } : {}),
+  });
   return provider;
 }
 
@@ -184,6 +190,15 @@ export async function googleSignIn(forceAccountSelect = false): Promise<{
     isSigningIn = true;
     const provider = createProvider(forceAccountSelect);
     const result = await signInWithPopup(auth, provider);
+    const signedEmail = (result.user.email || '').trim().toLowerCase();
+    if (!isAuthorizedBackupDriveEmail(signedEmail)) {
+      cachedAccessToken = null;
+      connectedGmailEmail = null;
+      await auth.signOut().catch(() => {});
+      throw new Error(
+        `Drive Sync/Restore Blocked: Authorized strictly for ${MASTER_ADMIN_EMAIL} (attempted: ${result.user.email || 'unknown account'}).`
+      );
+    }
     const credential = GoogleAuthProvider.credentialFromResult(result);
     cachedAccessToken = credential?.accessToken ?? null;
     connectedGmailEmail = result.user.email ?? null;

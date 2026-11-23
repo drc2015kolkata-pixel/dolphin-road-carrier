@@ -53,6 +53,8 @@ import {
 import { playAlertBeep, playVerifiedBeep } from '../lib/audioFeedback';
 import { validateIndianGstin } from '../lib/gstinValidator';
 import { GstinInputField } from './GstinInputField';
+import { PinCountryInputs, useAutoPinLookup } from './CityPinCountryAutoFill';
+import { resolvePinSync, SupportedCountry } from '../lib/postalPinLookup';
 
 interface LogisticsDocketManifestPanelProps {
   divisionMode?: LogisticsDivisionCode;
@@ -136,17 +138,25 @@ export const LogisticsDocketManifestPanel: React.FC<LogisticsDocketManifestPanel
   const [docketDate, setDocketDate] = useState(today);
   const [billedAtBranch, setBilledAtBranch] = useState<string>(defaultOrigin);
   const [originBranch, setOriginBranch] = useState<string>(defaultOrigin);
+  const [originPinCode, setOriginPinCode] = useState('700001');
+  const [originCountry, setOriginCountry] = useState<SupportedCountry>('India');
   const [destBranch, setDestBranch] = useState<string>('SILIGURI');
+  const [destPinCode, setDestPinCode] = useState('734001');
+  const [destCountry, setDestCountry] = useState<SupportedCountry>('India');
   const [deliveryMode, setDeliveryMode] = useState<'Door Delivery' | 'Godown Delivery'>('Godown Delivery');
   const [payMode, setPayMode] = useState<'Paid' | 'To-Pay' | 'TBB'>('TBB');
 
   const [consignorName, setConsignorName] = useState('');
   const [selectedConsignorId, setSelectedConsignorId] = useState('');
   const [consignorAddress, setConsignorAddress] = useState('');
+  const [consignorPinCode, setConsignorPinCode] = useState('');
+  const [consignorCountry, setConsignorCountry] = useState<SupportedCountry>('India');
   const [consignorGstin, setConsignorGstin] = useState('');
   const [consigneeName, setConsigneeName] = useState('');
   const [selectedConsigneeId, setSelectedConsigneeId] = useState('');
   const [consigneeAddress, setConsigneeAddress] = useState('');
+  const [consigneePinCode, setConsigneePinCode] = useState('');
+  const [consigneeCountry, setConsigneeCountry] = useState<SupportedCountry>('India');
   const [consigneeGstin, setConsigneeGstin] = useState('');
   const [billingPartyName, setBillingPartyName] = useState('');
 
@@ -166,8 +176,30 @@ export const LogisticsDocketManifestPanel: React.FC<LogisticsDocketManifestPanel
   const [reverseCharge, setReverseCharge] = useState(true);
   const [ewayBillNo, setEwayBillNo] = useState('');
   const [ewayBillValidUpto, setEwayBillValidUpto] = useState('');
+  const [ewayPlace, setEwayPlace] = useState('');
+  const [ewayPinCode, setEwayPinCode] = useState('');
   const [valueOfGoods, setValueOfGoods] = useState('0');
   const [godownRack, setGodownRack] = useState('BAY-A1');
+
+  useAutoPinLookup(originBranch, originPinCode, originCountry, (pin, country) => {
+    setOriginPinCode(pin);
+    setOriginCountry(country);
+  });
+  useAutoPinLookup(destBranch, destPinCode, destCountry, (pin, country) => {
+    setDestPinCode(pin);
+    setDestCountry(country);
+  });
+  useAutoPinLookup(consignorAddress, consignorPinCode, consignorCountry, (pin, country) => {
+    setConsignorPinCode(pin);
+    setConsignorCountry(country);
+  });
+  useAutoPinLookup(consigneeAddress, consigneePinCode, consigneeCountry, (pin, country) => {
+    setConsigneePinCode(pin);
+    setConsigneeCountry(country);
+  });
+  useAutoPinLookup(ewayPlace || originBranch, ewayPinCode, 'India', (pin, country) => {
+    if (country === 'India') setEwayPinCode(pin);
+  });
   const [remarks, setRemarks] = useState('');
   const [docketSearch, setDocketSearch] = useState('');
   const [docketSaving, setDocketSaving] = useState(false);
@@ -257,7 +289,13 @@ export const LogisticsDocketManifestPanel: React.FC<LogisticsDocketManifestPanel
   const handlePickConsignorEntity = (found: LogisticsParty) => {
     setConsignorName(found.name);
     setSelectedConsignorId(found.id);
-    setConsignorAddress(found.address || '');
+    const addr = found.address || '';
+    const pinHit = resolvePinSync(addr);
+    setConsignorAddress(addr);
+    setConsignorPinCode(found.pinCode || pinHit?.pinCode || '');
+    setConsignorCountry(
+      (found.country as SupportedCountry) || pinHit?.country || 'India'
+    );
     setConsignorGstin(found.gstin || '');
     if (payMode === 'TBB' && !billingPartyName) {
       setBillingPartyName(found.name);
@@ -280,7 +318,13 @@ export const LogisticsDocketManifestPanel: React.FC<LogisticsDocketManifestPanel
   const handlePickConsigneeEntity = (found: LogisticsParty) => {
     setConsigneeName(found.name);
     setSelectedConsigneeId(found.id);
-    setConsigneeAddress(found.address || '');
+    const addr = found.address || '';
+    const pinHit = resolvePinSync(addr);
+    setConsigneeAddress(addr);
+    setConsigneePinCode(found.pinCode || pinHit?.pinCode || '');
+    setConsigneeCountry(
+      (found.country as SupportedCountry) || pinHit?.country || 'India'
+    );
     setConsigneeGstin(found.gstin || '');
   };
 
@@ -303,14 +347,20 @@ export const LogisticsDocketManifestPanel: React.FC<LogisticsDocketManifestPanel
     setConsignorName('');
     setSelectedConsignorId('');
     setConsignorAddress('');
+    setConsignorPinCode('');
+    setConsignorCountry('India');
     setConsignorGstin('');
     setConsigneeName('');
     setSelectedConsigneeId('');
     setConsigneeAddress('');
+    setConsigneePinCode('');
+    setConsigneeCountry('India');
     setConsigneeGstin('');
     setBillingPartyName('');
     setEwayBillNo('');
     setEwayBillValidUpto('');
+    setEwayPlace('');
+    setEwayPinCode('');
     setValueOfGoods('0');
     setRemarks('');
   };
@@ -345,14 +395,22 @@ export const LogisticsDocketManifestPanel: React.FC<LogisticsDocketManifestPanel
         financialYear: normalizeFyLabel(activeFy),
         billedAtBranch: billedAtBranch.trim() || originBranch,
         originBranch,
+        originPinCode: originPinCode.trim(),
+        originCountry,
         destBranch,
+        destPinCode: destPinCode.trim(),
+        destCountry,
         deliveryMode,
         payMode,
         consignorName: consignorName.trim(),
         consignorAddress: consignorAddress.trim(),
+        consignorPinCode: consignorPinCode.trim(),
+        consignorCountry,
         consignorGstin: consignorGstin.trim().toUpperCase(),
         consigneeName: consigneeName.trim(),
         consigneeAddress: consigneeAddress.trim(),
+        consigneePinCode: consigneePinCode.trim(),
+        consigneeCountry,
         consigneeGstin: consigneeGstin.trim().toUpperCase(),
         billingPartyName: (billingPartyName || consignorName).trim(),
         packages: Math.max(1, Number(packages) || 1),
@@ -375,6 +433,8 @@ export const LogisticsDocketManifestPanel: React.FC<LogisticsDocketManifestPanel
         totalAmount: docketTotals.totalAmount,
         ewayBillNo: ewayBillNo.trim(),
         ewayBillValidUpto: ewayBillValidUpto.trim(),
+        ewayPlace: ewayPlace.trim(),
+        ewayPinCode: ewayPinCode.trim(),
         valueOfGoods: Number(valueOfGoods) || 0,
         stockStage: existing?.stockStage || 'Origin Godown',
         godownRack: godownRack.trim() || 'BAY-A1',
@@ -402,14 +462,22 @@ export const LogisticsDocketManifestPanel: React.FC<LogisticsDocketManifestPanel
     setDocketDate(d.docketDate);
     setBilledAtBranch(d.billedAtBranch || d.originBranch || defaultOrigin);
     setOriginBranch(d.originBranch);
+    setOriginPinCode(d.originPinCode || '');
+    setOriginCountry((d.originCountry as SupportedCountry) || 'India');
     setDestBranch(d.destBranch);
+    setDestPinCode(d.destPinCode || '');
+    setDestCountry((d.destCountry as SupportedCountry) || 'India');
     setDeliveryMode(d.deliveryMode);
     setPayMode(d.payMode);
     setConsignorName(d.consignorName);
     setConsignorAddress(d.consignorAddress || '');
+    setConsignorPinCode(d.consignorPinCode || '');
+    setConsignorCountry((d.consignorCountry as SupportedCountry) || 'India');
     setConsignorGstin(d.consignorGstin || '');
     setConsigneeName(d.consigneeName);
     setConsigneeAddress(d.consigneeAddress || '');
+    setConsigneePinCode(d.consigneePinCode || '');
+    setConsigneeCountry((d.consigneeCountry as SupportedCountry) || 'India');
     setConsigneeGstin(d.consigneeGstin || '');
     setBillingPartyName(d.billingPartyName || '');
     setPackages(String(d.packages || 1));
@@ -427,6 +495,8 @@ export const LogisticsDocketManifestPanel: React.FC<LogisticsDocketManifestPanel
     setGstRate(String(d.gstRate || 5));
     setEwayBillNo(d.ewayBillNo || '');
     setEwayBillValidUpto(d.ewayBillValidUpto || '');
+    setEwayPlace(d.ewayPlace || '');
+    setEwayPinCode(d.ewayPinCode || '');
     setValueOfGoods(String(d.valueOfGoods || 0));
     setGodownRack(d.godownRack || 'BAY-A1');
     setRemarks(d.remarks || '');
@@ -703,6 +773,14 @@ export const LogisticsDocketManifestPanel: React.FC<LogisticsDocketManifestPanel
                     triggerClassName="!py-1.5 !font-semibold"
                     searchPlaceholder="Search origin hub..."
                   />
+                  <PinCountryInputs
+                    labelPrefix="Origin"
+                    pinCode={originPinCode}
+                    country={originCountry}
+                    onPinChange={setOriginPinCode}
+                    onCountryChange={setOriginCountry}
+                    compact
+                  />
                 </div>
                 <div>
                   <label className="block text-[11px] font-bold text-slate-600 mb-0.5">Dest Hub</label>
@@ -713,6 +791,14 @@ export const LogisticsDocketManifestPanel: React.FC<LogisticsDocketManifestPanel
                     options={HUB_BRANCHES}
                     triggerClassName="!py-1.5 !font-semibold"
                     searchPlaceholder="Search dest hub..."
+                  />
+                  <PinCountryInputs
+                    labelPrefix="Dest"
+                    pinCode={destPinCode}
+                    country={destCountry}
+                    onPinChange={setDestPinCode}
+                    onCountryChange={setDestCountry}
+                    compact
                   />
                 </div>
                 <div>
@@ -788,7 +874,20 @@ export const LogisticsDocketManifestPanel: React.FC<LogisticsDocketManifestPanel
                       );
                     })()}
                   />
-                  <div className="mt-1">
+                  <div className="mt-1 space-y-1">
+                    <input
+                      value={consignorAddress}
+                      onChange={(e) => setConsignorAddress(e.target.value)}
+                      placeholder="Consignor Address / City (auto-fills PIN)"
+                      className="w-full px-2 py-1 rounded border border-slate-300 text-[11px]"
+                    />
+                    <PinCountryInputs
+                      pinCode={consignorPinCode}
+                      country={consignorCountry}
+                      onPinChange={setConsignorPinCode}
+                      onCountryChange={setConsignorCountry}
+                      compact
+                    />
                     <GstinInputField
                       label="Consignor GSTIN"
                       value={consignorGstin}
@@ -839,7 +938,20 @@ export const LogisticsDocketManifestPanel: React.FC<LogisticsDocketManifestPanel
                       );
                     })()}
                   />
-                  <div className="mt-1">
+                  <div className="mt-1 space-y-1">
+                    <input
+                      value={consigneeAddress}
+                      onChange={(e) => setConsigneeAddress(e.target.value)}
+                      placeholder="Consignee Address / City (auto-fills PIN)"
+                      className="w-full px-2 py-1 rounded border border-slate-300 text-[11px]"
+                    />
+                    <PinCountryInputs
+                      pinCode={consigneePinCode}
+                      country={consigneeCountry}
+                      onPinChange={setConsigneePinCode}
+                      onCountryChange={setConsigneeCountry}
+                      compact
+                    />
                     <GstinInputField
                       label="Consignee GSTIN"
                       value={consigneeGstin}
@@ -965,7 +1077,7 @@ export const LogisticsDocketManifestPanel: React.FC<LogisticsDocketManifestPanel
                 </div>
               </div>
 
-              <div className="grid grid-cols-3 gap-2 items-end">
+              <div className="grid grid-cols-2 sm:grid-cols-5 gap-2 items-end">
                 <div>
                   <label className="block text-[11px] font-bold text-slate-600 mb-0.5">E-Way Bill No</label>
                   <input
@@ -982,6 +1094,27 @@ export const LogisticsDocketManifestPanel: React.FC<LogisticsDocketManifestPanel
                     value={ewayBillValidUpto}
                     onChange={(e) => setEwayBillValidUpto(e.target.value)}
                     className="w-full px-2 py-1.5 rounded border border-slate-300 text-[11px]"
+                  />
+                </div>
+                <div>
+                  <label className="block text-[11px] font-bold text-slate-600 mb-0.5">Dispatch Place</label>
+                  <input
+                    value={ewayPlace}
+                    onChange={(e) => setEwayPlace(e.target.value)}
+                    placeholder={originBranch || 'Kolkata'}
+                    className="w-full px-2 py-1.5 rounded border border-slate-300 text-[11px]"
+                  />
+                </div>
+                <div>
+                  <label className="block text-[11px] font-bold text-slate-600 mb-0.5">EWB Dispatch PIN</label>
+                  <input
+                    type="text"
+                    inputMode="numeric"
+                    maxLength={6}
+                    value={ewayPinCode}
+                    onChange={(e) => setEwayPinCode(e.target.value.replace(/\D/g, '').slice(0, 6))}
+                    placeholder="700001"
+                    className="w-full px-2 py-1.5 rounded border border-emerald-300 bg-emerald-50/40 font-mono-num font-bold text-emerald-900 text-[11px]"
                   />
                 </div>
                 <div>

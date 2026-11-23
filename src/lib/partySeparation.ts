@@ -207,7 +207,13 @@ export function filterBillingCustomerParties(params: {
     const key = normalizePartyMatchKey(p.name);
     if (!key) continue;
 
-    const isProtectedCustomer = knownInvoiceOrCnCustomers.has(key);
+    // Never reclassify/exclude explicit HEAD / PARTY / ACCT DBF customers or explicit 'Customer' role rows
+    const isFromHeadDbf =
+      p.id.startsWith('dbf_head_') ||
+      p.id.startsWith('dbf_party_') ||
+      p.id.startsWith('dbf_acct_');
+    const isProtectedCustomer =
+      isFromHeadDbf || p.partyType === 'Customer' || knownInvoiceOrCnCustomers.has(key);
     const hasGstin = Boolean(p.gstin && p.gstin.trim().length >= 10);
 
     if (!isProtectedCustomer) {
@@ -395,22 +401,25 @@ export function analyzeAndSeparateMisclassifiedParties(params: {
       continue;
     }
 
+    const isFromHeadDbf =
+      p.id.startsWith('dbf_head_') ||
+      p.id.startsWith('dbf_party_') ||
+      p.id.startsWith('dbf_acct_');
     const isCustomerTagged = isBillingCustomerType(p.partyType);
     const hasGstin = Boolean(p.gstin && p.gstin.trim().length >= 10);
-    const isProtected = protectedCustomerKeys.has(key);
+    const isProtected = isFromHeadDbf || protectedCustomerKeys.has(key);
 
-    // 1. Check Broker classification
+    // 1. Check Broker classification (Never reclassify HEAD/PARTY/ACCT customers to Broker)
     const shouldBeBroker =
-      p.id.startsWith('dbf_brk_') ||
-      p.id.startsWith('brk_') ||
-      (isCustomerTagged && brokerKeys.has(key)) ||
-      (isCustomerTagged && !isProtected && BROKER_NAME_REGEX.test(p.name)) ||
-      (isCustomerTagged && !isProtected && !hasGstin && isKnownTransportBrokerName(p.name));
+      !isFromHeadDbf &&
+      (p.id.startsWith('dbf_brk_') ||
+        p.id.startsWith('brk_') ||
+        (isCustomerTagged && !isProtected && BROKER_NAME_REGEX.test(p.name)) ||
+        (isCustomerTagged && !isProtected && !hasGstin && brokerKeys.has(key)));
 
     if (shouldBeBroker) {
       const existingBroker = canonicalBrokers.get(key);
       if (existingBroker && existingBroker.id !== p.id) {
-        // Merge details from duplicate customer-tagged row into canonical broker row and mark dup for removal
         const merged = mergePartyFields(existingBroker, p);
         canonicalBrokers.set(key, merged);
         updatedMap.set(merged.id, merged);
@@ -437,14 +446,15 @@ export function analyzeAndSeparateMisclassifiedParties(params: {
       continue;
     }
 
-    // 2. Check Vehicle Owner classification
+    // 2. Check Vehicle Owner classification (Never reclassify HEAD/PARTY/ACCT customers to TruckOwner)
     const shouldBeOwner =
-      p.id.startsWith('dbf_own_') ||
-      p.id.startsWith('own_') ||
-      (isCustomerTagged &&
-        !isProtected &&
-        !hasGstin &&
-        (ownerKeys.has(key) || OWNER_NAME_REGEX.test(p.name)));
+      !isFromHeadDbf &&
+      (p.id.startsWith('dbf_own_') ||
+        p.id.startsWith('own_') ||
+        (isCustomerTagged &&
+          !isProtected &&
+          !hasGstin &&
+          (ownerKeys.has(key) || OWNER_NAME_REGEX.test(p.name))));
 
     if (shouldBeOwner) {
       const existingOwner = canonicalOwners.get(key);
@@ -475,22 +485,15 @@ export function analyzeAndSeparateMisclassifiedParties(params: {
       continue;
     }
 
-    // 3. Check Driver-named ledger accidentally tagged as Customer (without GSTIN or Customer Invoices)
+    // 3. Check Driver-named ledger accidentally tagged as Customer (without HEAD source, GSTIN or Customer Invoices)
     const isDriverLedger =
+      !isFromHeadDbf &&
       isCustomerTagged &&
       !isProtected &&
       !hasGstin &&
       (driverKeys.has(key) || DRIVER_NAME_REGEX.test(p.name));
 
     if (isDriverLedger) {
-      const zeroBalances =
-        Math.abs(Number(p.openingBalance || 0)) === 0 &&
-        Math.abs(Number(p.currentBalance || 0)) === 0;
-      if (zeroBalances && p.id.startsWith('dbf_head_')) {
-        duplicateIds.add(p.id);
-        driversSeparated += 1;
-        continue;
-      }
       const reclassified: Party = {
         ...p,
         partyType: 'Vendor',
@@ -514,5 +517,33 @@ export function analyzeAndSeparateMisclassifiedParties(params: {
     ownersSeparated,
     driversSeparated,
     duplicatesMerged,
+  };
+}
+
+/**
+ * Restores any HEAD / PARTY / ACCT FoxPro customer records that were mistakenly moved
+ * into Broker / TruckOwner / Vendor back to Billing Customers ('Customer').
+ */
+export function restoreHeadPartiesToBillingCustomers(parties: Party[]): {
+  restoredParties: Party[];
+  restoredCount: number;
+} {
+  const restoredParties: Party[] = [];
+  for (const p of parties) {
+    const isHeadOrigin =
+      p.id.startsWith('dbf_head_') ||
+      p.id.startsWith('dbf_party_') ||
+      p.id.startsWith('dbf_acct_');
+    if (isHeadOrigin && p.partyType !== 'Customer') {
+      restoredParties.push({
+        ...p,
+        partyType: 'Customer',
+        balanceType: p.balanceType || 'Dr',
+      });
+    }
+  }
+  return {
+    restoredParties,
+    restoredCount: restoredParties.length,
   };
 }

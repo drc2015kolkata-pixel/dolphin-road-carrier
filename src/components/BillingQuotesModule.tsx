@@ -1,6 +1,7 @@
 import React, { useEffect, useMemo, useRef, useState } from 'react';
 import {
   AlertTriangle,
+  ArrowRightLeft,
   CheckCircle2,
   Download,
   Edit3,
@@ -8,6 +9,7 @@ import {
   FileCheck2,
   FileSpreadsheet,
   Keyboard,
+  Layers,
   Lock,
   Mail,
   MessageSquare,
@@ -19,7 +21,9 @@ import {
   Save,
   ScanLine,
   Search,
+  Split,
   Trash2,
+  Truck,
 } from 'lucide-react';
 import {
   BillCopyCount,
@@ -42,6 +46,7 @@ import {
   getFyShortCode,
   makeSafeDocId,
   normalizeFyLabel,
+  roundPaise,
   todayISO,
 } from '../lib/formatters';
 import {
@@ -81,6 +86,7 @@ import {
   buildOverdueBillMessage,
   buildWhatsAppShareHref,
   getInvoicePendingDays,
+  sharePdfDirect,
   triggerExternalShareLink,
 } from '../lib/shareUtils';
 import { useDebouncedValue } from '../hooks/useDebounce';
@@ -92,6 +98,9 @@ import {
   formatPartyDetailsLine,
   RichEntityPicker,
 } from './RichEntityPicker';
+import { PinCountryInputs, useAutoPinLookup } from './CityPinCountryAutoFill';
+import { resolvePinSync, SupportedCountry } from '../lib/postalPinLookup';
+import { VoiceDraftFields } from '../lib/voicePilot';
 
 interface BillingQuotesModuleProps {
   ownerUid: string;
@@ -257,6 +266,7 @@ const BillingQuotesModuleInner: React.FC<BillingQuotesModuleProps> = ({
   const [partyName, setPartyName] = useState('');
   const [selectedInvPartyId, setSelectedInvPartyId] = useState('');
   const [partyAddress, setPartyAddress] = useState('');
+  const [partyPinCode, setPartyPinCode] = useState('');
   const [partyGstin, setPartyGstin] = useState('');
   const [partyStateCode, setPartyStateCode] = useState('');
   const [partyPan, setPartyPan] = useState('');
@@ -308,6 +318,11 @@ const BillingQuotesModuleInner: React.FC<BillingQuotesModuleProps> = ({
   const [cnPickerSearch, setCnPickerSearch] = useState('');
   const debouncedCnPickerSearch = useDebouncedValue(cnPickerSearch, 200);
   const [savingInv, setSavingInv] = useState(false);
+  const [batchSavingTrucks, setBatchSavingTrucks] = useState(false);
+  const [rectifyPartyMap, setRectifyPartyMap] = useState<Record<string, string>>({});
+  const [editCnFreightMap, setEditCnFreightMap] = useState<Record<string, string>>({});
+  const [divideFreightMap, setDivideFreightMap] = useState<Record<string, string>>({});
+  const [busyCnActionId, setBusyCnActionId] = useState<string | null>(null);
 
   const [invSearch, setInvSearch] = useState('');
   const debouncedInvSearch = useDebouncedValue(invSearch, 200);
@@ -332,6 +347,65 @@ const BillingQuotesModuleInner: React.FC<BillingQuotesModuleProps> = ({
     window.addEventListener('drc:form-save', onGlobalFormSave);
     return () => window.removeEventListener('drc:form-save', onGlobalFormSave);
   }, [subTab]);
+
+  // Voice Pilot draft-only filler (never auto-saves or auto-prints)
+  useEffect(() => {
+    const onVoiceDraftFill = (ev: Event) => {
+      const fields = (ev as CustomEvent<VoiceDraftFields>).detail;
+      if (!fields) return;
+      if (subTab === 'quotation') {
+        if (fields.partyName) setQParty(fields.partyName);
+        if (fields.destination) setQDest(fields.destination);
+        if (fields.freight) setQFreight(fields.freight);
+        if (fields.goodsDesc) setQGoodsType(fields.goodsDesc);
+        return;
+      }
+      if (subTab === '194c') {
+        if (fields.partyName) setDParty(fields.partyName);
+        if (fields.destination) setDPlace(fields.destination);
+        return;
+      }
+      if (fields.partyName) handlePartySelect(fields.partyName);
+      if (fields.fromCity || fields.toCity || fields.destination || fields.truckNo || fields.freight || fields.goodsDesc) {
+        setRows((prev) => {
+          const first = prev[0] || {
+            cnNo: '',
+            cnDate: todayISO(),
+            vehicle: '',
+            from: 'KOLKATA',
+            to: '',
+            weight: 0,
+            packages: '',
+            rateType: 'Fixed',
+            ratePerMt: 0,
+            freight: 0,
+            description: '',
+          };
+          const updated: InvoiceConsignmentRow = {
+            ...first,
+            vehicle: fields.truckNo || first.vehicle,
+            from: fields.fromCity || first.from,
+            to: fields.toCity || fields.destination || first.to,
+            freight: fields.freight ? Number(fields.freight) || first.freight : first.freight,
+            description: fields.goodsDesc || first.description,
+          };
+          return [updated, ...prev.slice(1)];
+        });
+      }
+    };
+    window.addEventListener('drc:voice-draft-fill', onVoiceDraftFill);
+    return () => window.removeEventListener('drc:voice-draft-fill', onVoiceDraftFill);
+  }, [subTab]);
+
+  useAutoPinLookup(partyAddress, partyPinCode, billingCountry, (pin, country) => {
+    setPartyPinCode(pin);
+    if (country !== billingCountry) {
+      setBillingCountry(country);
+      const st = resolveGstStateCode(partyGstin, partyAddress, country);
+      setPartyStateCode(st.code);
+      applyAutoGstRules(country, partyGstin, gstPaidBy);
+    }
+  });
 
   const isExportCountry = billingCountry !== 'India';
 
@@ -670,23 +744,44 @@ const BillingQuotesModuleInner: React.FC<BillingQuotesModuleProps> = ({
     invoiceMandatoryReady && finalizeBill && !hasUnsavedChanges && (editingInvoiceId || lastSavedInvoiceId)
   );
 
+  const resolveCnBillingParty = (c: ConsignmentNote): string =>
+    (c.billingPartyName || c.consignorName || '').trim();
+
+  const normalizeTruckKey = (v?: string): string => {
+    const clean = String(v || '')
+      .trim()
+      .toUpperCase()
+      .replace(/\s+/g, '');
+    return clean || 'NO-VEHICLE';
+  };
+
+  // Unbilled-Only Quick CNs list: strictly unbilled CNs; filtered to selected Party when Tax Invoice party is selected
   const pickerConsignments = useMemo(() => {
     const q = debouncedCnPickerSearch.trim().toLowerCase();
+    const partyClean = partyName.trim().toLowerCase();
+    const base =
+      docKind === 'Tax Invoice' && !editingInvoiceId
+        ? consignments.filter((cn) => !cn.billed)
+        : consignments;
+    const partyFiltered =
+      docKind === 'Tax Invoice' && !editingInvoiceId && partyClean
+        ? base.filter((cn) => resolveCnBillingParty(cn).toLowerCase() === partyClean)
+        : base;
     const list = q
-      ? consignments.filter((cn) =>
+      ? partyFiltered.filter((cn) =>
           `${cn.cnNo} ${cn.truckNo} ${cn.consignorName} ${cn.billingPartyName || ''} ${cn.fromCity} ${cn.toCity}`
             .toLowerCase()
             .includes(q)
         )
-      : consignments;
-    return list.slice(0, 50);
-  }, [consignments, debouncedCnPickerSearch]);
+      : partyFiltered;
+    return list.slice(0, 60);
+  }, [consignments, debouncedCnPickerSearch, docKind, editingInvoiceId, partyName]);
 
   const unbilledPartyCounts = useMemo(() => {
     const counts = new Map<string, number>();
     consignments.forEach((c) => {
       if (c.billed) return;
-      const key = (c.billingPartyName || c.consignorName || '').trim().toLowerCase();
+      const key = resolveCnBillingParty(c).toLowerCase();
       if (key) counts.set(key, (counts.get(key) || 0) + 1);
     });
     return counts;
@@ -710,39 +805,507 @@ const BillingQuotesModuleInner: React.FC<BillingQuotesModuleProps> = ({
     });
   }, [parties, drivers, lorryHires, invoices, consignments, unbilledPartyCounts]);
 
+  // Tax Invoice Party Dropdown: Show ONLY parties with Pending Unbilled CNs when creating a Tax Invoice;
+  // keep full customer list only when editing a historical invoice or drafting Credit/Debit Note.
+  const taxInvoiceCustomerParties = useMemo(() => {
+    if (editingInvoiceId || docKind !== 'Tax Invoice') {
+      return billingCustomerParties;
+    }
+    const knownPending = billingCustomerParties.filter(
+      (p) => (unbilledPartyCounts.get(p.name.trim().toLowerCase()) || 0) > 0
+    );
+    const knownKeys = new Set(knownPending.map((p) => p.name.trim().toLowerCase()));
+    const syntheticExtras: Party[] = [];
+    const seenExtra = new Set<string>();
+    consignments.forEach((c) => {
+      if (c.billed) return;
+      const label = resolveCnBillingParty(c);
+      const key = label.toLowerCase();
+      if (!key || knownKeys.has(key) || seenExtra.has(key)) return;
+      seenExtra.add(key);
+      syntheticExtras.push({
+        id: `__unbilled_party__:${key}`,
+        name: label,
+        partyType: 'Customer',
+        address: c.consignorAddress || '',
+        gstin: c.consignorGstin || '',
+        openingBalance: 0,
+        currentBalance: 0,
+        balanceType: 'Dr',
+        ownerUid,
+      });
+    });
+    return [...knownPending, ...syntheticExtras].sort((a, b) => {
+      const ca = unbilledPartyCounts.get(a.name.trim().toLowerCase()) || 0;
+      const cb = unbilledPartyCounts.get(b.name.trim().toLowerCase()) || 0;
+      if (cb !== ca) return cb - ca;
+      return a.name.localeCompare(b.name);
+    });
+  }, [
+    editingInvoiceId,
+    docKind,
+    billingCustomerParties,
+    unbilledPartyCounts,
+    consignments,
+    ownerUid,
+  ]);
+
+  // Strictly unbilled CNs ONLY — when a party is selected, show ONLY that party's unbilled CNs (never hide billed mixing)
   const modalUnbilledCns = useMemo(() => {
     const partyClean = partyName.trim().toLowerCase();
     const unbilled = consignments.filter((c) => !c.billed);
     if (!partyClean) return unbilled;
-    const matching = unbilled.filter(
-      (c) =>
-        (c.billingPartyName || c.consignorName || '').trim().toLowerCase() === partyClean ||
-        c.consignorName.trim().toLowerCase() === partyClean
+    return unbilled.filter(
+      (c) => resolveCnBillingParty(c).toLowerCase() === partyClean
     );
-    const others = unbilled.filter((c) => !matching.includes(c));
-    return [...matching, ...others];
   }, [consignments, partyName]);
+
+  const selectedPartyUnbilledCns = useMemo(() => {
+    const partyClean = partyName.trim().toLowerCase();
+    if (!partyClean) return [];
+    return consignments
+      .filter((c) => !c.billed && resolveCnBillingParty(c).toLowerCase() === partyClean)
+      .sort((a, b) => (a.cnDate || '').localeCompare(b.cnDate || '') || a.cnNo.localeCompare(b.cnNo));
+  }, [consignments, partyName]);
+
+  const partyUnbilledTruckGroups = useMemo(() => {
+    const map = new Map<
+      string,
+      {
+        truckKey: string;
+        truckLabel: string;
+        cns: ConsignmentNote[];
+        totalFreight: number;
+        totalWeight: number;
+      }
+    >();
+    selectedPartyUnbilledCns.forEach((cn) => {
+      const tKey = normalizeTruckKey(cn.truckNo);
+      const tLabel = cn.truckNo?.trim().toUpperCase() || 'NO VEHICLE';
+      const existing = map.get(tKey);
+      const freightAmt = roundPaise(Number(cn.totalFreight || 0));
+      const wtAmt = Number(cn.nettWeight || 0);
+      if (existing) {
+        existing.cns.push(cn);
+        existing.totalFreight = roundPaise(existing.totalFreight + freightAmt);
+        existing.totalWeight = Number((existing.totalWeight + wtAmt).toFixed(3));
+      } else {
+        map.set(tKey, {
+          truckKey: tKey,
+          truckLabel: tLabel,
+          cns: [cn],
+          totalFreight: freightAmt,
+          totalWeight: Number(wtAmt.toFixed(3)),
+        });
+      }
+    });
+    return Array.from(map.values());
+  }, [selectedPartyUnbilledCns]);
+
+  const mapCnToInvoiceRow = (cn: ConsignmentNote): InvoiceConsignmentRow => {
+    const isPerTon = /ton|mt/i.test(cn.rateMode || '');
+    const pkgText = [cn.packages, cn.packageMode?.split(' ')[0]].filter(Boolean).join(' ');
+    return {
+      cnNo: cn.cnNo,
+      cnDate: cn.cnDate,
+      vehicle: cn.truckNo,
+      from: cn.fromCity,
+      to: cn.toCity,
+      weight: Number(cn.nettWeight || 0),
+      packages: pkgText,
+      rateType: isPerTon ? 'Per Ton' : 'Fixed',
+      ratePerMt: Number(cn.ratePerUnit || cn.totalFreight || 0),
+      freight: roundPaise(Number(cn.totalFreight || 0)),
+      description: cn.particulars || 'GOODS TRANSPORT',
+    };
+  };
+
+  const handleLoadTruckGroupIntoInvoice = (cnsToLoad: ConsignmentNote[], truckLabel: string) => {
+    if (cnsToLoad.length === 0) return;
+    const mapped = cnsToLoad.map(mapCnToInvoiceRow);
+    setRows(mapped);
+    const cnListText = cnsToLoad.map((c) => c.cnNo).join(', ');
+    setAdditionalNotes(`Vehicle ${truckLabel} · Linked Bilty/CN(s): ${cnListText}`);
+    setFinalizeBill(true);
+    playVerifiedBeep();
+    setScanMsg(
+      cnsToLoad.length > 1
+        ? `Combined ${cnsToLoad.length} unbilled CN(s) on Vehicle ${truckLabel} (${cnListText}) into 1 Tax Invoice! Click Save to finalize.`
+        : `Loaded CN ${cnsToLoad[0].cnNo} (${truckLabel}) into Tax Invoice! Click Save to finalize.`
+    );
+  };
+
+  const handleRectifyUnbilledCnParty = async (cn: ConsignmentNote, nextBillingParty: string) => {
+    const cleanTarget = nextBillingParty.trim();
+    if (!cleanTarget || cn.billed) return;
+    setBusyCnActionId(cn.id);
+    try {
+      await upsertDocument(
+        'consignments',
+        cn.id,
+        { billingPartyName: cleanTarget },
+        false
+      );
+      await logBranchActivity({
+        action: 'Rectified CN Billing Party',
+        module: 'Billing',
+        docRefCode: cn.cnNo,
+        summary: `Changed Billing Party on unbilled CN ${cn.cnNo}: ${resolveCnBillingParty(cn) || '—'} → ${cleanTarget}`,
+        staffCode: activeStaffCode,
+        staffName: activeStaffName,
+        branchCode: cn.billedAtBranch || activeBranchCode,
+        ownerUid,
+      });
+      setRows((prev) => prev.filter((r) => r.cnNo.trim().toUpperCase() !== cn.cnNo.trim().toUpperCase()));
+      setRectifyPartyMap((prev) => {
+        const next = { ...prev };
+        delete next[cn.id];
+        return next;
+      });
+      playVerifiedBeep();
+      setScanMsg(`Moved unbilled CN ${cn.cnNo} to Billing Party "${cleanTarget}".`);
+    } finally {
+      setBusyCnActionId(null);
+    }
+  };
+
+  const handleSaveUnbilledCnFreight = async (cn: ConsignmentNote, rawAmount: string) => {
+    if (cn.billed) return;
+    const nextFreight = roundPaise(Math.max(0, Number(rawAmount) || 0));
+    setBusyCnActionId(cn.id);
+    try {
+      await upsertDocument(
+        'consignments',
+        cn.id,
+        { totalFreight: nextFreight },
+        false
+      );
+      setRows((prev) =>
+        prev.map((r) =>
+          r.cnNo.trim().toUpperCase() === cn.cnNo.trim().toUpperCase()
+            ? { ...r, freight: nextFreight }
+            : r
+        )
+      );
+      setEditCnFreightMap((prev) => {
+        const next = { ...prev };
+        delete next[cn.id];
+        return next;
+      });
+      playVerifiedBeep();
+      setScanMsg(`Updated unbilled CN ${cn.cnNo} freight to ₹${formatINR(nextFreight)}.`);
+    } finally {
+      setBusyCnActionId(null);
+    }
+  };
+
+  const handleDivideTruckGroupFreight = async (
+    groupCns: ConsignmentNote[],
+    truckLabel: string,
+    rawTotal: string,
+    mode: 'equal' | 'weight'
+  ) => {
+    if (groupCns.length === 0) return;
+    const totalAmt = roundPaise(Math.max(0, Number(rawTotal) || 0));
+    if (totalAmt <= 0) {
+      playAlertBeep();
+      setScanMsg('Enter a positive Total Truck Freight amount (₹) to split.');
+      return;
+    }
+    const editableCns = groupCns.filter((c) => !c.billed);
+    if (editableCns.length === 0) return;
+    setBusyCnActionId(`truck:${truckLabel}`);
+    try {
+      const weights = editableCns.map((c) => Math.max(0, Number(c.nettWeight || 0)));
+      const weightSum = weights.reduce((s, w) => s + w, 0);
+      const useWeight = mode === 'weight' && weightSum > 0;
+      const allocations: number[] = [];
+      let running = 0;
+      editableCns.forEach((_, idx) => {
+        if (idx === editableCns.length - 1) {
+          allocations.push(roundPaise(Math.max(0, totalAmt - running)));
+        } else {
+          const share = useWeight
+            ? roundPaise((totalAmt * weights[idx]) / weightSum)
+            : roundPaise(totalAmt / editableCns.length);
+          allocations.push(share);
+          running = roundPaise(running + share);
+        }
+      });
+
+      const updatedByCnNo = new Map<string, number>();
+      for (let i = 0; i < editableCns.length; i += 1) {
+        const cn = editableCns[i];
+        const newAmt = allocations[i];
+        await upsertDocument('consignments', cn.id, { totalFreight: newAmt }, false);
+        updatedByCnNo.set(cn.cnNo.trim().toUpperCase(), newAmt);
+      }
+
+      setRows((prev) =>
+        prev.map((r) => {
+          const key = r.cnNo.trim().toUpperCase();
+          return updatedByCnNo.has(key) ? { ...r, freight: updatedByCnNo.get(key)! } : r;
+        })
+      );
+      setEditCnFreightMap((prev) => {
+        const next = { ...prev };
+        editableCns.forEach((c) => delete next[c.id]);
+        return next;
+      });
+      playVerifiedBeep();
+      setScanMsg(
+        `Divided ₹${formatINR(totalAmt)} across ${editableCns.length} unbilled CN(s) of Vehicle ${truckLabel} (${useWeight ? 'by Weight MT' : 'Equal Split'}).`
+      );
+    } finally {
+      setBusyCnActionId(null);
+    }
+  };
+
+  const handleGenerateSeparateInvoicesPerTruck = async () => {
+    if (readOnly || batchSavingTrucks || partyUnbilledTruckGroups.length === 0 || !partyName.trim()) {
+      return;
+    }
+    if (isExportCountry && !partyPan.trim()) {
+      playAlertBeep();
+      setInvValidationError(
+        `PAN Number is mandatory for ${billingCountry} export billing (GST Exempt 0%, GSTIN optional).`
+      );
+      return;
+    }
+    if (partyGstin.trim()) {
+      const gstCheck = validateIndianGstin(partyGstin);
+      if (!gstCheck.valid) {
+        playAlertBeep();
+        setInvValidationError(`Blocked: Party GSTIN invalid — ${gstCheck.error}`);
+        return;
+      }
+    }
+
+    setInvValidationError(null);
+    setBatchSavingTrucks(true);
+    try {
+      const createdInvoices: Invoice[] = [];
+      const baseSeqNum = Math.max(101, 105 + invoices.length);
+      const branchPref =
+        (billedAtBranch || branchTag)
+          .replace(/[^A-Z0-9]/gi, '')
+          .slice(0, 3)
+          .toUpperCase() || branchTag;
+
+      for (let idx = 0; idx < partyUnbilledTruckGroups.length; idx += 1) {
+        const group = partyUnbilledTruckGroups[idx];
+        const groupRows = group.cns.map(mapCnToInvoiceRow);
+        const groupFreight = roundPaise(groupRows.reduce((s, r) => s + Number(r.freight || 0), 0));
+        const gRate = isExportCountry ? 0 : gstRate;
+        const gIsInter = isExportCountry ? false : interstate;
+        const gRcm = isExportCountry ? false : reverseCharge;
+        const gTax = roundPaise((groupFreight * gRate) / 100);
+        const gCgst = isExportCountry || gIsInter ? 0 : roundPaise(gTax / 2);
+        const gSgst = isExportCountry || gIsInter ? 0 : roundPaise(gTax - gCgst);
+        const gIgst = !isExportCountry && gIsInter ? gTax : 0;
+        const rawGross = roundPaise(isExportCountry || gRcm ? groupFreight : groupFreight + gTax);
+        const rOff = autoRoundOff ? roundPaise(Math.round(rawGross) - rawGross) : 0;
+        const gross = roundPaise(rawGross + rOff);
+
+        const fallbackBillNo = String(baseSeqNum + idx);
+        let finalNo = `${branchPref}/${fallbackBillNo}/${fyShort}`;
+        if (autoAtomicInvoice) {
+          try {
+            const serial = await reserveNextSerialNumber({
+              type: 'invoice',
+              fy: activeFy,
+              branchCode: billedAtBranch || activeBranchCode,
+              staffCode: activeStaffCode,
+              ownerUid,
+            });
+            finalNo = serial.formattedNo;
+          } catch {
+            // Sequential fallback stays deterministic offline
+          }
+        }
+
+        const invId = makeSafeDocId('inv');
+        const cnNosList = group.cns.map((c) => c.cnNo).join(', ');
+        const notesText = `Vehicle ${group.truckLabel} · Linked Bilty/CN(s): ${cnNosList}`;
+        const narration = `Being Tax Invoice raised on M/s ${partyName.trim()} for Vehicle ${group.truckLabel} (CN ${cnNosList}, ${
+          isExportCountry
+            ? `Export to ${billingCountry} (0% GST)`
+            : gRcm
+              ? `GTA ${gRate}% under RCM`
+              : `GTA ${gRate}% FCM`
+        }).`;
+
+        const invPayload: Invoice = {
+          id: invId,
+          billId: fallbackBillNo,
+          invoiceNo: finalNo,
+          invoiceDate,
+          dueDate,
+          creditDays: Number(creditDays) || 15,
+          poWorkOrderNo: poWorkOrderNo.trim(),
+          docKind: 'Tax Invoice',
+          againstInvoiceId: '',
+          againstInvoiceNo: '',
+          finalized: true,
+          roundOffAmt: rOff,
+          narrationText: narration,
+          financialYear: normalizeFyLabel(activeFy),
+          division: invDivision,
+          billedByCode,
+          billedAtBranch: billedAtBranch.trim() || defaultBranchLabel,
+          partyName: partyName.trim(),
+          partyAddress: partyAddress.trim(),
+          partyGstin: partyGstin.trim(),
+          partyPan: partyPan.trim().toUpperCase(),
+          billingCountry,
+          sac,
+          reverseCharge: gRcm,
+          interstate: gIsInter,
+          gstPaidBy,
+          gstRate: gRate,
+          cgstAmt: gCgst,
+          sgstAmt: gSgst,
+          igstAmt: gIgst,
+          totalTax: gTax,
+          freightCharges: groupFreight,
+          insuranceCharge: 0,
+          collCharge: 0,
+          loadingCharge: 0,
+          detentionCharges: 0,
+          unloadingCharges: 0,
+          surchargeAmt: 0,
+          stCharges: 0,
+          fumigationCharge: 0,
+          extraCharge: 0,
+          grossBillAmount: gross,
+          advanceReceived: 0,
+          advanceMode,
+          fullPaymentMode,
+          grandTotal: gross,
+          paidAmount: 0,
+          status: 'Unpaid',
+          remarks,
+          billFootnote: billFootnote.trim(),
+          additionalNotes: notesText,
+          copyCount,
+          selectedBankId: selectedBankId || undefined,
+          consignmentRows: groupRows,
+          annexureLorries: groupRows.map((r) => ({
+            cnNo: r.cnNo || '-',
+            lorryNumbers: r.vehicle || '-',
+          })),
+          branchCode: billedAtBranch.trim() || activeBranchCode,
+          createdByStaff: activeStaffCode,
+          ownerUid,
+        };
+
+        await upsertDocument(
+          'invoices',
+          invId,
+          {
+            billId: invPayload.billId || '',
+            invoiceNo: invPayload.invoiceNo,
+            invoiceDate: invPayload.invoiceDate,
+            dueDate: invPayload.dueDate || '',
+            creditDays: invPayload.creditDays ?? 15,
+            poWorkOrderNo: invPayload.poWorkOrderNo || '',
+            docKind: 'Tax Invoice',
+            againstInvoiceId: '',
+            againstInvoiceNo: '',
+            finalized: true,
+            roundOffAmt: invPayload.roundOffAmt ?? 0,
+            narrationText: invPayload.narrationText || '',
+            financialYear: invPayload.financialYear,
+            division: invPayload.division,
+            billedByCode: invPayload.billedByCode || 'B',
+            billedAtBranch: invPayload.billedAtBranch || defaultBranchLabel,
+            partyName: invPayload.partyName,
+            partyAddress: invPayload.partyAddress || '',
+            partyGstin: invPayload.partyGstin || '',
+            partyPan: invPayload.partyPan || '',
+            billingCountry: invPayload.billingCountry || 'India',
+            sac: invPayload.sac || '996791',
+            reverseCharge: Boolean(invPayload.reverseCharge),
+            interstate: Boolean(invPayload.interstate),
+            gstPaidBy: invPayload.gstPaidBy || 'Consignee',
+            gstRate: invPayload.gstRate ?? 5,
+            cgstAmt: invPayload.cgstAmt ?? 0,
+            sgstAmt: invPayload.sgstAmt ?? 0,
+            igstAmt: invPayload.igstAmt ?? 0,
+            totalTax: invPayload.totalTax ?? 0,
+            freightCharges: invPayload.freightCharges ?? 0,
+            insuranceCharge: 0,
+            collCharge: 0,
+            loadingCharge: 0,
+            detentionCharges: 0,
+            unloadingCharges: 0,
+            surchargeAmt: 0,
+            stCharges: 0,
+            fumigationCharge: 0,
+            extraCharge: 0,
+            grossBillAmount: invPayload.grossBillAmount,
+            advanceReceived: 0,
+            advanceMode: invPayload.advanceMode || 'NEFT',
+            fullPaymentMode: invPayload.fullPaymentMode || 'NEFT',
+            grandTotal: invPayload.grandTotal,
+            paidAmount: 0,
+            status: 'Unpaid',
+            remarks: invPayload.remarks || '',
+            billFootnote: invPayload.billFootnote || '',
+            additionalNotes: invPayload.additionalNotes || '',
+            copyCount: invPayload.copyCount || 1,
+            selectedBankId: invPayload.selectedBankId || '',
+            consignmentRows: invPayload.consignmentRows,
+            annexureLorries: invPayload.annexureLorries || [],
+            branchCode: invPayload.branchCode || activeBranchCode,
+            createdByStaff: activeStaffCode,
+            ownerUid,
+          },
+          true
+        );
+
+        for (const cn of group.cns) {
+          await upsertDocument(
+            'consignments',
+            cn.id,
+            { billed: true, invoiceId: invId, taxInvNo: finalNo },
+            false
+          );
+        }
+
+        await logBranchActivity({
+          action: 'Created Vehicle Tax Invoice',
+          module: 'Billing',
+          docRefCode: finalNo,
+          summary: `Separate Truck Invoice ${finalNo} · Vehicle ${group.truckLabel} · ${invPayload.partyName} · ₹${formatINR(invPayload.grandTotal)} (${group.cns.length} CNs)`,
+          staffCode: activeStaffCode,
+          staffName: activeStaffName,
+          branchCode: invPayload.billedAtBranch || activeBranchCode,
+          ownerUid,
+        });
+
+        createdInvoices.push(invPayload);
+      }
+
+      playVerifiedBeep();
+      const summaryList = createdInvoices.map((x) => `${x.invoiceNo} (₹${formatINR(x.grandTotal)})`).join(', ');
+      setScanMsg(
+        `Generated ${createdInvoices.length} Separate Tax Invoice(s) (1 per Truck No): ${summaryList}`
+      );
+      if (createdInvoices.length > 0) {
+        const pdf = await generateInvoicePDF(createdInvoices[0], company, includeAnnexure, 'p', copyCount);
+        onPreviewPdf(pdf, 'Bills_Invoices');
+      }
+      resetInvoiceForm();
+    } finally {
+      setBatchSavingTrucks(false);
+    }
+  };
 
   const commitSelectedModalCns = () => {
     const chosen = modalUnbilledCns.filter((c) => selectedModalCnIds.includes(c.id));
     if (chosen.length > 0) {
-      const pastedRows: InvoiceConsignmentRow[] = chosen.map((cn) => {
-        const isPerTon = /ton|mt/i.test(cn.rateMode || '');
-        const pkgText = [cn.packages, cn.packageMode?.split(' ')[0]].filter(Boolean).join(' ');
-        return {
-          cnNo: cn.cnNo,
-          cnDate: cn.cnDate,
-          vehicle: cn.truckNo,
-          from: cn.fromCity,
-          to: cn.toCity,
-          weight: Number(cn.nettWeight || 0),
-          packages: pkgText,
-          rateType: isPerTon ? 'Per Ton' : 'Fixed',
-          ratePerMt: Number(cn.ratePerUnit || cn.totalFreight || 0),
-          freight: Number(cn.totalFreight || 0),
-          description: cn.particulars || 'GOODS TRANSPORT',
-        };
-      });
+      const pastedRows: InvoiceConsignmentRow[] = chosen.map(mapCnToInvoiceRow);
       setRows((prev) => {
         const existingNonEmpty = prev.filter(
           (r) => (r.cnNo || r.freight > 0) && !pastedRows.some((p) => p.cnNo === r.cnNo)
@@ -800,9 +1363,17 @@ const BillingQuotesModuleInner: React.FC<BillingQuotesModuleProps> = ({
     setSelectedInvPartyId(p.id);
     const nextGstin = (p.gstin || '').trim().toUpperCase();
     const nextAddr = p.address || '';
-    const detected = detectCountryFromText(nextAddr) || 'India';
+    const pinHit = resolvePinSync(nextAddr);
+    const detected =
+      (p.country === 'Nepal' || p.country === 'Bangladesh' || p.country === 'Bhutan' || p.country === 'India'
+        ? p.country
+        : null) ||
+      pinHit?.country ||
+      detectCountryFromText(nextAddr) ||
+      'India';
     const stInfo = resolveGstStateCode(nextGstin, nextAddr, detected);
     setPartyAddress(nextAddr);
+    setPartyPinCode(p.pinCode || pinHit?.pinCode || '');
     setPartyGstin(nextGstin);
     setPartyStateCode(stInfo.code);
     setPartyPan((p.pan || '').trim().toUpperCase());
@@ -997,6 +1568,7 @@ const BillingQuotesModuleInner: React.FC<BillingQuotesModuleProps> = ({
     setPartyName('');
     setSelectedInvPartyId('');
     setPartyAddress('');
+    setPartyPinCode('');
     setPartyGstin('');
     setPartyPan('');
     setPartyStateCode('');
@@ -1068,6 +1640,7 @@ const BillingQuotesModuleInner: React.FC<BillingQuotesModuleProps> = ({
     );
     setSelectedInvPartyId(matched?.id || '');
     setPartyAddress(inv.partyAddress || '');
+    setPartyPinCode(resolvePinSync(inv.partyAddress || '')?.pinCode || '');
     setPartyGstin(inv.partyGstin || '');
     setPartyPan(inv.partyPan || '');
     const ctry = (inv.billingCountry as 'India' | 'Nepal' | 'Bangladesh' | 'Bhutan') || 'India';
@@ -1474,10 +2047,60 @@ const BillingQuotesModuleInner: React.FC<BillingQuotesModuleProps> = ({
   const [qDetention, setQDetention] = useState('YES Extra Charges');
   const [qTonGuarantee, setQTonGuarantee] = useState('09 TON Loading Capacity');
   const [qDest, setQDest] = useState('KOLKATA to SILIGURI');
+  const [qDestinationPinCode, setQDestinationPinCode] = useState('734001');
+  const [qDestinationCountry, setQDestinationCountry] = useState<SupportedCountry>('India');
   const [qAdvance, setQAdvance] = useState('No Advance Before Lorry Loading');
   const [qEntryPoint, setQEntryPoint] = useState('As Applicable');
+  const [qEntryPointPinCode, setQEntryPointPinCode] = useState('');
+  const [qEntryPointCountry, setQEntryPointCountry] = useState<SupportedCountry>('India');
   const [qSearch, setQSearch] = useState('');
   const debouncedQSearch = useDebouncedValue(qSearch, 200);
+
+  useAutoPinLookup(qDest, qDestinationPinCode, qDestinationCountry, (pin, country) => {
+    setQDestinationPinCode(pin);
+    setQDestinationCountry(country);
+  });
+  useAutoPinLookup(qEntryPoint, qEntryPointPinCode, qEntryPointCountry, (pin, country) => {
+    setQEntryPointPinCode(pin);
+    setQEntryPointCountry(country);
+  });
+
+  const buildQuotationObject = (overrideNo?: string, overrideId?: string): Quotation => ({
+    id: overrideId || 'preview_qtn',
+    quotationNo: (overrideNo || qNo).trim(),
+    quotationDate: qDate,
+    financialYear: normalizeFyLabel(activeFy),
+    division: qDivision,
+    partyName: qParty.trim(),
+    partyAddress: qAddr.trim(),
+    partyGstin: qGstin.trim(),
+    partyPhone: qPhone.trim(),
+    partyEmail: qEmail.trim(),
+    guarantorName: qGuarantorName.trim(),
+    guarantorPhone: qGuarantorPhone.trim(),
+    acceptanceEmailOnly: true,
+    subject: qSubject.trim(),
+    validityText: qValidity.trim(),
+    vehicleType: qVehicleType.trim(),
+    goodsType: qGoodsType.trim(),
+    rateMode: qRateMode,
+    freight: Number(qFreight) || 0,
+    loadingCharge: qLoading,
+    unloadingCharge: qUnloading,
+    parkingCharge: qParking,
+    detentionCharge: qDetention,
+    tonGuarantee: qTonGuarantee,
+    destination: qDest,
+    destinationPinCode: qDestinationPinCode.trim(),
+    destinationCountry: qDestinationCountry,
+    advancePay: qAdvance,
+    entryPoint: qEntryPoint,
+    entryPointPinCode: qEntryPointPinCode.trim(),
+    entryPointCountry: qEntryPointCountry,
+    branchCode: activeBranchCode,
+    createdByStaff: activeStaffCode,
+    ownerUid,
+  });
 
   const handleSaveQuotation = async (e: React.FormEvent) => {
     e.preventDefault();
@@ -1509,38 +2132,7 @@ const BillingQuotesModuleInner: React.FC<BillingQuotesModuleProps> = ({
     }
 
     const id = makeSafeDocId('qtn');
-    const qObj: Quotation = {
-      id,
-      quotationNo: finalQNo,
-      quotationDate: qDate,
-      financialYear: normalizeFyLabel(activeFy),
-      division: qDivision,
-      partyName: qParty.trim(),
-      partyAddress: qAddr.trim(),
-      partyGstin: qGstin.trim(),
-      partyPhone: qPhone.trim(),
-      partyEmail: qEmail.trim(),
-      guarantorName: qGuarantorName.trim(),
-      guarantorPhone: qGuarantorPhone.trim(),
-      acceptanceEmailOnly: true,
-      subject: qSubject.trim(),
-      validityText: qValidity.trim(),
-      vehicleType: qVehicleType.trim(),
-      goodsType: qGoodsType.trim(),
-      rateMode: qRateMode,
-      freight: Number(qFreight) || 0,
-      loadingCharge: qLoading,
-      unloadingCharge: qUnloading,
-      parkingCharge: qParking,
-      detentionCharge: qDetention,
-      tonGuarantee: qTonGuarantee,
-      destination: qDest,
-      advancePay: qAdvance,
-      entryPoint: qEntryPoint,
-      branchCode: activeBranchCode,
-      createdByStaff: activeStaffCode,
-      ownerUid,
-    };
+    const qObj = buildQuotationObject(finalQNo, id);
     await upsertDocument(
       'quotations',
       id,
@@ -1569,8 +2161,12 @@ const BillingQuotesModuleInner: React.FC<BillingQuotesModuleProps> = ({
         detentionCharge: qObj.detentionCharge,
         tonGuarantee: qObj.tonGuarantee,
         destination: qObj.destination,
+        destinationPinCode: qObj.destinationPinCode || '',
+        destinationCountry: qObj.destinationCountry || 'India',
         advancePay: qObj.advancePay,
         entryPoint: qObj.entryPoint,
+        entryPointPinCode: qObj.entryPointPinCode || '',
+        entryPointCountry: qObj.entryPointCountry || 'India',
         branchCode: activeBranchCode,
         createdByStaff: activeStaffCode,
         ownerUid,
@@ -1599,8 +2195,15 @@ const BillingQuotesModuleInner: React.FC<BillingQuotesModuleProps> = ({
   const [dDate, setDDate] = useState(todayISO());
   const [dFy, setDFy] = useState(normalizeFyLabel(activeFy));
   const [dPlace, setDPlace] = useState('Kolkata');
+  const [dPlacePinCode, setDPlacePinCode] = useState('700001');
+  const [dPlaceCountry, setDPlaceCountry] = useState<SupportedCountry>('India');
   const [declSearch, setDeclSearch] = useState('');
   const debouncedDeclSearch = useDebouncedValue(declSearch, 200);
+
+  useAutoPinLookup(dPlace, dPlacePinCode, dPlaceCountry, (pin, country) => {
+    setDPlacePinCode(pin);
+    setDPlaceCountry(country);
+  });
 
   const handleSave194C = async (e: React.FormEvent) => {
     e.preventDefault();
@@ -1622,6 +2225,8 @@ const BillingQuotesModuleInner: React.FC<BillingQuotesModuleProps> = ({
       financialYear: dFy.trim(),
       declarationDate: dDate,
       place: dPlace.trim(),
+      placePinCode: dPlacePinCode.trim(),
+      placeCountry: dPlaceCountry,
       branchCode: activeBranchCode,
       createdByStaff: activeStaffCode,
       ownerUid,
@@ -1636,6 +2241,8 @@ const BillingQuotesModuleInner: React.FC<BillingQuotesModuleProps> = ({
         financialYear: decl.financialYear,
         declarationDate: decl.declarationDate,
         place: decl.place,
+        placePinCode: decl.placePinCode || '',
+        placeCountry: decl.placeCountry || 'India',
         branchCode: activeBranchCode,
         createdByStaff: activeStaffCode,
         ownerUid,
@@ -1840,6 +2447,50 @@ const BillingQuotesModuleInner: React.FC<BillingQuotesModuleProps> = ({
               >
                 <Printer className="w-3 h-3" />
               </button>
+              <button
+                type="button"
+                disabled={!isFinalized}
+                title={isFinalized ? 'Share Real Invoice PDF on WhatsApp' : 'Locked until Finalized [Y]'}
+                onClick={async () => {
+                  const pdf = await generateInvoicePDF(inv, company, true, 'p', inv.copyCount || 1);
+                  const res = await sharePdfDirect({
+                    pdf,
+                    channel: 'whatsapp',
+                    phone: partyRec?.phone,
+                    email: partyRec?.email,
+                    partyName: inv.partyName,
+                    docNo: inv.invoiceNo,
+                    docLabel: inv.docKind || 'Tax Invoice',
+                    company,
+                  });
+                  setScanMsg(res.message);
+                }}
+                className="inline-flex items-center gap-1 px-1.5 py-1 rounded bg-emerald-600 hover:bg-emerald-700 text-white font-bold cursor-pointer disabled:opacity-40 disabled:cursor-not-allowed"
+              >
+                <MessageSquare className="w-3 h-3" />
+              </button>
+              <button
+                type="button"
+                disabled={!isFinalized}
+                title={isFinalized ? 'Share Real Invoice PDF via Email' : 'Locked until Finalized [Y]'}
+                onClick={async () => {
+                  const pdf = await generateInvoicePDF(inv, company, true, 'p', inv.copyCount || 1);
+                  const res = await sharePdfDirect({
+                    pdf,
+                    channel: 'email',
+                    phone: partyRec?.phone,
+                    email: partyRec?.email,
+                    partyName: inv.partyName,
+                    docNo: inv.invoiceNo,
+                    docLabel: inv.docKind || 'Tax Invoice',
+                    company,
+                  });
+                  setScanMsg(res.message);
+                }}
+                className="inline-flex items-center gap-1 px-1.5 py-1 rounded bg-indigo-600 hover:bg-indigo-700 text-white font-bold cursor-pointer disabled:opacity-40 disabled:cursor-not-allowed"
+              >
+                <Mail className="w-3 h-3" />
+              </button>
               {!readOnly && (
                 <button
                   type="button"
@@ -1888,11 +2539,11 @@ const BillingQuotesModuleInner: React.FC<BillingQuotesModuleProps> = ({
                       });
                       triggerExternalShareLink(href);
                     }}
-                    className="inline-flex items-center gap-1 px-2 py-1 rounded bg-emerald-600 hover:bg-emerald-700 text-white text-[11px] font-bold cursor-pointer"
-                    title="Send WhatsApp payment alert"
+                    className="inline-flex items-center gap-1 px-2 py-1 rounded bg-amber-600 hover:bg-amber-700 text-white text-[11px] font-bold cursor-pointer"
+                    title="Send Overdue Payment Reminder on WhatsApp"
                   >
                     <MessageSquare className="w-3 h-3" />
-                    WA
+                    15d+ WA
                   </button>
                   <button
                     type="button"
@@ -1909,11 +2560,11 @@ const BillingQuotesModuleInner: React.FC<BillingQuotesModuleProps> = ({
                       });
                       triggerExternalShareLink(href);
                     }}
-                    className="inline-flex items-center gap-1 px-2 py-1 rounded bg-indigo-600 hover:bg-indigo-700 text-white text-[11px] font-bold cursor-pointer"
-                    title="Send Email payment alert"
+                    className="inline-flex items-center gap-1 px-2 py-1 rounded bg-slate-700 hover:bg-slate-800 text-white text-[11px] font-bold cursor-pointer"
+                    title="Send Overdue Payment Reminder via Email"
                   >
                     <Mail className="w-3 h-3" />
-                    Email
+                    15d+ Email
                   </button>
                 </>
               )}
@@ -2036,23 +2687,72 @@ const BillingQuotesModuleInner: React.FC<BillingQuotesModuleProps> = ({
         key: 'actions',
         header: 'Action',
         headerClassName: 'text-right',
-        cellClassName: 'text-right',
-        render: (q) => (
-          <button
-            type="button"
-            onClick={async () => {
-              const pdf = await generateQuotationPDF(q, company);
-              onPreviewPdf(pdf, 'Quotations');
-            }}
-            className="inline-flex items-center gap-1 px-2.5 py-1 rounded bg-blue-50 hover:bg-blue-100 text-blue-800 font-semibold cursor-pointer"
-          >
-            <Printer className="w-3 h-3" />
-            PDF
-          </button>
-        ),
+        cellClassName: 'text-right whitespace-nowrap space-x-1',
+        render: (q) => {
+          const partyRec = parties.find(
+            (p) => p.name.trim().toLowerCase() === (q.partyName || '').trim().toLowerCase()
+          );
+          return (
+            <>
+              <button
+                type="button"
+                onClick={async () => {
+                  const pdf = await generateQuotationPDF(q, company);
+                  onPreviewPdf(pdf, 'Quotations');
+                }}
+                className="inline-flex items-center gap-1 px-2.5 py-1 rounded bg-blue-50 hover:bg-blue-100 text-blue-800 font-semibold cursor-pointer"
+              >
+                <Printer className="w-3 h-3" />
+                PDF
+              </button>
+              <button
+                type="button"
+                onClick={async () => {
+                  const pdf = await generateQuotationPDF(q, company);
+                  const res = await sharePdfDirect({
+                    pdf,
+                    channel: 'whatsapp',
+                    phone: q.partyPhone || partyRec?.phone,
+                    email: q.partyEmail || partyRec?.email,
+                    partyName: q.partyName,
+                    docNo: q.quotationNo,
+                    docLabel: 'Quotation',
+                    company,
+                  });
+                  setScanMsg(res.message);
+                }}
+                className="inline-flex items-center gap-1 px-1.5 py-1 rounded bg-emerald-600 hover:bg-emerald-700 text-white font-bold cursor-pointer"
+                title="Share Quotation PDF on WhatsApp"
+              >
+                <MessageSquare className="w-3 h-3" />
+              </button>
+              <button
+                type="button"
+                onClick={async () => {
+                  const pdf = await generateQuotationPDF(q, company);
+                  const res = await sharePdfDirect({
+                    pdf,
+                    channel: 'email',
+                    phone: q.partyPhone || partyRec?.phone,
+                    email: q.partyEmail || partyRec?.email,
+                    partyName: q.partyName,
+                    docNo: q.quotationNo,
+                    docLabel: 'Quotation',
+                    company,
+                  });
+                  setScanMsg(res.message);
+                }}
+                className="inline-flex items-center gap-1 px-1.5 py-1 rounded bg-indigo-600 hover:bg-indigo-700 text-white font-bold cursor-pointer"
+                title="Share Quotation PDF via Email"
+              >
+                <Mail className="w-3 h-3" />
+              </button>
+            </>
+          );
+        },
       },
     ],
-    [company, onPreviewPdf]
+    [company, parties, onPreviewPdf]
   );
 
   const declarationColumns: TableColumn<Declaration194C>[] = useMemo(
@@ -2214,7 +2914,7 @@ const BillingQuotesModuleInner: React.FC<BillingQuotesModuleProps> = ({
                   className="inline-flex items-center gap-1.5 px-3 py-1 rounded bg-white/15 hover:bg-white/25 text-white text-xs font-bold cursor-pointer whitespace-nowrap"
                 >
                   <Plus className="w-3.5 h-3.5" />
-                  Quick CNs ({consignments.length})
+                  Quick Unbilled CNs ({pickerConsignments.length})
                 </button>
               </div>
             </div>
@@ -2430,7 +3130,9 @@ const BillingQuotesModuleInner: React.FC<BillingQuotesModuleProps> = ({
                   <label className="block font-semibold text-slate-700 mb-1">
                     Bill To Party *{' '}
                     <span className="text-[10px] font-bold text-blue-700">
-                      (Customers Only: {billingCustomerParties.length} · Unbilled CN Parties First)
+                      {editingInvoiceId || docKind !== 'Tax Invoice'
+                        ? `(All Billing Parties: ${taxInvoiceCustomerParties.length})`
+                        : `(Pending Unbilled Parties Only: ${taxInvoiceCustomerParties.length} of ${billingCustomerParties.length})`}
                     </span>
                   </label>
                   <div className="mb-1.5">
@@ -2440,24 +3142,31 @@ const BillingQuotesModuleInner: React.FC<BillingQuotesModuleProps> = ({
                         selectedInvPartyId ||
                         (() => {
                           const clean = partyName.trim().toLowerCase();
-                          const m = billingCustomerParties.filter(
+                          const m = taxInvoiceCustomerParties.filter(
                             (p) => p.name.trim().toLowerCase() === clean
                           );
                           return m.length === 1 ? m[0].id : '';
                         })()
                       }
                       onChange={(nextId) => {
-                        const chosen = billingCustomerParties.find((p) => p.id === nextId);
+                        const chosen = taxInvoiceCustomerParties.find((p) => p.id === nextId);
                         if (chosen) applyPartyEntityDetails(chosen);
                       }}
-                      placeholder={`-- Select Customer / Billing Party (${billingCustomerParties.length}) --`}
-                      searchPlaceholder="Search Customer A-Z by Name, GSTIN, City..."
+                      placeholder={
+                        editingInvoiceId || docKind !== 'Tax Invoice'
+                          ? `-- Select Customer / Billing Party (${taxInvoiceCustomerParties.length}) --`
+                          : `-- Select Party with Unbilled CN (${taxInvoiceCustomerParties.length} Pending) --`
+                      }
+                      searchPlaceholder="Search Party with Unbilled CNs..."
                       options={[
                         {
                           value: '',
-                          label: `-- Select Customer / Billing Party (${billingCustomerParties.length}) --`,
+                          label:
+                            editingInvoiceId || docKind !== 'Tax Invoice'
+                              ? `-- Select Customer / Billing Party (${taxInvoiceCustomerParties.length}) --`
+                              : `-- Select Party with Unbilled CN (${taxInvoiceCustomerParties.length} Pending) --`,
                         },
-                        ...billingCustomerParties.map((p) => {
+                        ...taxInvoiceCustomerParties.map((p) => {
                           const unb = unbilledPartyCounts.get(p.name.trim().toLowerCase()) || 0;
                           return {
                             value: p.id,
@@ -2474,26 +3183,32 @@ const BillingQuotesModuleInner: React.FC<BillingQuotesModuleProps> = ({
                     selectedId={selectedInvPartyId}
                     onChangeText={(nextText) => handlePartySelect(nextText)}
                     onSelectEntity={(p) => applyPartyEntityDetails(p)}
-                    items={billingCustomerParties}
+                    items={taxInvoiceCustomerParties}
                     getId={(p) => p.id}
                     getValue={(p) => p.name}
                     getSearchText={(p) =>
                       `${p.name} ${p.gstin || ''} ${p.pan || ''} ${p.address || ''} ${p.phone || ''}`
                     }
-                    renderTitle={(p) => p.name}
-                    renderBadge={(p) => p.partyType}
+                    renderTitle={(p) => {
+                      const unb = unbilledPartyCounts.get(p.name.trim().toLowerCase()) || 0;
+                      return unb > 0 ? `[${unb} UNBILLED] ${p.name}` : p.name;
+                    }}
+                    renderBadge={(p) => {
+                      const unb = unbilledPartyCounts.get(p.name.trim().toLowerCase()) || 0;
+                      return unb > 0 ? `${unb} CN` : p.partyType;
+                    }}
                     renderDetails={(p) => formatPartyDetailsLine(p)}
-                    placeholder="Or search Customer by Name, GSTIN, City, Address or Phone..."
+                    placeholder="Or search Unbilled Customer by Name, GSTIN, City, Address or Phone..."
                     required
                     quickPreview={(() => {
                       const clean = partyName.trim().toLowerCase();
                       if (!clean) return null;
-                      const matches = billingCustomerParties.filter(
+                      const matches = taxInvoiceCustomerParties.filter(
                         (p) => p.name.trim().toLowerCase() === clean
                       );
                       const resolved =
                         (selectedInvPartyId
-                          ? billingCustomerParties.find((p) => p.id === selectedInvPartyId)
+                          ? taxInvoiceCustomerParties.find((p) => p.id === selectedInvPartyId)
                           : undefined) ||
                         (matches.length === 1 ? matches[0] : matches[0]);
                       return (
@@ -2508,13 +3223,28 @@ const BillingQuotesModuleInner: React.FC<BillingQuotesModuleProps> = ({
                   />
                 </div>
                 <div>
-                  <label className="block font-semibold text-slate-700 mb-1">Party Address</label>
-                  <input
-                    type="text"
-                    value={partyAddress}
-                    onChange={(e) => setPartyAddress(e.target.value)}
-                    className="w-full px-2.5 py-1.5 rounded border border-slate-300"
-                  />
+                  <label className="block font-semibold text-slate-700 mb-1">
+                    Party Address &amp; Auto-PIN {partyPinCode ? <span className="text-emerald-700 font-mono-num">({partyPinCode})</span> : ''}
+                  </label>
+                  <div className="flex gap-1.5">
+                    <input
+                      type="text"
+                      value={partyAddress}
+                      onChange={(e) => setPartyAddress(e.target.value)}
+                      placeholder="City / Address (auto-fills PIN & Country)"
+                      className="flex-1 min-w-0 px-2.5 py-1.5 rounded border border-slate-300"
+                    />
+                    <input
+                      type="text"
+                      inputMode="numeric"
+                      maxLength={6}
+                      value={partyPinCode}
+                      onChange={(e) => setPartyPinCode(e.target.value.replace(/\D/g, '').slice(0, 6))}
+                      placeholder="PIN"
+                      title="Auto-filled Postal PIN Code (India 6d / BD 4d / NP & BT 5d)"
+                      className="w-20 px-2 py-1.5 rounded border border-emerald-300 bg-emerald-50/40 font-mono-num font-bold text-emerald-900"
+                    />
+                  </div>
                 </div>
                 <div>
                   <label className="block font-semibold text-slate-700 mb-1">Billing Country *</label>
@@ -2686,6 +3416,238 @@ const BillingQuotesModuleInner: React.FC<BillingQuotesModuleProps> = ({
                   />
                 </div>
               </div>
+
+              {/* Smart Vehicle-Grouped Unbilled CN Panel, Combined vs Separate Bills & Unbilled CN Rectification */}
+              {docKind === 'Tax Invoice' && partyName.trim() && (
+                <div className="rounded-xl border border-indigo-200 bg-indigo-50/50 p-3.5 space-y-3">
+                  <div className="flex flex-wrap items-center justify-between gap-2">
+                    <div className="flex items-center gap-2">
+                      <Truck className="w-4 h-4 text-indigo-700" />
+                      <div>
+                        <p className="text-xs font-extrabold text-indigo-950">
+                          Smart Vehicle-Grouped Billing &amp; Unbilled CN Rectification — {partyName.trim()}
+                        </p>
+                        <p className="text-[11px] text-indigo-800">
+                          {selectedPartyUnbilledCns.length > 0
+                            ? `${selectedPartyUnbilledCns.length} unbilled CN(s) across ${partyUnbilledTruckGroups.length} vehicle(s). Same-truck CNs can combine into 1 invoice, or generate 1 separate invoice per truck.`
+                            : 'No pending unbilled Bilty/CNs found for this party.'}
+                        </p>
+                      </div>
+                    </div>
+
+                    {!editingInvoiceId && partyUnbilledTruckGroups.length > 1 && !readOnly && (
+                      <button
+                        type="button"
+                        disabled={batchSavingTrucks}
+                        onClick={handleGenerateSeparateInvoicesPerTruck}
+                        className="inline-flex items-center gap-1.5 px-3 py-1.5 rounded-lg bg-indigo-700 hover:bg-indigo-800 text-white text-xs font-extrabold cursor-pointer disabled:opacity-50"
+                      >
+                        <Layers className="w-3.5 h-3.5" />
+                        {batchSavingTrucks
+                          ? 'Generating Truck Invoices...'
+                          : `Generate ${partyUnbilledTruckGroups.length} Separate Invoices (1 per Truck No)`}
+                      </button>
+                    )}
+                  </div>
+
+                  {partyUnbilledTruckGroups.length > 0 && (
+                    <div className="space-y-2.5">
+                      {partyUnbilledTruckGroups.map((group) => {
+                        const isMultiCnTruck = group.cns.length > 1;
+                        const isDividing = busyCnActionId === `truck:${group.truckLabel}`;
+                        const divideVal = divideFreightMap[group.truckKey] ?? String(group.totalFreight || '');
+                        return (
+                          <div
+                            key={group.truckKey}
+                            className="rounded-lg border border-indigo-200 bg-white overflow-hidden"
+                          >
+                            <div className="px-3 py-2 bg-slate-50 border-b border-slate-200 flex flex-wrap items-center justify-between gap-2">
+                              <div className="flex flex-wrap items-center gap-2">
+                                <span className="px-2 py-0.5 rounded bg-slate-900 text-amber-300 font-mono-num text-[11px] font-extrabold">
+                                  {group.truckLabel}
+                                </span>
+                                <span
+                                  className={`px-2 py-0.5 rounded text-[10px] font-extrabold ${
+                                    isMultiCnTruck
+                                      ? 'bg-emerald-100 text-emerald-800 border border-emerald-300'
+                                      : 'bg-blue-100 text-blue-800'
+                                  }`}
+                                >
+                                  {group.cns.length} CN{isMultiCnTruck ? 's · Same Truck (Combine Eligible)' : ''}
+                                </span>
+                                <span className="text-[11px] font-mono-num text-slate-700 font-semibold">
+                                  Wt: {group.totalWeight.toFixed(2)} MT · Sum: ₹{formatINR(group.totalFreight)}
+                                </span>
+                              </div>
+
+                              <div className="flex flex-wrap items-center gap-1.5">
+                                {isMultiCnTruck && !readOnly && (
+                                  <div className="flex items-center gap-1 bg-amber-50 border border-amber-300 rounded px-1.5 py-0.5">
+                                    <Split className="w-3 h-3 text-amber-700 shrink-0" />
+                                    <span className="text-[10px] font-bold text-amber-900">Divide ₹:</span>
+                                    <input
+                                      type="number"
+                                      min={0}
+                                      step="0.01"
+                                      value={divideVal}
+                                      onChange={(e) =>
+                                        setDivideFreightMap((prev) => ({
+                                          ...prev,
+                                          [group.truckKey]: e.target.value,
+                                        }))
+                                      }
+                                      className="w-20 px-1.5 py-0.5 rounded border border-amber-300 bg-white text-[11px] font-mono-num text-right"
+                                      placeholder="Truck ₹"
+                                    />
+                                    <button
+                                      type="button"
+                                      disabled={isDividing}
+                                      onClick={() =>
+                                        handleDivideTruckGroupFreight(
+                                          group.cns,
+                                          group.truckLabel,
+                                          divideVal,
+                                          'equal'
+                                        )
+                                      }
+                                      className="px-1.5 py-0.5 rounded bg-amber-600 hover:bg-amber-700 text-white text-[10px] font-bold cursor-pointer disabled:opacity-50"
+                                    >
+                                      Split Equal
+                                    </button>
+                                    <button
+                                      type="button"
+                                      disabled={isDividing}
+                                      onClick={() =>
+                                        handleDivideTruckGroupFreight(
+                                          group.cns,
+                                          group.truckLabel,
+                                          divideVal,
+                                          'weight'
+                                        )
+                                      }
+                                      className="px-1.5 py-0.5 rounded bg-slate-800 hover:bg-slate-900 text-white text-[10px] font-bold cursor-pointer disabled:opacity-50"
+                                    >
+                                      By Wt
+                                    </button>
+                                  </div>
+                                )}
+
+                                <button
+                                  type="button"
+                                  onClick={() => handleLoadTruckGroupIntoInvoice(group.cns, group.truckLabel)}
+                                  className={`px-2.5 py-1 rounded text-[11px] font-extrabold cursor-pointer ${
+                                    isMultiCnTruck
+                                      ? 'bg-emerald-600 hover:bg-emerald-700 text-white'
+                                      : 'bg-blue-600 hover:bg-blue-700 text-white'
+                                  }`}
+                                >
+                                  {isMultiCnTruck
+                                    ? `Combine ${group.cns.length} CNs into 1 Invoice`
+                                    : 'Load into 1 Invoice'}
+                                </button>
+                              </div>
+                            </div>
+
+                            <div className="divide-y divide-slate-100">
+                              {group.cns.map((cn) => {
+                                const currentParty = resolveCnBillingParty(cn);
+                                const nextPartyDraft = rectifyPartyMap[cn.id] ?? currentParty;
+                                const nextFreightDraft =
+                                  editCnFreightMap[cn.id] ?? String(roundPaise(cn.totalFreight || 0));
+                                const partyChanged =
+                                  nextPartyDraft.trim().toLowerCase() !== currentParty.toLowerCase();
+                                const freightChanged =
+                                  roundPaise(Number(nextFreightDraft) || 0) !==
+                                  roundPaise(Number(cn.totalFreight || 0));
+                                const cnBusy = busyCnActionId === cn.id;
+
+                                return (
+                                  <div
+                                    key={cn.id}
+                                    className="px-3 py-2 flex flex-wrap items-center justify-between gap-2 text-[11px]"
+                                  >
+                                    <div className="min-w-[200px]">
+                                      <span className="font-mono-num font-extrabold text-blue-900">
+                                        {cn.cnNo}
+                                      </span>{' '}
+                                      · {formatDateDDMMYYYY(cn.cnDate)} · {cn.fromCity} → {cn.toCity} ·{' '}
+                                      <span className="font-mono-num">
+                                        {Number(cn.nettWeight || 0).toFixed(2)} MT
+                                      </span>
+                                    </div>
+
+                                    {!readOnly && (
+                                      <div className="flex flex-wrap items-center gap-2">
+                                        <div className="flex items-center gap-1">
+                                          <ArrowRightLeft className="w-3 h-3 text-indigo-600 shrink-0" />
+                                          <div className="w-52">
+                                            <SearchableSelect
+                                              ariaLabel={`Rectify Billing Party for ${cn.cnNo}`}
+                                              value={nextPartyDraft}
+                                              onChange={(val) =>
+                                                setRectifyPartyMap((prev) => ({ ...prev, [cn.id]: val }))
+                                              }
+                                              options={billingCustomerParties.map((p) => ({
+                                                value: p.name,
+                                                label: p.name,
+                                              }))}
+                                              placeholder="Billing Party..."
+                                              buttonClassName="py-0.5 text-[11px] bg-white"
+                                            />
+                                          </div>
+                                          {partyChanged && (
+                                            <button
+                                              type="button"
+                                              disabled={cnBusy}
+                                              onClick={() =>
+                                                handleRectifyUnbilledCnParty(cn, nextPartyDraft)
+                                              }
+                                              className="px-2 py-1 rounded bg-indigo-600 hover:bg-indigo-700 text-white font-bold cursor-pointer disabled:opacity-50"
+                                            >
+                                              {cnBusy ? '...' : 'Move Party'}
+                                            </button>
+                                          )}
+                                        </div>
+
+                                        <div className="flex items-center gap-1">
+                                          <span className="font-bold text-slate-600">Freight ₹</span>
+                                          <input
+                                            type="number"
+                                            min={0}
+                                            step="0.01"
+                                            value={nextFreightDraft}
+                                            onChange={(e) =>
+                                              setEditCnFreightMap((prev) => ({
+                                                ...prev,
+                                                [cn.id]: e.target.value,
+                                              }))
+                                            }
+                                            className="w-24 px-2 py-0.5 rounded border border-slate-300 font-mono-num text-right font-bold"
+                                          />
+                                          <button
+                                            type="button"
+                                            disabled={cnBusy || !freightChanged}
+                                            onClick={() =>
+                                              handleSaveUnbilledCnFreight(cn, nextFreightDraft)
+                                            }
+                                            className="px-2 py-1 rounded bg-emerald-600 hover:bg-emerald-700 text-white font-bold cursor-pointer disabled:opacity-40"
+                                          >
+                                            Save ₹
+                                          </button>
+                                        </div>
+                                      </div>
+                                    )}
+                                  </div>
+                                );
+                              })}
+                            </div>
+                          </div>
+                        );
+                      })}
+                    </div>
+                  )}
+                </div>
+              )}
 
               {/* Unlimited Consignment & Vehicle Rows */}
               <div>
@@ -3308,7 +4270,7 @@ const BillingQuotesModuleInner: React.FC<BillingQuotesModuleProps> = ({
                   <div className="bg-slate-900 text-white px-4 py-3 flex flex-wrap items-center justify-between gap-2">
                     <div>
                       <h4 className="text-sm font-extrabold">
-                        FoxPro Bilty Picker — {partyName ? partyName : 'All Parties'} ({modalUnbilledCns.length} Unbilled)
+                        FoxPro Unbilled Bilty Picker — {partyName ? partyName : 'Pending Unbilled CNs'} ({modalUnbilledCns.length} Unbilled)
                       </h4>
                       <p className="text-[11px] text-amber-300">
                         Keys: ↑ / ↓ Navigate · Press &apos;S&apos; or Click to Toggle Selection · Press &apos;Esc&apos; or &apos;Enter&apos; to Paste &amp; Finalize Bill
@@ -3325,7 +4287,9 @@ const BillingQuotesModuleInner: React.FC<BillingQuotesModuleProps> = ({
                   <div className="overflow-y-auto flex-1 divide-y divide-slate-100 text-xs">
                     {modalUnbilledCns.length === 0 ? (
                       <div className="p-8 text-center text-slate-500">
-                        All Consignment Notes are already marked billed.
+                        {partyName
+                          ? `No pending unbilled Bilty/CNs found for ${partyName}.`
+                          : 'All Consignment Notes are already marked billed.'}
                       </div>
                     ) : (
                       modalUnbilledCns.map((cn, idx) => {
@@ -3483,42 +4447,68 @@ const BillingQuotesModuleInner: React.FC<BillingQuotesModuleProps> = ({
                   <button
                     type="button"
                     disabled={!canPrintOrShareCurrentForm}
-                    onClick={() => {
+                    onClick={async () => {
                       const partyRec = parties.find(
                         (p) => p.name.trim().toLowerCase() === partyName.trim().toLowerCase()
                       );
                       const invObj = buildInvoiceObject();
-                      const msg = `${docKind} ${invObj.invoiceNo} | Date: ${formatDateDDMMYYYY(invObj.invoiceDate)} | Party: ${invObj.partyName} | Grand Total: Rs. ${formatINR(invObj.grandTotal)} (${amountToIndianWords(invObj.grandTotal)}) — ${company.companyName}`;
-                      triggerExternalShareLink(
-                        buildWhatsAppShareHref({ phone: partyRec?.phone || '', message: msg })
+                      const pdf = await generateInvoicePDF(
+                        invObj,
+                        company,
+                        includeAnnexure,
+                        'p',
+                        copyCount
                       );
+                      const res = await sharePdfDirect({
+                        pdf,
+                        channel: 'whatsapp',
+                        phone: partyRec?.phone,
+                        email: partyRec?.email,
+                        partyName: invObj.partyName,
+                        docNo: invObj.invoiceNo,
+                        docLabel: docKind,
+                        company,
+                      });
+                      setScanMsg(res.message);
                     }}
                     className="inline-flex items-center gap-1 px-2.5 py-1.5 rounded-md bg-emerald-600 hover:bg-emerald-700 text-white text-xs font-bold cursor-pointer disabled:opacity-40 disabled:cursor-not-allowed"
+                    title="Attach & Share Real Invoice PDF on WhatsApp"
                   >
                     <MessageSquare className="w-3.5 h-3.5" />
-                    WhatsApp
+                    WhatsApp PDF
                   </button>
                   <button
                     type="button"
                     disabled={!canPrintOrShareCurrentForm}
-                    onClick={() => {
+                    onClick={async () => {
                       const partyRec = parties.find(
                         (p) => p.name.trim().toLowerCase() === partyName.trim().toLowerCase()
                       );
                       const invObj = buildInvoiceObject();
-                      const msg = `${docKind} ${invObj.invoiceNo}\nDate: ${formatDateDDMMYYYY(invObj.invoiceDate)}\nParty: ${invObj.partyName}\nGrand Total: Rs. ${formatINR(invObj.grandTotal)}\nNarration: ${effectiveNarration}`;
-                      triggerExternalShareLink(
-                        buildEmailShareHref({
-                          email: partyRec?.email || 'drc.kolkata1@gmail.com',
-                          subject: `${docKind} ${invObj.invoiceNo} — ${invObj.partyName}`,
-                          body: msg,
-                        })
+                      const pdf = await generateInvoicePDF(
+                        invObj,
+                        company,
+                        includeAnnexure,
+                        'p',
+                        copyCount
                       );
+                      const res = await sharePdfDirect({
+                        pdf,
+                        channel: 'email',
+                        phone: partyRec?.phone,
+                        email: partyRec?.email,
+                        partyName: invObj.partyName,
+                        docNo: invObj.invoiceNo,
+                        docLabel: docKind,
+                        company,
+                      });
+                      setScanMsg(res.message);
                     }}
                     className="inline-flex items-center gap-1 px-2.5 py-1.5 rounded-md bg-indigo-600 hover:bg-indigo-700 text-white text-xs font-bold cursor-pointer disabled:opacity-40 disabled:cursor-not-allowed"
+                    title="Attach & Share Real Invoice PDF via Email"
                   >
                     <Mail className="w-3.5 h-3.5" />
-                    Email
+                    Email PDF
                   </button>
                   <button
                     type="button"
@@ -3788,6 +4778,14 @@ const BillingQuotesModuleInner: React.FC<BillingQuotesModuleProps> = ({
                   placeholder={PRIORITY_CORRIDOR_REGIONS.join(', ')}
                   required
                 />
+                <PinCountryInputs
+                  labelPrefix="Dest"
+                  pinCode={qDestinationPinCode}
+                  country={qDestinationCountry}
+                  onPinChange={setQDestinationPinCode}
+                  onCountryChange={setQDestinationCountry}
+                  compact
+                />
               </div>
               <div>
                 <label className="block font-semibold text-slate-700 mb-1">Goods Type</label>
@@ -3876,12 +4874,21 @@ const BillingQuotesModuleInner: React.FC<BillingQuotesModuleProps> = ({
                 />
               </div>
               <div>
-                <label className="block font-semibold text-slate-700 mb-1">Entry Point</label>
+                <label className="block font-semibold text-slate-700 mb-1">Entry Point / Border Hub</label>
                 <input
                   type="text"
                   value={qEntryPoint}
                   onChange={(e) => setQEntryPoint(e.target.value)}
+                  placeholder="Petrapole / Raxaul / Jaigaon / As Applicable"
                   className="w-full px-2.5 py-1.5 rounded border border-slate-300"
+                />
+                <PinCountryInputs
+                  labelPrefix="Border"
+                  pinCode={qEntryPointPinCode}
+                  country={qEntryPointCountry}
+                  onPinChange={setQEntryPointPinCode}
+                  onCountryChange={setQEntryPointCountry}
+                  compact
                 />
               </div>
               <div>
@@ -3900,7 +4907,61 @@ const BillingQuotesModuleInner: React.FC<BillingQuotesModuleProps> = ({
                 EMAIL-ONLY ACCEPTANCE POLICY PRINTED ON A4 PDF: Signed Quotation acceptance is valid ONLY via Official Email ({company.email}) — WhatsApp / SMS acceptance is NOT accepted.
               </span>
             </div>
-            <div className="px-4 py-3 bg-slate-50 border-t border-slate-200 flex justify-end">
+            <div className="px-4 py-3 bg-slate-50 border-t border-slate-200 flex flex-wrap justify-end gap-2">
+              <button
+                type="button"
+                onClick={async () => {
+                  const qObj = buildQuotationObject();
+                  if (!qObj.partyName) {
+                    setScanMsg('Enter Quotation Party Name before sharing PDF.');
+                    return;
+                  }
+                  const pdf = await generateQuotationPDF(qObj, company);
+                  const res = await sharePdfDirect({
+                    pdf,
+                    channel: 'whatsapp',
+                    phone: qObj.partyPhone,
+                    email: qObj.partyEmail,
+                    partyName: qObj.partyName,
+                    docNo: qObj.quotationNo,
+                    docLabel: 'Quotation',
+                    company,
+                  });
+                  setScanMsg(res.message);
+                }}
+                className="inline-flex items-center gap-1.5 px-3 py-1.5 rounded-md bg-emerald-600 hover:bg-emerald-700 text-white text-xs font-bold cursor-pointer"
+                title="Share Real Quotation PDF on WhatsApp"
+              >
+                <MessageSquare className="w-3.5 h-3.5" />
+                WhatsApp PDF
+              </button>
+              <button
+                type="button"
+                onClick={async () => {
+                  const qObj = buildQuotationObject();
+                  if (!qObj.partyName) {
+                    setScanMsg('Enter Quotation Party Name before sharing PDF.');
+                    return;
+                  }
+                  const pdf = await generateQuotationPDF(qObj, company);
+                  const res = await sharePdfDirect({
+                    pdf,
+                    channel: 'email',
+                    phone: qObj.partyPhone,
+                    email: qObj.partyEmail,
+                    partyName: qObj.partyName,
+                    docNo: qObj.quotationNo,
+                    docLabel: 'Quotation',
+                    company,
+                  });
+                  setScanMsg(res.message);
+                }}
+                className="inline-flex items-center gap-1.5 px-3 py-1.5 rounded-md bg-indigo-600 hover:bg-indigo-700 text-white text-xs font-bold cursor-pointer"
+                title="Share Real Quotation PDF via Email"
+              >
+                <Mail className="w-3.5 h-3.5" />
+                Email PDF
+              </button>
               <button
                 type="submit"
                 disabled={quotationReadOnly}
@@ -4055,6 +5116,14 @@ const BillingQuotesModuleInner: React.FC<BillingQuotesModuleProps> = ({
                   value={dPlace}
                   onChange={(e) => setDPlace(e.target.value)}
                   className="w-full px-2.5 py-1.5 rounded border border-slate-300"
+                />
+                <PinCountryInputs
+                  labelPrefix="Place"
+                  pinCode={dPlacePinCode}
+                  country={dPlaceCountry}
+                  onPinChange={setDPlacePinCode}
+                  onCountryChange={setDPlaceCountry}
+                  compact
                 />
               </div>
             </div>

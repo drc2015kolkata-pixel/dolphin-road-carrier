@@ -53,3 +53,26 @@
     display: none !important;
   }
 }
+
+/* 90-degree CSS landscape fallback for Android/mobile portrait screens */
+.drc-css-landscape-fallback {
+  min-width: 960px;
+}
+
+@media (max-width: 900px) and (orientation: portrait) {
+  .drc-css-landscape-fallback {
+    position: fixed;
+    top: 0;
+    left: 100vw;
+    width: 100vh !important;
+    min-width: 100vh !important;
+    height: 100vw !important;
+    min-height: 100vw !important;
+    transform: rotate(90deg);
+    transform-origin: top left;
+    overflow-y: auto;
+    overflow-x: auto;
+    z-index: 40;
+  }
+}
+

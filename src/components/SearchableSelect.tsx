@@ -15,6 +15,7 @@ interface NormalizedOption {
   label: string;
   hint?: string;
   pinFirst?: boolean;
+  searchLower: string;
 }
 
 interface SearchableSelectProps {
@@ -33,7 +34,7 @@ interface SearchableSelectProps {
   pinEmptyOptionFirst?: boolean;
 }
 
-export const SearchableSelect: React.FC<SearchableSelectProps> = ({
+const SearchableSelectInner: React.FC<SearchableSelectProps> = ({
   value,
   onChange,
   options,
@@ -54,11 +55,16 @@ export const SearchableSelect: React.FC<SearchableSelectProps> = ({
   const searchInputRef = useRef<HTMLInputElement | null>(null);
 
   const normalized = useMemo<NormalizedOption[]>(() => {
-    const mapped = options.map((opt) =>
-      typeof opt === 'string'
-        ? { value: opt, label: opt }
-        : { value: opt.value, label: opt.label, hint: opt.hint, pinFirst: opt.pinFirst }
-    );
+    const mapped = options.map((opt) => {
+      const base =
+        typeof opt === 'string'
+          ? { value: opt, label: opt }
+          : { value: opt.value, label: opt.label, hint: opt.hint, pinFirst: opt.pinFirst };
+      return {
+        ...base,
+        searchLower: `${base.label} ${base.value} ${base.hint || ''}`.toLowerCase(),
+      };
+    });
     if (!sortAlphabetically) return mapped;
 
     const pinned: NormalizedOption[] = [];
@@ -77,18 +83,16 @@ export const SearchableSelect: React.FC<SearchableSelectProps> = ({
   }, [options, sortAlphabetically, pinEmptyOptionFirst]);
 
   const filtered = useMemo(() => {
-    const q = query.trim().toLowerCase();
-    if (!q) return normalized;
-    return normalized.filter(
-      (opt) =>
-        opt.label.toLowerCase().includes(q) ||
-        opt.value.toLowerCase().includes(q) ||
-        (opt.hint && opt.hint.toLowerCase().includes(q))
-    );
+    const tokens = query.trim().toLowerCase().split(/\s+/).filter(Boolean);
+    if (tokens.length === 0) return normalized;
+    return normalized.filter((opt) => tokens.every((tok) => opt.searchLower.includes(tok)));
   }, [normalized, query]);
 
   const selectedLabel = useMemo(() => {
-    const found = normalized.find((opt) => opt.value === value);
+    const valLower = value.trim().toLowerCase();
+    const found = normalized.find(
+      (opt) => opt.value === value || (valLower !== '' && opt.value.toLowerCase() === valLower)
+    );
     if (found) return found.label;
     return value || placeholder;
   }, [normalized, value, placeholder]);
@@ -206,3 +210,5 @@ export const SearchableSelect: React.FC<SearchableSelectProps> = ({
     </div>
   );
 };
+
+export const SearchableSelect = React.memo(SearchableSelectInner);

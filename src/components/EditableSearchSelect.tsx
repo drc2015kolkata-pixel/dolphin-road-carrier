@@ -64,7 +64,7 @@ interface EditableSearchSelectProps {
   onDeleteOption?: (val: string) => void | Promise<void>;
 }
 
-export const EditableSearchSelect: React.FC<EditableSearchSelectProps> = ({
+const EditableSearchSelectInner: React.FC<EditableSearchSelectProps> = ({
   value,
   onChange,
   options,
@@ -111,19 +111,21 @@ export const EditableSearchSelect: React.FC<EditableSearchSelectProps> = ({
 
   const sortedOptions = useMemo(() => {
     const clean = Array.from(new Set(options.map((o) => String(o || '').trim()).filter(Boolean)));
-    return clean.sort((a, b) =>
+    clean.sort((a, b) =>
       a.localeCompare(b, undefined, { sensitivity: 'base', numeric: true })
     );
+    return clean.map((label) => ({ label, lower: label.toLowerCase() }));
   }, [options]);
 
   const filtered = useMemo(() => {
-    const q = (menuSearch || query).trim().toLowerCase();
-    // If query equals current exact value and user didn't type in dropdown filter, show full A-Z sorted list
+    const rawQ = (menuSearch || query).trim().toLowerCase();
+    const isExactCurrentValue = !menuSearch && rawQ === value.trim().toLowerCase();
+    const tokens = !rawQ || isExactCurrentValue ? [] : rawQ.split(/\s+/).filter(Boolean);
     const list =
-      !q || (!menuSearch && q === value.trim().toLowerCase())
+      tokens.length === 0
         ? sortedOptions
-        : sortedOptions.filter((opt) => opt.toLowerCase().includes(q));
-    return list.slice(0, maxResults);
+        : sortedOptions.filter((opt) => tokens.every((tok) => opt.lower.includes(tok)));
+    return list.slice(0, maxResults).map((x) => x.label);
   }, [sortedOptions, query, menuSearch, value, maxResults]);
 
   const commitValue = (nextRaw: string) => {
@@ -244,7 +246,9 @@ export const EditableSearchSelect: React.FC<EditableSearchSelectProps> = ({
             onClick={() => {
               setManagerOpen((v) => !v);
               setOpen(false);
-              setNewItemText(query && !options.includes(query) ? query : '');
+              const qLower = query.trim().toLowerCase();
+              const alreadyExists = sortedOptions.some((o) => o.lower === qLower);
+              setNewItemText(query && !alreadyExists ? query : '');
               setEditingTarget(null);
             }}
             className={`px-2 py-1 rounded border text-[11px] font-bold flex items-center gap-0.5 cursor-pointer shrink-0 ${
@@ -380,13 +384,14 @@ export const EditableSearchSelect: React.FC<EditableSearchSelectProps> = ({
           {(onEditOption || onDeleteOption) && sortedOptions.length > 0 && (
             <div className="max-h-40 overflow-y-auto divide-y divide-slate-100 border border-slate-200 rounded">
               {sortedOptions
-                .filter((opt) =>
-                  !newItemText.trim()
-                    ? true
-                    : opt.toLowerCase().includes(newItemText.trim().toLowerCase())
-                )
+                .filter((opt) => {
+                  const nq = newItemText.trim().toLowerCase();
+                  return !nq ? true : opt.lower.includes(nq);
+                })
                 .slice(0, 40)
-                .map((opt) => (
+                .map((optObj) => {
+                  const opt = optObj.label;
+                  return (
                   <div key={opt} className="flex items-center justify-between gap-1.5 px-2 py-1 hover:bg-slate-50">
                     {editingTarget === opt ? (
                       <div className="flex items-center gap-1 flex-1 min-w-0">
@@ -444,7 +449,8 @@ export const EditableSearchSelect: React.FC<EditableSearchSelectProps> = ({
                       </>
                     )}
                   </div>
-                ))}
+                  );
+                })}
             </div>
           )}
         </div>
@@ -452,3 +458,5 @@ export const EditableSearchSelect: React.FC<EditableSearchSelectProps> = ({
     </div>
   );
 };
+
+export const EditableSearchSelect = React.memo(EditableSearchSelectInner);

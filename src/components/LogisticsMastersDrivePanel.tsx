@@ -31,8 +31,12 @@ import {
   downloadLogisticsMasterBackupFromDrive,
   DriveFileSummary,
   listLogisticsDriveBackupFiles,
+  sealBackupPayloadWithSha256,
+  unionMergeBackupBundles,
   uploadLogisticsMasterBackupToDrive,
+  verifyBackupPayloadSha256,
 } from '../lib/driveBackup';
+import { isAuthorizedBackupDriveEmail, MASTER_ADMIN_EMAIL } from '../lib/firebase';
 import { SearchableSelect } from './SearchableSelect';
 import { EditableSearchSelect } from './EditableSearchSelect';
 import {
@@ -43,6 +47,8 @@ import {
 import { validateIndianGstin, validateSafeUploadFile } from '../lib/gstinValidator';
 import { GstinInputField } from './GstinInputField';
 import { playAlertBeep, playVerifiedBeep } from '../lib/audioFeedback';
+import { PinCountryInputs, useAutoPinLookup } from './CityPinCountryAutoFill';
+import { SupportedCountry } from '../lib/postalPinLookup';
 
 interface LogisticsMastersDrivePanelProps {
   divisionMode?: LogisticsDivisionCode;
@@ -95,6 +101,8 @@ export const LogisticsMastersDrivePanel: React.FC<LogisticsMastersDrivePanelProp
   const [pGstin, setPGstin] = useState('');
   const [pPhone, setPPhone] = useState('');
   const [pAddress, setPAddress] = useState('');
+  const [pPinCode, setPPinCode] = useState('');
+  const [pCountry, setPCountry] = useState<SupportedCountry>('India');
   const [pEmail, setPEmail] = useState('');
 
   // Vehicle form
@@ -117,6 +125,17 @@ export const LogisticsMastersDrivePanel: React.FC<LogisticsMastersDrivePanelProp
   const [dDlExp, setDDlExp] = useState('');
   const [dPhone, setDPhone] = useState('');
   const [dAddr, setDAddr] = useState('');
+  const [dPinCode, setDPinCode] = useState('');
+  const [dCountry, setDCountry] = useState<SupportedCountry>('India');
+
+  useAutoPinLookup(pAddress, pPinCode, pCountry, (pin, country) => {
+    setPPinCode(pin);
+    setPCountry(country);
+  });
+  useAutoPinLookup(dAddr, dPinCode, dCountry, (pin, country) => {
+    setDPinCode(pin);
+    setDCountry(country);
+  });
 
   // Drive backup state
   const [driveStatus, setDriveStatus] = useState<string | null>(null);
@@ -144,6 +163,8 @@ export const LogisticsMastersDrivePanel: React.FC<LogisticsMastersDrivePanelProp
         gstin: pGstin.trim().toUpperCase(),
         phone: pPhone.trim(),
         address: pAddress.trim(),
+        pinCode: pPinCode.trim(),
+        country: pCountry,
         email: pEmail.trim(),
         branchCode: branch,
         openingBalance: 0,
@@ -157,6 +178,8 @@ export const LogisticsMastersDrivePanel: React.FC<LogisticsMastersDrivePanelProp
     setPGstin('');
     setPPhone('');
     setPAddress('');
+    setPPinCode('');
+    setPCountry('India');
     setPEmail('');
   };
 
@@ -205,6 +228,8 @@ export const LogisticsMastersDrivePanel: React.FC<LogisticsMastersDrivePanelProp
         dlExpiry: dDlExp,
         phone: dPhone.trim(),
         address: dAddr.trim(),
+        pinCode: dPinCode.trim(),
+        country: dCountry,
         branchCode: branch,
         ownerUid,
       },
@@ -215,6 +240,8 @@ export const LogisticsMastersDrivePanel: React.FC<LogisticsMastersDrivePanelProp
     setDDlExp('');
     setDPhone('');
     setDAddr('');
+    setDPinCode('');
+    setDCountry('India');
   };
 
   const buildLogisticsBundle = () => ({
@@ -234,16 +261,34 @@ export const LogisticsMastersDrivePanel: React.FC<LogisticsMastersDrivePanelProp
       await onConnectDrive();
       return;
     }
+    if (connectedEmail && !isAuthorizedBackupDriveEmail(connectedEmail)) {
+      playAlertBeep();
+      setDriveStatus(
+        `Drive Security Lock: Sync & Restore restricted strictly to ${MASTER_ADMIN_EMAIL} (connected: ${connectedEmail}).`
+      );
+      return;
+    }
     setDriveBusy(true);
     setDriveStatus(null);
     try {
-      const res = await uploadLogisticsMasterBackupToDrive(driveAccessToken, buildLogisticsBundle());
+      const existingRemote = await downloadLogisticsMasterBackupFromDrive(
+        driveAccessToken,
+        connectedEmail
+      ).catch(() => null);
+      const mergedPayload = unionMergeBackupBundles(buildLogisticsBundle(), existingRemote);
+      const res = await uploadLogisticsMasterBackupToDrive(
+        driveAccessToken,
+        mergedPayload,
+        connectedEmail
+      );
       const files = await listLogisticsDriveBackupFiles(driveAccessToken);
       setDriveFiles(files);
+      playVerifiedBeep();
       setDriveStatus(
-        `Backed up to Google Drive / DOLPHIN_LOGISTICS_DIVISION_BACKUP / ${res.name} (${Math.max(1, Math.round(res.compressedBytes / 1024))} KB)`
+        `Union-merged & SHA-256 sealed (${res.sha256.slice(0, 12)}…) to DOLPHIN_LOGISTICS_DIVISION_BACKUP/${res.name} (${Math.max(1, Math.round(res.compressedBytes / 1024))} KB)`
       );
     } catch (err) {
+      playAlertBeep();
       setDriveStatus(err instanceof Error ? err.message : 'Logistics Drive backup failed.');
     } finally {
       setDriveBusy(false);
@@ -255,25 +300,43 @@ export const LogisticsMastersDrivePanel: React.FC<LogisticsMastersDrivePanelProp
       await onConnectDrive();
       return;
     }
+    if (connectedEmail && !isAuthorizedBackupDriveEmail(connectedEmail)) {
+      playAlertBeep();
+      setDriveStatus(
+        `Drive Security Lock: Restore restricted strictly to ${MASTER_ADMIN_EMAIL} (connected: ${connectedEmail}).`
+      );
+      return;
+    }
     setDriveBusy(true);
     setDriveStatus(null);
     try {
-      const payload = await downloadLogisticsMasterBackupFromDrive(driveAccessToken);
+      const payload = await downloadLogisticsMasterBackupFromDrive(
+        driveAccessToken,
+        connectedEmail
+      );
       if (!payload) {
         setDriveStatus('No Logistics backup file found inside DOLPHIN_LOGISTICS_DIVISION_BACKUP.');
         return;
       }
       await restoreLogisticsBackupBundle(payload);
-      setDriveStatus('Logistics Division data restored cleanly from DOLPHIN_LOGISTICS_DIVISION_BACKUP.');
+      playVerifiedBeep();
+      setDriveStatus(
+        'Logistics Division data verified (SHA-256) & union-restored cleanly from DOLPHIN_LOGISTICS_DIVISION_BACKUP.'
+      );
     } catch (err) {
+      playAlertBeep();
       setDriveStatus(err instanceof Error ? err.message : 'Logistics Drive restore failed.');
     } finally {
       setDriveBusy(false);
     }
   };
 
-  const handleLocalJsonExport = () => {
-    const blob = new Blob([JSON.stringify(buildLogisticsBundle(), null, 2)], {
+  const handleLocalJsonExport = async () => {
+    const sealed = await sealBackupPayloadWithSha256(
+      buildLogisticsBundle(),
+      connectedEmail || MASTER_ADMIN_EMAIL
+    );
+    const blob = new Blob([JSON.stringify(sealed.sealedPayload, null, 2)], {
       type: 'application/json',
     });
     const url = URL.createObjectURL(blob);
@@ -284,6 +347,7 @@ export const LogisticsMastersDrivePanel: React.FC<LogisticsMastersDrivePanelProp
     a.click();
     document.body.removeChild(a);
     setTimeout(() => URL.revokeObjectURL(url), 4000);
+    setDriveStatus(`Exported SHA-256 sealed Logistics JSON (${sealed.sha256.slice(0, 12)}…).`);
   };
 
   const handleLocalJsonImport = async (file: File | undefined) => {
@@ -297,10 +361,19 @@ export const LogisticsMastersDrivePanel: React.FC<LogisticsMastersDrivePanelProp
     try {
       const text = await file.text();
       const parsed = JSON.parse(text) as Record<string, unknown>;
+      const sealCheck = await verifyBackupPayloadSha256(parsed);
+      if (sealCheck.hasSeal && !sealCheck.valid) {
+        playAlertBeep();
+        setDriveStatus(sealCheck.reason || 'Blocked tampered backup: SHA-256 mismatch.');
+        return;
+      }
       await restoreLogisticsBackupBundle(parsed);
       playVerifiedBeep();
-      setDriveStatus(`Imported Logistics backup file "${file.name}" successfully.`);
+      setDriveStatus(
+        `Imported & verified Logistics backup "${file.name}" successfully${sealCheck.hasSeal ? ` (SHA-256 ${sealCheck.expectedSha256?.slice(0, 10)}…)` : ''}.`
+      );
     } catch (err) {
+      playAlertBeep();
       setDriveStatus(err instanceof Error ? err.message : 'Invalid Logistics JSON backup file.');
     }
   };
@@ -386,8 +459,15 @@ export const LogisticsMastersDrivePanel: React.FC<LogisticsMastersDrivePanelProp
                 <input
                   value={pAddress}
                   onChange={(e) => setPAddress(e.target.value)}
-                  placeholder="Address / City"
+                  placeholder="Address / City (auto-fills PIN)"
                   className="w-full px-2.5 py-1.5 rounded border border-slate-300"
+                />
+                <PinCountryInputs
+                  pinCode={pPinCode}
+                  country={pCountry}
+                  onPinChange={setPPinCode}
+                  onCountryChange={setPCountry}
+                  compact
                 />
                 <button
                   type="submit"
@@ -640,8 +720,15 @@ export const LogisticsMastersDrivePanel: React.FC<LogisticsMastersDrivePanelProp
                 <input
                   value={dAddr}
                   onChange={(e) => setDAddr(e.target.value)}
-                  placeholder="Address"
+                  placeholder="Address / City (auto-fills PIN)"
                   className="w-full px-2.5 py-1.5 rounded border border-slate-300"
+                />
+                <PinCountryInputs
+                  pinCode={dPinCode}
+                  country={dCountry}
+                  onPinChange={setDPinCode}
+                  onCountryChange={setDCountry}
+                  compact
                 />
                 <button
                   type="submit"
@@ -753,7 +840,7 @@ export const LogisticsMastersDrivePanel: React.FC<LogisticsMastersDrivePanelProp
             <div className="pt-2 border-t border-slate-200 flex flex-wrap gap-2">
               <button
                 type="button"
-                onClick={handleLocalJsonExport}
+                onClick={() => void handleLocalJsonExport()}
                 className="inline-flex items-center gap-1.5 px-3 py-1.5 rounded-lg border border-slate-300 bg-white hover:bg-slate-50 font-bold cursor-pointer"
               >
                 <Download className="w-3.5 h-3.5" />

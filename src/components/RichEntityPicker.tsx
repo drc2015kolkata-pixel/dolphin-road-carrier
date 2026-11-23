@@ -1,4 +1,4 @@
-import React, { useEffect, useMemo, useRef, useState } from 'react';
+import React, { useDeferredValue, useEffect, useMemo, useRef, useState } from 'react';
 import {
   Building2,
   Check,
@@ -88,7 +88,7 @@ export interface RichEntityPickerProps<T> {
   quickPreview?: React.ReactNode;
 }
 
-export function RichEntityPicker<T>({
+function RichEntityPickerInner<T>({
   ariaLabel,
   value,
   selectedId,
@@ -117,6 +117,11 @@ export function RichEntityPicker<T>({
   const [openedByToggle, setOpenedByToggle] = useState(false);
   const [menuQuery, setMenuQuery] = useState('');
 
+  const renderTitleRef = useRef(renderTitle);
+  renderTitleRef.current = renderTitle;
+  const getSearchTextRef = useRef(getSearchText);
+  getSearchTextRef.current = getSearchText;
+
   useEffect(() => {
     const onOutside = (e: MouseEvent) => {
       if (containerRef.current && !containerRef.current.contains(e.target as Node)) {
@@ -129,30 +134,48 @@ export function RichEntityPicker<T>({
     return () => document.removeEventListener('mousedown', onOutside);
   }, []);
 
-  const sortedItems = useMemo(() => {
-    return [...items].sort((a, b) =>
-      String(renderTitle(a) || '').localeCompare(String(renderTitle(b) || ''), undefined, {
+  const indexedItems = useMemo(() => {
+    const mapped = items.map((item) => ({
+      item,
+      title: String(renderTitleRef.current(item) || ''),
+      searchLower: String(getSearchTextRef.current(item) || '').toLowerCase(),
+    }));
+    mapped.sort((a, b) =>
+      a.title.localeCompare(b.title, undefined, {
         sensitivity: 'base',
         numeric: true,
       })
     );
-  }, [items, renderTitle]);
+    return mapped;
+  }, [items]);
+
+  const rawQuery = menuQuery.trim() ? menuQuery : openedByToggle ? '' : value;
+  const deferredQuery = useDeferredValue(rawQuery);
+  const effectiveQuery = items.length > 250 ? deferredQuery : rawQuery;
 
   const filtered = useMemo(() => {
-    const activeQ = menuQuery.trim().toLowerCase();
-    if (activeQ) {
-      return sortedItems
-        .filter((item) => getSearchText(item).toLowerCase().includes(activeQ))
-        .slice(0, maxResults);
+    if (!open) return [];
+    const tokens = effectiveQuery.trim().toLowerCase().split(/\s+/).filter(Boolean);
+    if (tokens.length === 0) {
+      return indexedItems.slice(0, maxResults).map((x) => x.item);
     }
-    const q = value.trim().toLowerCase();
-    if (!q || openedByToggle) {
-      return sortedItems.slice(0, maxResults);
+    const matched: T[] = [];
+    for (let i = 0; i < indexedItems.length; i += 1) {
+      const entry = indexedItems[i];
+      let ok = true;
+      for (let t = 0; t < tokens.length; t += 1) {
+        if (!entry.searchLower.includes(tokens[t])) {
+          ok = false;
+          break;
+        }
+      }
+      if (ok) {
+        matched.push(entry.item);
+        if (matched.length >= maxResults) break;
+      }
     }
-    return sortedItems
-      .filter((item) => getSearchText(item).toLowerCase().includes(q))
-      .slice(0, maxResults);
-  }, [sortedItems, value, menuQuery, openedByToggle, maxResults, getSearchText]);
+    return matched;
+  }, [open, indexedItems, effectiveQuery, maxResults]);
 
   const handlePick = (item: T) => {
     onSelectEntity(item);
@@ -320,6 +343,8 @@ export function RichEntityPicker<T>({
     </div>
   );
 }
+
+export const RichEntityPicker = React.memo(RichEntityPickerInner) as typeof RichEntityPickerInner;
 
 interface EntityQuickPreviewCardProps {
   kind: 'party' | 'broker' | 'owner' | 'vehicle' | 'driver';

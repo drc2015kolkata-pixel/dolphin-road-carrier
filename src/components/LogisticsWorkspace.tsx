@@ -416,24 +416,38 @@ export const LogisticsWorkspace: React.FC<LogisticsWorkspaceProps> = ({
           />
         )}
 
-        {(activeLogiTab === 'masters' || activeLogiTab === 'backup') && (
-          <LogisticsMastersDrivePanel
-            divisionMode={divisionMode}
-            subView={activeLogiTab}
-            ownerUid={ownerUid}
-            activeBranchCode={activeBranchCode}
-            parties={parties}
-            vehicles={vehicles}
-            drivers={drivers}
-            dockets={dockets}
-            manifests={manifests}
-            invoices={invoices}
-            ledgers={ledgers}
-            connectedEmail={connectedEmail}
-            driveAccessToken={driveAccessToken}
-            onConnectDrive={onConnectDrive}
-            onShowConfirm={onShowConfirm}
-          />
+        {activeLogiTab === 'backup' && !isMasterAdmin ? (
+          <div className="bg-white rounded-xl border border-red-200 shadow-sm p-8 text-center space-y-2">
+            <div className="w-12 h-12 rounded-full bg-red-50 text-red-600 flex items-center justify-center mx-auto font-extrabold">
+              🔒
+            </div>
+            <h3 className="text-sm font-extrabold text-slate-900">
+              Master Admin Security Lock — Backup &amp; Restore
+            </h3>
+            <p className="text-xs text-slate-600 max-w-md mx-auto">
+              Drive Backup, Daily Snapshot &amp; JSON Restore are strictly locked behind Master Admin PIN + 2FA OTP verification.
+            </p>
+          </div>
+        ) : (
+          (activeLogiTab === 'masters' || activeLogiTab === 'backup') && (
+            <LogisticsMastersDrivePanel
+              divisionMode={divisionMode}
+              subView={activeLogiTab}
+              ownerUid={ownerUid}
+              activeBranchCode={activeBranchCode}
+              parties={parties}
+              vehicles={vehicles}
+              drivers={drivers}
+              dockets={dockets}
+              manifests={manifests}
+              invoices={invoices}
+              ledgers={ledgers}
+              connectedEmail={connectedEmail}
+              driveAccessToken={driveAccessToken}
+              onConnectDrive={onConnectDrive}
+              onShowConfirm={onShowConfirm}
+            />
+          )
         )}
       </div>
     </div>

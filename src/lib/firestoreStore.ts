@@ -196,6 +196,36 @@ export function getStaffSheetAccess(
   return 'blocked';
 }
 
+export function verifySessionPasswordInstant(
+  session: CustomAuthSession,
+  staffAccount: StaffAccount | null,
+  password: string
+): boolean {
+  const cleanPassword = String(password || '').trim();
+  if (!cleanPassword) return false;
+  if (staffAccount) {
+    if (String(staffAccount.pinHash || '') === cleanPassword) return true;
+  }
+  const localAdmin = ensureLocalAdminCreds();
+  if (
+    session.isMasterAdmin &&
+    (cleanPassword === localAdmin.password ||
+      (cleanPassword === 'admin123' && localAdmin.userId.toLowerCase() === 'admin' && localAdmin.password === 'admin123'))
+  ) {
+    return true;
+  }
+  loadOfflineCache();
+  const cachedStaff = (collectionState.get('staff_accounts') as StaffAccount[] | undefined) || [];
+  const staffPool = cachedStaff.length > 0 ? cachedStaff : BUILTIN_DEFAULT_STAFF;
+  const matched = staffPool.find(
+    (s) =>
+      s.active !== false &&
+      String(s.staffCode || '').trim().toLowerCase() === String(session.userId || '').trim().toLowerCase() &&
+      String(s.pinHash || '') === cleanPassword
+  );
+  return Boolean(matched);
+}
+
 export async function loginWithCredentials(
   userId: string,
   password: string
@@ -211,11 +241,19 @@ export async function loginWithCredentials(
   const localAdmin = ensureLocalAdminCreds();
 
   try {
-    const res = await fetch('/api/erp/auth/login', {
-      method: 'POST',
-      headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify({ userId: cleanUserId, password: cleanPassword }),
-    });
+    const controller = typeof AbortController !== 'undefined' ? new AbortController() : null;
+    const timeoutId = controller ? window.setTimeout(() => controller.abort(), 1200) : null;
+    let res: Response;
+    try {
+      res = await fetch('/api/erp/auth/login', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ userId: cleanUserId, password: cleanPassword }),
+        signal: controller?.signal,
+      });
+    } finally {
+      if (timeoutId !== null) window.clearTimeout(timeoutId);
+    }
 
     const contentType = res.headers.get('content-type') || '';
     if (contentType.includes('application/json')) {
@@ -243,7 +281,8 @@ export async function loginWithCredentials(
   } catch (err) {
     if (
       err instanceof Error &&
-      !/Failed to fetch|NetworkError|Load failed|fetch|JSON|Unexpected token/i.test(err.message)
+      err.name !== 'AbortError' &&
+      !/Failed to fetch|NetworkError|Load failed|fetch|JSON|Unexpected token|aborted/i.test(err.message)
     ) {
       throw err;
     }
@@ -779,6 +818,19 @@ export function subscribeCollection<T>(
 // CRUD & Atomic Operations (Server API + Optional Verified Firestore Mirror)
 // ============================================================================
 
+export function emitErpDataSavedEvent(collectionName: string, action: string): void {
+  if (typeof window === 'undefined') return;
+  try {
+    window.dispatchEvent(
+      new CustomEvent('drc:data-saved', {
+        detail: { collectionName, action, at: Date.now() },
+      })
+    );
+  } catch {
+    // Ignore CustomEvent constraints in restricted frames
+  }
+}
+
 export async function upsertDocument(
   collectionName: string,
   id: string,
@@ -906,6 +958,7 @@ export async function upsertDocument(
     }
   }
 
+  emitErpDataSavedEvent(collectionName, isNew ? 'create' : 'update');
   return safeId;
 }
 
@@ -987,6 +1040,7 @@ export async function bulkUpsertDocuments(
     }
   }
 
+  emitErpDataSavedEvent(collectionName, 'bulk-upsert');
   return apiSynced ? items.length : items.length;
 }
 
@@ -1048,6 +1102,7 @@ export async function saveSettingsDocument(
       // Optional cloud mirror
     }
   }
+  emitErpDataSavedEvent('settings', 'settings-save');
 }
 
 export async function removeDocument(collectionName: string, id: string) {
@@ -1081,6 +1136,7 @@ export async function removeDocument(collectionName: string, id: string) {
       // Optional cloud mirror
     }
   }
+  emitErpDataSavedEvent(collectionName, 'delete');
 }
 
 /**
@@ -1235,6 +1291,7 @@ export async function restoreErpBackupBundle(payload: Record<string, unknown>): 
   } catch {
     // Static deployment (e.g. Vercel) relies on bulkUpsertDocuments + IndexedDB + Firestore above
   }
+  emitErpDataSavedEvent('restore', 'restore-erp-bundle');
 }
 
 export async function restoreLogisticsBackupBundle(payload: Record<string, unknown>): Promise<void> {
@@ -1272,5 +1329,6 @@ export async function restoreLogisticsBackupBundle(payload: Record<string, unkno
   } catch {
     // Static deployment relies on IndexedDB + Firestore above
   }
+  emitErpDataSavedEvent('restore', 'restore-logistics-bundle');
 }
 

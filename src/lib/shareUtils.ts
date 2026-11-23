@@ -25,6 +25,19 @@ export function normalizeIndianWhatsAppPhone(phone?: string): string {
   return digits;
 }
 
+export function buildDirectDocumentShareText(params: {
+  partyName?: string;
+  docLabel: string;
+  docNo: string;
+}): string {
+  const party = String(params.partyName || '').trim();
+  const docLabel = String(params.docLabel || 'Document').trim();
+  const docNo = String(params.docNo || '').trim();
+  return [party ? `Party: ${party}` : '', `${docLabel}: ${docNo}`]
+    .filter(Boolean)
+    .join('\n');
+}
+
 export function buildWhatsAppShareHref(params: {
   phone?: string;
   message: string;
@@ -34,25 +47,124 @@ export function buildWhatsAppShareHref(params: {
   return phone ? `https://wa.me/${phone}?text=${encoded}` : `https://wa.me/?text=${encoded}`;
 }
 
+export function buildNativeWhatsAppProtocolHref(params: {
+  phone?: string;
+  message: string;
+}): string {
+  const phone = normalizeIndianWhatsAppPhone(params.phone);
+  const encoded = encodeURIComponent(params.message);
+  return phone ? `whatsapp://send?phone=${phone}&text=${encoded}` : `whatsapp://send?text=${encoded}`;
+}
+
 export function buildEmailShareHref(params: {
   email?: string;
   subject: string;
   body: string;
 }): string {
-  const to = String(params.email || OFFICIAL_PARTY_EMAIL).trim() || OFFICIAL_PARTY_EMAIL;
-  return `mailto:${encodeURIComponent(to)}?subject=${encodeURIComponent(
-    params.subject
-  )}&body=${encodeURIComponent(params.body)}`;
+  const to = String(params.email || '').trim();
+  const prefix = to ? `mailto:${encodeURIComponent(to)}` : 'mailto:';
+  return `${prefix}?subject=${encodeURIComponent(params.subject)}&body=${encodeURIComponent(params.body)}`;
 }
 
 export function triggerExternalShareLink(href: string): void {
   const link = document.createElement('a');
   link.href = href;
-  link.target = '_blank';
-  link.rel = 'noopener noreferrer';
+  if (/^https?:/i.test(href)) {
+    link.target = '_blank';
+    link.rel = 'noopener noreferrer';
+  }
   document.body.appendChild(link);
   link.click();
   document.body.removeChild(link);
+}
+
+export function downloadPdfFileFromResult(pdf: { blobUrl: string; fileName: string }): void {
+  const a = document.createElement('a');
+  a.href = pdf.blobUrl;
+  a.download = pdf.fileName;
+  document.body.appendChild(a);
+  a.click();
+  document.body.removeChild(a);
+}
+
+export async function sharePdfDirect(params: {
+  pdf: { blob: Blob; blobUrl: string; fileName: string };
+  channel: 'whatsapp' | 'email';
+  phone?: string;
+  email?: string;
+  partyName?: string;
+  docNo: string;
+  docLabel: string;
+  company?: CompanySettings;
+}): Promise<{ method: 'web_share' | 'cloud_api' | 'protocol'; cancelled?: boolean; message: string }> {
+  const party = String(params.partyName || '').trim();
+  const docLabel = String(params.docLabel || 'Document').trim();
+  const docNo = String(params.docNo || params.pdf.fileName.replace(/\.pdf$/i, '')).trim();
+  const shareText = buildDirectDocumentShareText({ partyName: party, docLabel, docNo });
+
+  if (params.channel === 'whatsapp' && params.company?.whatsappCloud?.enabled && params.phone) {
+    const apiRes = await sendViaWhatsAppCloudApi({
+      company: params.company,
+      toPhone: params.phone,
+      message: shareText,
+    });
+    if (apiRes.ok) {
+      downloadPdfFileFromResult(params.pdf);
+      return {
+        method: 'cloud_api',
+        message: `Sent via WhatsApp Cloud API to ${params.phone} & downloaded ${params.pdf.fileName}.`,
+      };
+    }
+  }
+
+  if (typeof navigator !== 'undefined' && typeof navigator.share === 'function') {
+    try {
+      const pdfFile = new File([params.pdf.blob], params.pdf.fileName, {
+        type: 'application/pdf',
+      });
+      const canShareFiles =
+        typeof navigator.canShare === 'function' ? navigator.canShare({ files: [pdfFile] }) : false;
+      if (canShareFiles) {
+        await navigator.share({
+          title: `${docLabel} ${docNo}`,
+          text: shareText,
+          files: [pdfFile],
+        });
+        return {
+          method: 'web_share',
+          message: `${docLabel} ${docNo} PDF attached & shared.`,
+        };
+      }
+    } catch (err) {
+      if (err instanceof Error && err.name === 'AbortError') {
+        return { method: 'web_share', cancelled: true, message: 'Share cancelled.' };
+      }
+      // Fall through cleanly to direct PDF download + native protocol link
+    }
+  }
+
+  downloadPdfFileFromResult(params.pdf);
+  if (params.channel === 'whatsapp') {
+    triggerExternalShareLink(
+      buildNativeWhatsAppProtocolHref({ phone: params.phone, message: shareText })
+    );
+    return {
+      method: 'protocol',
+      message: `${params.pdf.fileName} downloaded & WhatsApp opened (${party || docNo}).`,
+    };
+  }
+
+  triggerExternalShareLink(
+    buildEmailShareHref({
+      email: params.email || params.company?.email || OFFICIAL_PARTY_EMAIL,
+      subject: `${docLabel} ${docNo}${party ? ` - ${party}` : ''}`,
+      body: shareText,
+    })
+  );
+  return {
+    method: 'protocol',
+    message: `${params.pdf.fileName} downloaded & Email composer opened (${party || docNo}).`,
+  };
 }
 
 export async function sendViaWhatsAppCloudApi(params: {

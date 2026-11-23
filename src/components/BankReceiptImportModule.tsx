@@ -411,7 +411,7 @@ export const BankReceiptImportModule: React.FC<BankReceiptImportModuleProps> = (
 
   const [selectedBank, setSelectedBank] = useState(bankNames[0]);
   useEffect(() => {
-    if (bankNames.length > 0 && !bankNames.includes(selectedBank)) {
+    if (bankNames.length > 0 && !bankNames.some((b) => b.toLowerCase() === selectedBank.toLowerCase())) {
       setSelectedBank(bankNames[0]);
     }
   }, [bankNames, selectedBank]);

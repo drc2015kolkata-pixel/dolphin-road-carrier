@@ -1,4 +1,5 @@
 import { CompanySettings, ConsignmentNote, LorryHire } from '../types/erp';
+import { resolvePinSync } from './postalPinLookup';
 
 export interface ParsedQrPayload {
   kind: 'drc_invoice' | 'drc_lr' | 'nic_ewb' | 'generic';
@@ -319,8 +320,11 @@ export function buildNicPartBJson(
     | 'extraVehicles'
     | 'fromCity'
     | 'fromState'
+    | 'fromPinCode'
     | 'ewayBillNo'
     | 'extraEwayBills'
+    | 'ewayPlace'
+    | 'ewayPinCode'
     | 'division'
   >,
   company: Pick<CompanySettings, 'gstin' | 'companyName'>,
@@ -339,6 +343,12 @@ export function buildNicPartBJson(
   const [y, m, d] = (cn.cnDate || '').split('-');
   const transDocDate = y && m && d ? `${d}/${m}/${y}` : '';
   const fromState = resolveStateCode(cn.fromState, company.gstin);
+  const fromPlace = (cn.ewayPlace || cn.fromCity || 'KOLKATA').trim().toUpperCase();
+  const explicitPin = (cn.ewayPinCode || cn.fromPinCode || '').replace(/\D/g, '');
+  const resolvedPin =
+    (explicitPin.length === 6 ? explicitPin : '') ||
+    resolvePinSync(fromPlace, 'India')?.pinCode ||
+    '700001';
 
   return {
     portalFormat: 'NIC-EWB-PART-B-UPDATE-V1.03',
@@ -348,7 +358,8 @@ export function buildNicPartBJson(
     ewbUpdates: (ewbs.length > 0 ? ewbs : ['PENDING_EWB_NO']).map((ewbNo) => ({
       ewbNo,
       vehicleNo: vehicles[0] || '',
-      fromPlace: (cn.fromCity || 'KOLKATA').toUpperCase(),
+      fromPlace,
+      fromPincode: Number(resolvedPin) || 700001,
       fromState,
       reasonCode,
       reasonRem,

@@ -1,10 +1,12 @@
-import React, { useCallback, useEffect, useMemo, useRef, useState } from 'react';
+import React, { useCallback, useDeferredValue, useEffect, useMemo, useRef, useState } from 'react';
 import {
   AlertTriangle,
   ArrowLeft,
   Camera,
   CheckCircle2,
   ChevronDown,
+  ChevronLeft,
+  ChevronRight,
   ChevronUp,
   ClipboardList,
   Edit3,
@@ -110,10 +112,13 @@ import { compressComplianceFileToDataUrl } from '../lib/kycVaultStorage';
 import { validateIndianGstin, validateSafeUploadFile } from '../lib/gstinValidator';
 import { GstinInputField } from './GstinInputField';
 import {
-  buildEmailShareHref,
   buildWhatsAppShareHref,
+  sharePdfDirect,
   triggerExternalShareLink,
 } from '../lib/shareUtils';
+import { SupportedCountry } from '../lib/postalPinLookup';
+import { VoiceDraftFields } from '../lib/voicePilot';
+import { PinCountryInputs, useAutoPinLookup } from './CityPinCountryAutoFill';
 
 interface AllInOneEntrySheetProps {
   divisionMode: BusinessMode;
@@ -225,7 +230,7 @@ function diffDaysInclusive(fromDate: string, toDate: string): number {
   return Math.max(0, diff);
 }
 
-export const AllInOneEntrySheet: React.FC<AllInOneEntrySheetProps> = ({
+const AllInOneEntrySheetInner: React.FC<AllInOneEntrySheetProps> = ({
   divisionMode,
   ownerUid,
   activeStaffCode,
@@ -295,6 +300,8 @@ export const AllInOneEntrySheet: React.FC<AllInOneEntrySheetProps> = ({
   const [bookingBasis, setBookingBasis] = useState<'Party' | 'Franchise' | 'Cash'>('Party');
   const [payBasis, setPayBasis] = useState<'TBB' | 'Paid' | 'To-Pay'>('TBB');
   const [deliverAt, setDeliverAt] = useState('');
+  const [deliverAtPinCode, setDeliverAtPinCode] = useState('');
+  const [deliverAtCountry, setDeliverAtCountry] = useState<SupportedCountry>('India');
   const [isChallanAttached, setIsChallanAttached] = useState(false);
   const [creditDays, setCreditDays] = useState(15);
 
@@ -304,17 +311,74 @@ export const AllInOneEntrySheet: React.FC<AllInOneEntrySheetProps> = ({
   const [consignorName, setConsignorName] = useState('');
   const [selectedConsignorId, setSelectedConsignorId] = useState('');
   const [consignorAddress, setConsignorAddress] = useState('');
+  const [consignorPinCode, setConsignorPinCode] = useState('');
+  const [consignorCountry, setConsignorCountry] = useState<SupportedCountry>('India');
   const [consignorGstin, setConsignorGstin] = useState('');
   const [consignorHsn, setConsignorHsn] = useState('');
 
   const [consigneeName, setConsigneeName] = useState('');
   const [selectedConsigneeId, setSelectedConsigneeId] = useState('');
   const [consigneeAddress, setConsigneeAddress] = useState('');
+  const [consigneePinCode, setConsigneePinCode] = useState('');
+  const [consigneeCountry, setConsigneeCountry] = useState<SupportedCountry>('India');
   const [consigneeGstin, setConsigneeGstin] = useState('');
   const [consigneeHsn, setConsigneeHsn] = useState('');
 
   const [fromCity, setFromCity] = useState('Kolkata');
+  const [fromPinCode, setFromPinCode] = useState('700001');
+  const [fromCountry, setFromCountry] = useState<SupportedCountry>('India');
   const [toCity, setToCity] = useState('');
+  const [toPinCode, setToPinCode] = useState('');
+  const [toCountry, setToCountry] = useState<SupportedCountry>('India');
+  const [ewayPlace, setEwayPlace] = useState('');
+  const [ewayPinCode, setEwayPinCode] = useState('');
+
+  useAutoPinLookup(consignorAddress, consignorPinCode, consignorCountry, (pin, country) => {
+    setConsignorPinCode(pin);
+    setConsignorCountry(country);
+  });
+  useAutoPinLookup(consigneeAddress, consigneePinCode, consigneeCountry, (pin, country) => {
+    setConsigneePinCode(pin);
+    setConsigneeCountry(country);
+  });
+  useAutoPinLookup(fromCity, fromPinCode, fromCountry, (pin, country) => {
+    setFromPinCode(pin);
+    setFromCountry(country);
+  });
+  useAutoPinLookup(toCity, toPinCode, toCountry, (pin, country) => {
+    setToPinCode(pin);
+    setToCountry(country);
+    if (!ewayPlace.trim()) setEwayPinCode(pin);
+  });
+  useAutoPinLookup(deliverAt, deliverAtPinCode, deliverAtCountry, (pin, country) => {
+    setDeliverAtPinCode(pin);
+    setDeliverAtCountry(country);
+  });
+  useAutoPinLookup(ewayPlace, ewayPinCode, toCountry, (pin) => {
+    setEwayPinCode(pin);
+  });
+
+  useEffect(() => {
+    const onVoiceDraft = (evt: Event) => {
+      const detail = (evt as CustomEvent<VoiceDraftFields>).detail;
+      if (!detail || readOnly) return;
+      if (detail.consignorName) setConsignorName(detail.consignorName);
+      if (detail.consigneeName) setConsigneeName(detail.consigneeName);
+      if (detail.partyName && !detail.consignorName) setBillingPartyName(detail.partyName);
+      if (detail.fromCity) setFromCity(detail.fromCity);
+      if (detail.toCity) setToCity(detail.toCity);
+      if (detail.deliverAt) setDeliverAt(detail.deliverAt);
+      if (detail.truckNo) {
+        setHasVehicleNo(true);
+        setTruckNo(detail.truckNo);
+      }
+      if (detail.ewayBillNo) setEwayBillNo(detail.ewayBillNo);
+      if (detail.freight) setBaseFreight(detail.freight);
+      if (detail.goodsDesc) setParticulars(detail.goodsDesc);
+    };
+    window.addEventListener('drc:voice-draft-fill', onVoiceDraft);
+    return () => window.removeEventListener('drc:voice-draft-fill', onVoiceDraft);
+  }, [readOnly]);
 
   // Vehicle & Driver + Multi Lorry [Y/N]
   const [hasVehicleNo, setHasVehicleNo] = useState(true);
@@ -397,6 +461,7 @@ export const AllInOneEntrySheet: React.FC<AllInOneEntrySheetProps> = ({
   const [detentionToDate, setDetentionToDate] = useState('');
   const [detentionDays, setDetentionDays] = useState('0');
   const [detentionRatePerDay, setDetentionRatePerDay] = useState('1500');
+  const [detentionChargeOverride, setDetentionChargeOverride] = useState<string | null>(null);
   const [hireLoadingCharge, setHireLoadingCharge] = useState('0');
   const [hireUnloadingCharge, setHireUnloadingCharge] = useState('0');
   const [hireKataCharge, setHireKataCharge] = useState('0');
@@ -455,6 +520,10 @@ export const AllInOneEntrySheet: React.FC<AllInOneEntrySheetProps> = ({
   const [saving, setSaving] = useState(false);
   const [statusToast, setStatusToast] = useState<string | null>(null);
   const [registerSearch, setRegisterSearch] = useState('');
+  const [registerPage, setRegisterPage] = useState(1);
+  const REGISTER_PAGE_SIZE = 50;
+  const deferredFindCnQuery = useDeferredValue(findCnQuery);
+  const deferredRegisterSearch = useDeferredValue(registerSearch);
   const [viewModalRow, setViewModalRow] = useState<UnifiedRegisterRow | null>(null);
 
   // Master Data Lists
@@ -552,6 +621,7 @@ export const AllInOneEntrySheet: React.FC<AllInOneEntrySheetProps> = ({
   useEffect(() => {
     if (detentionFromDate && detentionToDate) {
       setDetentionDays(String(diffDaysInclusive(detentionFromDate, detentionToDate)));
+      setDetentionChargeOverride(null);
     }
   }, [detentionFromDate, detentionToDate]);
 
@@ -617,12 +687,20 @@ export const AllInOneEntrySheet: React.FC<AllInOneEntrySheetProps> = ({
     return autoComputedCnFreight;
   }, [manualFreightOverride, autoComputedCnFreight]);
 
-  // Lorry Hire Calculations (2-day free detention + TDS 194C + Multi Advances + Pay 1-12)
-  const effectiveDetentionCharge = useMemo(() => {
+  // Lorry Hire Calculations (2-day free detention + hybrid override + TDS 194C + Multi Advances + Pay 1-12)
+  const autoDetentionCharge = useMemo(() => {
     const days = Number(detentionDays || 0);
     const chargeableDays = Math.max(0, days - 2);
     return Math.round(chargeableDays * Number(detentionRatePerDay || 0) * 100) / 100;
   }, [detentionDays, detentionRatePerDay]);
+
+  const effectiveDetentionCharge = useMemo(() => {
+    if (detentionChargeOverride !== null && detentionChargeOverride.trim() !== '') {
+      const ov = Number(detentionChargeOverride);
+      if (Number.isFinite(ov) && ov >= 0) return Math.round(ov * 100) / 100;
+    }
+    return autoDetentionCharge;
+  }, [detentionChargeOverride, autoDetentionCharge]);
 
   const effectiveHireGross = useMemo(() => {
     if (hireRateMode === 'Per MT') {
@@ -780,6 +858,20 @@ export const AllInOneEntrySheet: React.FC<AllInOneEntrySheetProps> = ({
     setEwayBillNo('');
     setEwayBillDate('');
     setEwayBillValidUpto('');
+    setEwayPlace('');
+    setEwayPinCode('');
+    setDeliverAt('');
+    setDeliverAtPinCode('');
+    setDeliverAtCountry('India');
+    setConsignorPinCode('');
+    setConsignorCountry('India');
+    setConsigneePinCode('');
+    setConsigneeCountry('India');
+    setFromPinCode('700001');
+    setFromCountry('India');
+    setToCity('');
+    setToPinCode('');
+    setToCountry('India');
     setHasMultiEwb(false);
     setExtraEwayBills([]);
     setEwbExtensions([]);
@@ -809,6 +901,7 @@ export const AllInOneEntrySheet: React.FC<AllInOneEntrySheetProps> = ({
     setDetentionFromDate('');
     setDetentionToDate('');
     setDetentionDays('0');
+    setDetentionChargeOverride(null);
     setHasMultiAdvance(false);
     setHireAdvances([DEFAULT_ADV_ROW()]);
     setPayInstallments(EMPTY_PAY_12());
@@ -850,13 +943,19 @@ export const AllInOneEntrySheet: React.FC<AllInOneEntrySheetProps> = ({
       creditDays: Number(creditDays || 15),
       consignorName: consignorName.trim() || 'Consignor',
       consignorAddress: consignorAddress.trim(),
+      consignorPinCode: consignorPinCode.trim(),
+      consignorCountry,
       consignorGstin: consignorGstin.trim().toUpperCase(),
       consignorHsn: consignorHsn.trim(),
       consigneeName: consigneeName.trim() || consignorName.trim() || 'Consignee',
       consigneeAddress: consigneeAddress.trim(),
+      consigneePinCode: consigneePinCode.trim(),
+      consigneeCountry,
       consigneeGstin: consigneeGstin.trim().toUpperCase(),
       consigneeHsn: consigneeHsn.trim(),
       deliverAt: deliverAt.trim(),
+      deliverAtPinCode: deliverAtPinCode.trim(),
+      deliverAtCountry,
       isChallanAttached,
       packages: packages.trim(),
       packageMode,
@@ -878,6 +977,8 @@ export const AllInOneEntrySheet: React.FC<AllInOneEntrySheetProps> = ({
       ewayBillNo: ewayBillNo.trim(),
       ewayBillDate: ewayBillDate.trim(),
       ewayBillValidUpto: ewayBillValidUpto.trim(),
+      ewayPlace: ewayPlace.trim(),
+      ewayPinCode: ewayPinCode.trim(),
       hasMultiEwayBill: hasMultiEwb,
       extraEwayBills: (hasMultiEwb ? extraEwayBills : []).slice(0, 50),
       ewbExtensions: ewbExtensions.slice(0, 10),
@@ -885,7 +986,11 @@ export const AllInOneEntrySheet: React.FC<AllInOneEntrySheetProps> = ({
       truckNo: cnTruckValue,
       extraVehicles: (hasMultiVehicle ? extraVehicles : []).slice(0, 50),
       fromCity: fromCity.trim() || 'Kolkata',
+      fromPinCode: fromPinCode.trim(),
+      fromCountry,
       toCity: toCity.trim() || 'Destination',
+      toPinCode: toPinCode.trim(),
+      toCountry,
       ownerName: ownerName.trim(),
       brokerName: brokerName.trim(),
       driverName: hasVehicleNo ? driverName.trim() : '',
@@ -1077,14 +1182,22 @@ export const AllInOneEntrySheet: React.FC<AllInOneEntrySheetProps> = ({
             financialYear: fyNorm,
             billedAtBranch,
             originBranch: fromCity.trim() || billedAtBranch,
+            originPinCode: fromPinCode.trim(),
+            originCountry: fromCountry,
             destBranch: toCity.trim() || billedAtBranch,
+            destPinCode: toPinCode.trim(),
+            destCountry: toCountry,
             deliveryMode: docketDeliveryMode,
             payMode: payBasis,
             consignorName: consignorName.trim(),
             consignorAddress: consignorAddress.trim(),
+            consignorPinCode: consignorPinCode.trim(),
+            consignorCountry,
             consignorGstin: consignorGstin.trim().toUpperCase(),
             consigneeName: consigneeName.trim() || consignorName.trim(),
             consigneeAddress: consigneeAddress.trim(),
+            consigneePinCode: consigneePinCode.trim(),
+            consigneeCountry,
             consigneeGstin: consigneeGstin.trim().toUpperCase(),
             billingPartyName: billingPartyName.trim() || consignorName.trim(),
             packages: Number(packages || 1),
@@ -1107,6 +1220,8 @@ export const AllInOneEntrySheet: React.FC<AllInOneEntrySheetProps> = ({
             totalAmount: computedCnFreight,
             ewayBillNo: ewayBillNo.trim(),
             ewayBillValidUpto: ewayBillValidUpto.trim(),
+            ewayPlace: ewayPlace.trim(),
+            ewayPinCode: ewayPinCode.trim(),
             valueOfGoods: Number(valueOfGoods || 0),
             stockStage: podReceived ? 'Delivered' : 'Origin Godown',
             billed: existingDk?.billed || false,
@@ -1154,7 +1269,11 @@ export const AllInOneEntrySheet: React.FC<AllInOneEntrySheetProps> = ({
             ownerName: ownerName.trim(),
             brokerName: brokerName.trim(),
             fromCity: fromCity.trim(),
+            fromPinCode: fromPinCode.trim(),
+            fromCountry,
             toCity: toCity.trim(),
+            toPinCode: toPinCode.trim(),
+            toCountry,
             weightMt: Number(hireWeightMt || nettWeight || 0),
             ratePerUnit: Number(hireRatePerUnit || 0),
             rateMode: hireRateMode,
@@ -1384,6 +1503,41 @@ export const AllInOneEntrySheet: React.FC<AllInOneEntrySheetProps> = ({
     return () => window.removeEventListener('drc:form-save', handler);
   }, [handleSaveCompleteSheet]);
 
+  const buildCurrentDocketMock = (): LogisticsDocket => ({
+    id: editingDocketId || 'preview_dkt',
+    docketNo: docNo.trim() || 'DRAFT',
+    docketDate: docDate,
+    financialYear: normalizeFyLabel(activeFy),
+    billedAtBranch,
+    originBranch: fromCity.trim() || billedAtBranch,
+    destBranch: toCity.trim() || billedAtBranch,
+    deliveryMode: docketDeliveryMode,
+    payMode: payBasis,
+    consignorName: consignorName.trim() || 'Consignor',
+    consignorAddress,
+    consignorGstin,
+    consigneeName: consigneeName.trim() || 'Consignee',
+    consigneeAddress,
+    consigneeGstin,
+    billingPartyName: billingPartyName.trim() || consignorName.trim(),
+    packages: Number(packages || 1),
+    packingType: packageMode,
+    goodsDesc: particulars,
+    actualWeightKg: Number(nettWeight || 0),
+    chargedWeightKg: Number(chargedWeight || nettWeight || 0),
+    rateBasis: 'Fixed',
+    ratePerUnit: Number(ratePerUnit || 0),
+    baseFreight: computedCnFreight,
+    gstRate: 0,
+    cgstAmt: 0,
+    sgstAmt: 0,
+    igstAmt: 0,
+    totalAmount: computedCnFreight,
+    stockStage: 'Origin Godown',
+    billed: false,
+    ownerUid,
+  });
+
   // Inline LR Quick Actions
   const handleInlineLrPdf = async (action: 'preview' | 'print') => {
     if (isFtl) {
@@ -1392,41 +1546,7 @@ export const AllInOneEntrySheet: React.FC<AllInOneEntrySheetProps> = ({
       if (action === 'print') printPdfDirect(pdf);
       else onPreviewPdf(pdf, 'LR Copy');
     } else {
-      const docketMock: LogisticsDocket = {
-        id: editingDocketId || 'preview_dkt',
-        docketNo: docNo.trim() || 'DRAFT',
-        docketDate: docDate,
-        financialYear: normalizeFyLabel(activeFy),
-        billedAtBranch,
-        originBranch: fromCity.trim() || billedAtBranch,
-        destBranch: toCity.trim() || billedAtBranch,
-        deliveryMode: docketDeliveryMode,
-        payMode: payBasis,
-        consignorName: consignorName.trim() || 'Consignor',
-        consignorAddress,
-        consignorGstin,
-        consigneeName: consigneeName.trim() || 'Consignee',
-        consigneeAddress,
-        consigneeGstin,
-        billingPartyName: billingPartyName.trim() || consignorName.trim(),
-        packages: Number(packages || 1),
-        packingType: packageMode,
-        goodsDesc: particulars,
-        actualWeightKg: Number(nettWeight || 0),
-        chargedWeightKg: Number(chargedWeight || nettWeight || 0),
-        rateBasis: 'Fixed',
-        ratePerUnit: Number(ratePerUnit || 0),
-        baseFreight: computedCnFreight,
-        gstRate: 0,
-        cgstAmt: 0,
-        sgstAmt: 0,
-        igstAmt: 0,
-        totalAmount: computedCnFreight,
-        stockStage: 'Origin Godown',
-        billed: false,
-        ownerUid,
-      };
-      const pdf = await generateLogisticsDocketPDF(docketMock, company, 'l');
+      const pdf = await generateLogisticsDocketPDF(buildCurrentDocketMock(), company, 'l');
       if (action === 'print') printPdfDirect(pdf);
       else onPreviewPdf(pdf, 'Docket_LR');
     }
@@ -1454,35 +1574,32 @@ export const AllInOneEntrySheet: React.FC<AllInOneEntrySheetProps> = ({
     }
   };
 
-  const handleShareLr = (channel: 'whatsapp' | 'email') => {
-    const freightLine = showFreightOnPrint
-      ? `Freight: Rs. ${formatINR(computedCnFreight)}`
-      : 'Freight: As Agreed';
-    const text = [
-      `${company.companyName} — ${divisionMeta.shortLabel} Bilty / CN`,
-      `CN No: ${docNo} | Date: ${formatDateDDMMYYYY(docDate)}`,
-      `Route: ${fromCity} -> ${toCity} (${billedAtBranch})`,
-      `Consignor: ${consignorName}`,
-      `Consignee: ${consigneeName}`,
-      hasVehicleNo && truckNo ? `Truck: ${truckNo} | Driver: ${driverName || '-'}` : '',
-      `${packages} ${packageMode} · ${particulars} · Wt: ${nettWeight} MT`,
-      ewayBillNo ? `EWB No: ${ewayBillNo} (Valid: ${ewayBillValidUpto || '-'})` : '',
-      freightLine,
-    ]
-      .filter(Boolean)
-      .join('\n');
+  const findPartyContact = useCallback(
+    (partyLabel: string) => {
+      const key = (partyLabel || '').trim().toLowerCase();
+      if (!key) return undefined;
+      return combinedParties.find((p) => (p.name || '').trim().toLowerCase() === key);
+    },
+    [combinedParties]
+  );
 
-    if (channel === 'whatsapp') {
-      triggerExternalShareLink(buildWhatsAppShareHref({ message: text }));
-    } else {
-      triggerExternalShareLink(
-        buildEmailShareHref({
-          email: company.email || 'drc.kolkata1@gmail.com',
-          subject: `LR / Bilty ${docNo} (${fromCity} -> ${toCity})`,
-          body: text,
-        })
-      );
-    }
+  const handleShareLr = async (channel: 'whatsapp' | 'email') => {
+    const targetPartyName = billingPartyName.trim() || consignorName.trim() || consigneeName.trim();
+    const partyRec = findPartyContact(targetPartyName);
+    const pdf = isFtl
+      ? await generateLR3CopyPDF(buildCurrentCnSnapshot(), company, 'l')
+      : await generateLogisticsDocketPDF(buildCurrentDocketMock(), company, 'l');
+    const res = await sharePdfDirect({
+      pdf,
+      channel,
+      phone: partyRec?.phone,
+      email: partyRec?.email,
+      partyName: targetPartyName,
+      docNo: docNo.trim() || 'DRAFT',
+      docLabel: isFtl ? 'LR' : divisionMeta.shortLabel,
+      company,
+    });
+    setStatusToast(res.message);
   };
 
   // Correlated Live "View Entry Sheet / Register" Rows
@@ -1598,7 +1715,7 @@ export const AllInOneEntrySheet: React.FC<AllInOneEntrySheetProps> = ({
   }, [isFtl, consignments, logisticsDockets, lorryHires, staffCommissions, invoices, logisticsInvoices]);
 
   const findCnMatches = useMemo(() => {
-    const q = findCnQuery.trim().toLowerCase();
+    const q = deferredFindCnQuery.trim().toLowerCase();
     if (!q) return registerRows.slice(0, 12);
     return registerRows
       .filter((r) =>
@@ -1607,17 +1724,28 @@ export const AllInOneEntrySheet: React.FC<AllInOneEntrySheetProps> = ({
           .includes(q)
       )
       .slice(0, 15);
-  }, [registerRows, findCnQuery]);
+  }, [registerRows, deferredFindCnQuery]);
 
   const filteredRegisterRows = useMemo(() => {
-    const q = registerSearch.trim().toLowerCase();
+    const q = deferredRegisterSearch.trim().toLowerCase();
     if (!q) return registerRows;
     return registerRows.filter((r) =>
       `${r.docNo} ${r.branch} ${r.consignorName} ${r.consigneeName} ${r.billingPartyName} ${r.truckNo} ${r.billNo} ${r.route}`
         .toLowerCase()
         .includes(q)
     );
-  }, [registerRows, registerSearch]);
+  }, [registerRows, deferredRegisterSearch]);
+
+  useEffect(() => {
+    setRegisterPage(1);
+  }, [deferredRegisterSearch, divisionMode]);
+
+  const registerTotalPages = Math.max(1, Math.ceil(filteredRegisterRows.length / REGISTER_PAGE_SIZE));
+  const safeRegisterPage = Math.min(registerPage, registerTotalPages);
+  const paginatedRegisterRows = useMemo(() => {
+    const start = (safeRegisterPage - 1) * REGISTER_PAGE_SIZE;
+    return filteredRegisterRows.slice(start, start + REGISTER_PAGE_SIZE);
+  }, [filteredRegisterRows, safeRegisterPage]);
 
   // Band 2 Live Staff Chart Metrics (Date-Wise + Monthly + Yearly FY)
   const staffChartStats = useMemo(() => {
@@ -1703,19 +1831,29 @@ export const AllInOneEntrySheet: React.FC<AllInOneEntrySheetProps> = ({
       setBookingBasis((cn.bookingBasis as 'Party' | 'Franchise' | 'Cash') || 'Party');
       setPayBasis((cn.payBasis as 'TBB' | 'Paid' | 'To-Pay') || 'TBB');
       setDeliverAt(cn.deliverAt || '');
+      setDeliverAtPinCode(cn.deliverAtPinCode || '');
+      setDeliverAtCountry((cn.deliverAtCountry as SupportedCountry) || 'India');
       setIsChallanAttached(Boolean(cn.isChallanAttached));
       setCreditDays(cn.creditDays || 15);
       setBillingPartyName(cn.billingPartyName || '');
       setConsignorName(cn.consignorName);
       setConsignorAddress(cn.consignorAddress || '');
+      setConsignorPinCode(cn.consignorPinCode || '');
+      setConsignorCountry((cn.consignorCountry as SupportedCountry) || 'India');
       setConsignorGstin(cn.consignorGstin || '');
       setConsignorHsn(cn.consignorHsn || '');
       setConsigneeName(cn.consigneeName);
       setConsigneeAddress(cn.consigneeAddress || '');
+      setConsigneePinCode(cn.consigneePinCode || '');
+      setConsigneeCountry((cn.consigneeCountry as SupportedCountry) || 'India');
       setConsigneeGstin(cn.consigneeGstin || '');
       setConsigneeHsn(cn.consigneeHsn || '');
       setFromCity(cn.fromCity);
+      setFromPinCode(cn.fromPinCode || '');
+      setFromCountry((cn.fromCountry as SupportedCountry) || 'India');
       setToCity(cn.toCity);
+      setToPinCode(cn.toPinCode || '');
+      setToCountry((cn.toCountry as SupportedCountry) || 'India');
       setHasVehicleNo(cn.hasVehicleNo !== false && cn.truckNo !== 'UNASSIGNED');
       setHasMultiVehicle(Boolean(cn.hasMultiVehicle || (cn.extraVehicles && cn.extraVehicles.length > 0)));
       setTruckNo(cn.truckNo === 'UNASSIGNED' ? '' : cn.truckNo);
@@ -1737,6 +1875,8 @@ export const AllInOneEntrySheet: React.FC<AllInOneEntrySheetProps> = ({
       setEwayBillNo(cn.ewayBillNo || '');
       setEwayBillDate(cn.ewayBillDate || '');
       setEwayBillValidUpto(cn.ewayBillValidUpto || '');
+      setEwayPlace(cn.ewayPlace || '');
+      setEwayPinCode(cn.ewayPinCode || '');
       setHasMultiEwb(Boolean(cn.hasMultiEwayBill || (cn.extraEwayBills && cn.extraEwayBills.length > 0)));
       setExtraEwayBills(cn.extraEwayBills || []);
       setEwbExtensions(cn.ewbExtensions || []);
@@ -1772,12 +1912,20 @@ export const AllInOneEntrySheet: React.FC<AllInOneEntrySheetProps> = ({
       setBilledAtBranch(dk.billedAtBranch || dk.originBranch || 'Kolkata');
       setConsignorName(dk.consignorName);
       setConsignorAddress(dk.consignorAddress || '');
+      setConsignorPinCode(dk.consignorPinCode || '');
+      setConsignorCountry((dk.consignorCountry as SupportedCountry) || 'India');
       setConsignorGstin(dk.consignorGstin || '');
       setConsigneeName(dk.consigneeName);
       setConsigneeAddress(dk.consigneeAddress || '');
+      setConsigneePinCode(dk.consigneePinCode || '');
+      setConsigneeCountry((dk.consigneeCountry as SupportedCountry) || 'India');
       setConsigneeGstin(dk.consigneeGstin || '');
       setFromCity(dk.originBranch);
+      setFromPinCode(dk.originPinCode || '');
+      setFromCountry((dk.originCountry as SupportedCountry) || 'India');
       setToCity(dk.destBranch);
+      setToPinCode(dk.destPinCode || '');
+      setToCountry((dk.destCountry as SupportedCountry) || 'India');
       setDocketDeliveryMode(dk.deliveryMode);
       setPayBasis(dk.payMode);
       setPackages(String(dk.packages || 1));
@@ -1790,6 +1938,8 @@ export const AllInOneEntrySheet: React.FC<AllInOneEntrySheetProps> = ({
       setOtherCharge(String(dk.docketCharge || 0));
       setEwayBillNo(dk.ewayBillNo || '');
       setEwayBillValidUpto(dk.ewayBillValidUpto || '');
+      setEwayPlace(dk.ewayPlace || '');
+      setEwayPinCode(dk.ewayPinCode || '');
       setValueOfGoods(String(dk.valueOfGoods || 0));
       setCnRemarks(dk.remarks || '');
     }
@@ -1807,6 +1957,7 @@ export const AllInOneEntrySheet: React.FC<AllInOneEntrySheetProps> = ({
       setDetentionFromDate(lh.detentionFromDate || '');
       setDetentionToDate(lh.detentionToDate || '');
       setDetentionDays(String(lh.detentionDays || 0));
+      setDetentionChargeOverride(lh.detentionCharge ? String(lh.detentionCharge) : null);
       setHireLoadingCharge(String(lh.loadingCharge || 0));
       setHireUnloadingCharge(String(lh.unloadingCharge || 0));
       setHireKataCharge(String(lh.kataCharge || 0));
@@ -1868,6 +2019,24 @@ export const AllInOneEntrySheet: React.FC<AllInOneEntrySheetProps> = ({
       return { pdf, folder: 'Docket_LR' };
     }
     return null;
+  };
+
+  const handleShareRowPdf = async (row: UnifiedRegisterRow, channel: 'whatsapp' | 'email') => {
+    const built = await buildPdfForRow(row);
+    if (!built) return;
+    const partyLabel = row.billingPartyName || row.consignorName || row.consigneeName;
+    const partyRec = findPartyContact(partyLabel);
+    const res = await sharePdfDirect({
+      pdf: built.pdf,
+      channel,
+      phone: partyRec?.phone,
+      email: partyRec?.email,
+      partyName: partyLabel,
+      docNo: row.docNo,
+      docLabel: isFtl ? 'LR' : divisionMeta.shortLabel,
+      company,
+    });
+    setStatusToast(res.message);
   };
 
   return (
@@ -2111,8 +2280,16 @@ export const AllInOneEntrySheet: React.FC<AllInOneEntrySheetProps> = ({
                 type="text"
                 value={deliverAt}
                 onChange={(e) => setDeliverAt(e.target.value)}
-                placeholder="Door / Godown / Party Point"
+                placeholder="Door / Godown / Petrapole / Dhaka"
                 className="w-full px-2.5 py-1.5 rounded border border-slate-300"
+              />
+              <PinCountryInputs
+                labelPrefix="Deliver"
+                pinCode={deliverAtPinCode}
+                country={deliverAtCountry}
+                onPinChange={setDeliverAtPinCode}
+                onCountryChange={setDeliverAtCountry}
+                compact
               />
             </div>
             <div>
@@ -2218,6 +2395,21 @@ export const AllInOneEntrySheet: React.FC<AllInOneEntrySheetProps> = ({
                 compact
                 placeholder="Consignor GSTIN (Optional)"
               />
+              <input
+                type="text"
+                value={consignorAddress}
+                onChange={(e) => setConsignorAddress(e.target.value)}
+                placeholder="Consignor Address / City (auto-fills PIN & Country)"
+                className="w-full px-2 py-1 rounded border border-slate-300 text-xs"
+              />
+              <PinCountryInputs
+                labelPrefix="Consignor"
+                pinCode={consignorPinCode}
+                country={consignorCountry}
+                onPinChange={setConsignorPinCode}
+                onCountryChange={setConsignorCountry}
+                compact
+              />
             </div>
 
             <div className="space-y-1.5">
@@ -2270,6 +2462,21 @@ export const AllInOneEntrySheet: React.FC<AllInOneEntrySheetProps> = ({
                 compact
                 placeholder="Consignee GSTIN (Optional)"
               />
+              <input
+                type="text"
+                value={consigneeAddress}
+                onChange={(e) => setConsigneeAddress(e.target.value)}
+                placeholder="Consignee Address / City (auto-fills PIN & Country)"
+                className="w-full px-2 py-1 rounded border border-slate-300 text-xs"
+              />
+              <PinCountryInputs
+                labelPrefix="Consignee"
+                pinCode={consigneePinCode}
+                country={consigneeCountry}
+                onPinChange={setConsigneePinCode}
+                onCountryChange={setConsigneeCountry}
+                compact
+              />
             </div>
           </div>
 
@@ -2284,6 +2491,14 @@ export const AllInOneEntrySheet: React.FC<AllInOneEntrySheetProps> = ({
                 options={allCities}
                 placeholder="Origin city..."
               />
+              <PinCountryInputs
+                labelPrefix="From"
+                pinCode={fromPinCode}
+                country={fromCountry}
+                onPinChange={setFromPinCode}
+                onCountryChange={setFromCountry}
+                compact
+              />
             </div>
             <div>
               <label className="block font-bold text-slate-700 mb-1">To City / Destination *</label>
@@ -2293,6 +2508,14 @@ export const AllInOneEntrySheet: React.FC<AllInOneEntrySheetProps> = ({
                 onChange={setToCity}
                 options={allCities}
                 placeholder="Destination city..."
+              />
+              <PinCountryInputs
+                labelPrefix="To"
+                pinCode={toPinCode}
+                country={toCountry}
+                onPinChange={setToPinCode}
+                onCountryChange={setToCountry}
+                compact
               />
             </div>
             <div>
@@ -2746,6 +2969,30 @@ export const AllInOneEntrySheet: React.FC<AllInOneEntrySheetProps> = ({
                     value={ewayBillValidUpto}
                     onChange={(e) => setEwayBillValidUpto(e.target.value)}
                     className="w-full px-2 py-1 rounded border border-slate-300 bg-white font-mono-num"
+                  />
+                </div>
+              </div>
+              <div className="grid grid-cols-2 gap-2">
+                <div>
+                  <label className="block text-[10px] font-bold text-slate-600 mb-0.5">EWB Dispatch / ICP Place</label>
+                  <input
+                    type="text"
+                    value={ewayPlace}
+                    onChange={(e) => setEwayPlace(e.target.value)}
+                    placeholder="e.g. Baranagar / Petrapole / Raxaul"
+                    className="w-full px-2 py-1 rounded border border-slate-300 bg-white"
+                  />
+                </div>
+                <div>
+                  <label className="block text-[10px] font-bold text-slate-600 mb-0.5">EWB PIN (Auto-Fill)</label>
+                  <input
+                    type="text"
+                    inputMode="numeric"
+                    maxLength={6}
+                    value={ewayPinCode}
+                    onChange={(e) => setEwayPinCode(e.target.value.replace(/\D/g, '').slice(0, 6))}
+                    placeholder="6-digit EWB PIN"
+                    className="w-full px-2 py-1 rounded border border-emerald-400 bg-emerald-50/40 font-mono-num font-bold"
                   />
                 </div>
               </div>
@@ -3270,19 +3517,21 @@ export const AllInOneEntrySheet: React.FC<AllInOneEntrySheetProps> = ({
             <div className="flex flex-wrap items-center gap-1.5">
               <button
                 type="button"
-                onClick={() => handleShareLr('whatsapp')}
+                onClick={() => void handleShareLr('whatsapp')}
                 className="inline-flex items-center gap-1 px-2.5 py-1.5 rounded-lg bg-green-600 hover:bg-green-700 text-white text-[11px] font-bold cursor-pointer"
+                title="Share Real LR PDF on WhatsApp"
               >
                 <MessageCircle className="w-3.5 h-3.5" />
-                Share WhatsApp
+                WhatsApp PDF
               </button>
               <button
                 type="button"
-                onClick={() => handleShareLr('email')}
+                onClick={() => void handleShareLr('email')}
                 className="inline-flex items-center gap-1 px-2.5 py-1.5 rounded-lg bg-sky-700 hover:bg-sky-800 text-white text-[11px] font-bold cursor-pointer"
+                title="Share Real LR PDF via Email"
               >
                 <Mail className="w-3.5 h-3.5" />
-                Email ({company.email || 'drc.kolkata1@gmail.com'})
+                Email PDF
               </button>
             </div>
           </div>
@@ -3437,24 +3686,36 @@ export const AllInOneEntrySheet: React.FC<AllInOneEntrySheetProps> = ({
                   <input
                     type="number"
                     value={detentionDays}
-                    onChange={(e) => setDetentionDays(e.target.value)}
+                    onChange={(e) => {
+                      setDetentionDays(e.target.value);
+                      setDetentionChargeOverride(null);
+                    }}
                     className="w-12 px-1 py-1.5 rounded border border-slate-300 font-mono-num"
                     title="Total halt days (first 2 days free)"
                   />
                   <input
                     type="number"
                     value={detentionRatePerDay}
-                    onChange={(e) => setDetentionRatePerDay(e.target.value)}
+                    onChange={(e) => {
+                      setDetentionRatePerDay(e.target.value);
+                      setDetentionChargeOverride(null);
+                    }}
                     className="flex-1 min-w-0 px-1 py-1.5 rounded border border-slate-300 font-mono-num"
                     title="Rate per chargeable day"
                   />
                 </div>
               </div>
               <div>
-                <label className="block font-bold text-slate-700 mb-1">Detention (2d Free)</label>
-                <div className="px-2 py-1.5 rounded bg-amber-50 border border-amber-300 font-mono-num font-bold text-amber-900">
-                  ₹ {formatINR(effectiveDetentionCharge)}
-                </div>
+                <label className="block font-bold text-slate-700 mb-1">Detention ₹ (2d Free / Edit)</label>
+                <input
+                  type="number"
+                  step="0.01"
+                  min={0}
+                  value={detentionChargeOverride !== null ? detentionChargeOverride : effectiveDetentionCharge}
+                  onChange={(e) => setDetentionChargeOverride(e.target.value)}
+                  className="w-full px-2 py-1.5 rounded bg-amber-50 border border-amber-300 font-mono-num font-bold text-amber-900"
+                  title="Auto-calculates (Days-2)*Rate; type any manual amount to override"
+                />
               </div>
               <div>
                 <label className="block font-bold text-slate-700 mb-1">TDS 194C (%)</label>
@@ -4271,7 +4532,7 @@ export const AllInOneEntrySheet: React.FC<AllInOneEntrySheetProps> = ({
                   </td>
                 </tr>
               ) : (
-                filteredRegisterRows.slice(0, 200).map((row) => (
+                paginatedRegisterRows.map((row) => (
                   <tr key={row.id} className="hover:bg-blue-50/40">
                     <td className="p-2.5 font-mono-num font-extrabold text-[#0D47A1] whitespace-nowrap">
                       {row.docNo}
@@ -4349,6 +4610,22 @@ export const AllInOneEntrySheet: React.FC<AllInOneEntrySheetProps> = ({
                         >
                           <Printer className="w-3.5 h-3.5" />
                         </button>
+                        <button
+                          type="button"
+                          onClick={() => void handleShareRowPdf(row, 'whatsapp')}
+                          className="p-1.5 rounded border border-green-300 bg-green-50 hover:bg-green-100 text-green-800 cursor-pointer"
+                          title="Share Real PDF via WhatsApp"
+                        >
+                          <MessageCircle className="w-3.5 h-3.5" />
+                        </button>
+                        <button
+                          type="button"
+                          onClick={() => void handleShareRowPdf(row, 'email')}
+                          className="p-1.5 rounded border border-sky-300 bg-sky-50 hover:bg-sky-100 text-sky-800 cursor-pointer"
+                          title="Share Real PDF via Email"
+                        >
+                          <Mail className="w-3.5 h-3.5" />
+                        </button>
                       </div>
                     </td>
                   </tr>
@@ -4357,6 +4634,38 @@ export const AllInOneEntrySheet: React.FC<AllInOneEntrySheetProps> = ({
             </tbody>
           </table>
         </div>
+        {registerTotalPages > 1 && (
+          <div className="px-4 py-2 bg-slate-50 border-t border-slate-200 flex items-center justify-between text-xs text-slate-700">
+            <span className="font-mono-num">
+              Showing {(safeRegisterPage - 1) * REGISTER_PAGE_SIZE + 1}–
+              {Math.min(safeRegisterPage * REGISTER_PAGE_SIZE, filteredRegisterRows.length)} of{' '}
+              {filteredRegisterRows.length} entries
+            </span>
+            <div className="inline-flex items-center gap-1.5">
+              <button
+                type="button"
+                disabled={safeRegisterPage <= 1}
+                onClick={() => setRegisterPage((p) => Math.max(1, p - 1))}
+                className="inline-flex items-center gap-1 px-2.5 py-1 rounded border border-slate-300 bg-white hover:bg-slate-100 disabled:opacity-40 cursor-pointer"
+              >
+                <ChevronLeft className="w-3.5 h-3.5" />
+                Prev
+              </button>
+              <span className="font-mono-num font-bold px-2">
+                Page {safeRegisterPage} / {registerTotalPages}
+              </span>
+              <button
+                type="button"
+                disabled={safeRegisterPage >= registerTotalPages}
+                onClick={() => setRegisterPage((p) => Math.min(registerTotalPages, p + 1))}
+                className="inline-flex items-center gap-1 px-2.5 py-1 rounded border border-slate-300 bg-white hover:bg-slate-100 disabled:opacity-40 cursor-pointer"
+              >
+                Next
+                <ChevronRight className="w-3.5 h-3.5" />
+              </button>
+            </div>
+          </div>
+        )}
       </div>
 
       {/* Staff Bank / UPI Modal with [YES/NO] Edit-Lock */}
@@ -4532,6 +4841,22 @@ export const AllInOneEntrySheet: React.FC<AllInOneEntrySheetProps> = ({
               </button>
               <button
                 type="button"
+                onClick={() => void handleShareRowPdf(viewModalRow, 'whatsapp')}
+                className="inline-flex items-center gap-1 px-3 py-1.5 rounded bg-green-600 text-white text-xs font-bold cursor-pointer"
+              >
+                <MessageCircle className="w-3.5 h-3.5" />
+                WhatsApp PDF
+              </button>
+              <button
+                type="button"
+                onClick={() => void handleShareRowPdf(viewModalRow, 'email')}
+                className="inline-flex items-center gap-1 px-3 py-1.5 rounded bg-sky-700 text-white text-xs font-bold cursor-pointer"
+              >
+                <Mail className="w-3.5 h-3.5" />
+                Email PDF
+              </button>
+              <button
+                type="button"
                 onClick={() => void buildPdfForRow(viewModalRow).then((res) => res && printPdfDirect(res.pdf))}
                 className="inline-flex items-center gap-1 px-3 py-1.5 rounded bg-amber-500 text-slate-950 text-xs font-bold cursor-pointer"
               >
@@ -4553,3 +4878,5 @@ export const AllInOneEntrySheet: React.FC<AllInOneEntrySheetProps> = ({
     </div>
   );
 };
+
+export const AllInOneEntrySheet = React.memo(AllInOneEntrySheetInner);

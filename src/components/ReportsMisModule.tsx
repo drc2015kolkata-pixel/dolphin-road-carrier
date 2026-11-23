@@ -1194,7 +1194,8 @@ const ReportsMisModuleInner: React.FC<ReportsMisModuleProps> = ({
         const isAutoLorryBalanceTx =
           t.ledgerAccount === 'Lorry Hire Payable A/c' &&
           (Boolean(t.linkedCnNo) || /^LH-/i.test(t.txCode || ''));
-        return !isAutoLorryBalanceTx;
+        const isFoxproPartyReceivableDr = t.ledgerAccount === 'Party Ledger Receivable (Dr)';
+        return !isAutoLorryBalanceTx && !isFoxproPartyReceivableDr;
       })
       .reduce((s, t) => s + Number(t.amount || 0), 0);
     const totalExpense = lorryHireCost + directExpenses;

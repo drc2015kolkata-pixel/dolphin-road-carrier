@@ -64,23 +64,31 @@ import {
   getLogisticsDivisionFromId,
 } from '../types/erp';
 import {
+  downloadDailyVaultSnapshotFromDrive,
   downloadIsolatedBusinessFileFromDrive,
   downloadMasterBackupFromDrive,
   DriveFileSummary,
+  getDailySnapshotFileName,
   getIsolatedDriveFileNames,
   INSTALLER_VAULT_FOLDER,
   listAppDataBackupFiles,
   listDriveBackupFiles,
   runDailyDrive8FileCleanup,
+  sealBackupPayloadWithSha256,
+  unionMergeBackupBundles,
   uploadAppDataJsonSnapshot,
   uploadBlueprintPdfToDrive,
+  uploadDailyVaultSnapshotToDrive,
   uploadIsolatedBusinessBackupsToDrive,
   uploadMasterBackupToDrive,
+  verifyBackupPayloadSha256,
 } from '../lib/driveBackup';
 import {
   BACKUP_ISOLATED_DRIVE_EMAIL,
   DRIVE_APPDATA_SCOPE,
   getOAuthDomainStatus,
+  isAuthorizedBackupDriveEmail,
+  MASTER_ADMIN_EMAIL,
   OFFICIAL_PARTY_EMAIL,
   VERCEL_APP_DOMAIN,
 } from '../lib/firebase';
@@ -88,7 +96,10 @@ import {
   AutoCollectedOldDataResult,
   autoCollectOldDataFiles,
 } from '../lib/foxproDbfImport';
-import { analyzeAndSeparateMisclassifiedParties } from '../lib/partySeparation';
+import {
+  analyzeAndSeparateMisclassifiedParties,
+  restoreHeadPartiesToBillingCustomers,
+} from '../lib/partySeparation';
 import {
   getLast90DayMaintenanceTimestamp,
   getStoredAdminPin,
@@ -107,8 +118,21 @@ import {
   updateMasterAdminCredentials,
   upsertDocument,
 } from '../lib/firestoreStore';
-import { hasLiveCompanyData } from '../lib/securityShield';
-import { validateIndianGstin, validateSafeUploadFile } from '../lib/gstinValidator';
+import {
+  DeviceTrustCheckResult,
+  getActiveTwoFactorOtpChallenge,
+  hasLiveCompanyData,
+  isBackupVaultUnlocked,
+  issueTwoFactorOtpChallenge,
+  lockBackupVault,
+  TwoFactorOtpChallenge,
+  unlockBackupVaultWithPinAndOtp,
+} from '../lib/securityShield';
+import {
+  isBlockedDangerousFileName,
+  validateIndianGstin,
+  validateSafeUploadFile,
+} from '../lib/gstinValidator';
 import {
   downloadPdfDirect,
   generateAppFormatBlueprintPDF,
@@ -180,6 +204,17 @@ interface BackupSettingsModuleProps {
     invoices: LogisticsInvoice[];
     ledgers: LogisticsLedgerEntry[];
   };
+  autoBackupInfo?: {
+    status: 'idle' | 'pending' | 'syncing' | 'synced' | 'offline_sealed' | 'error';
+    lastBackedUpAt?: number;
+    sha256?: string;
+    snapshotName?: string;
+    recordCount?: number;
+    message?: string;
+  };
+  deviceTrust?: DeviceTrustCheckResult | null;
+  onAcknowledgeNewDevice?: () => void;
+  onManualSyncNow?: () => Promise<void>;
   onSwitchGmail: () => Promise<void>;
   onSwitchStaffSession: (staff: StaffAccount | null) => void;
   onUpdateAdminSession: (session: CustomAuthSession) => void;
@@ -221,6 +256,10 @@ const BackupSettingsModuleInner: React.FC<BackupSettingsModuleProps> = ({
   activeStaffSession,
   allData,
   logisticsData,
+  autoBackupInfo,
+  deviceTrust,
+  onAcknowledgeNewDevice,
+  onManualSyncNow,
   onSwitchGmail,
   onSwitchStaffSession,
   onUpdateAdminSession,
@@ -235,11 +274,24 @@ const BackupSettingsModuleInner: React.FC<BackupSettingsModuleProps> = ({
   const excelInputRef = useRef<HTMLInputElement | null>(null);
   const autoCollectFolderRef = useRef<HTMLInputElement | null>(null);
   const autoCollectFilesRef = useRef<HTMLInputElement | null>(null);
+  const localJsonInputRef = useRef<HTMLInputElement | null>(null);
 
   const [driveStatus, setDriveStatus] = useState<string | null>(null);
   const [driveError, setDriveError] = useState<string | null>(null);
   const [driveFiles, setDriveFiles] = useState<DriveFileSummary[]>([]);
   const [busyDrive, setBusyDrive] = useState(false);
+
+  // Backup Vault 2FA OTP + Admin PIN Security Gate State
+  const [vaultUnlocked, setVaultUnlocked] = useState<boolean>(() => isBackupVaultUnlocked());
+  const [vaultPinInput, setVaultPinInput] = useState('');
+  const [vaultOtpInput, setVaultOtpInput] = useState('');
+  const [vaultOtpChallenge, setVaultOtpChallenge] = useState<TwoFactorOtpChallenge | null>(() =>
+    getActiveTwoFactorOtpChallenge()
+  );
+  const [vaultGateError, setVaultGateError] = useState<string | null>(null);
+  const [lastSealHex, setLastSealHex] = useState<string>('');
+  const isDriveEmailAuthorized = isAuthorizedBackupDriveEmail(connectedEmail);
+  const dailySnapshotName = useMemo(() => getDailySnapshotFileName(), []);
 
   // One-Click FoxPro (.DBF) & Bank PNB Excel Auto-Collector State
   const [autoCollectResult, setAutoCollectResult] = useState<AutoCollectedOldDataResult | null>(null);
@@ -248,26 +300,6 @@ const BackupSettingsModuleInner: React.FC<BackupSettingsModuleProps> = ({
   const [cleaningParties, setCleaningParties] = useState(false);
   const [copiedDomain, setCopiedDomain] = useState(false);
   const oauthDomain = useMemo(() => getOAuthDomainStatus(), []);
-
-  const partySeparationPreview = useMemo(
-    () =>
-      analyzeAndSeparateMisclassifiedParties({
-        parties: allData.parties,
-        drivers: allData.drivers,
-        lorryHires: allData.lorryHires,
-        invoices: allData.invoices,
-        consignments: allData.consignments,
-        extraOwnerNames: allData.vehicles.map((v) => v.ownerName || '').filter(Boolean),
-      }),
-    [
-      allData.parties,
-      allData.drivers,
-      allData.lorryHires,
-      allData.invoices,
-      allData.consignments,
-      allData.vehicles,
-    ]
-  );
 
   // Master Admin ID & Password Management
   const [adminCurrentPwd, setAdminCurrentPwd] = useState('');
@@ -278,6 +310,8 @@ const BackupSettingsModuleInner: React.FC<BackupSettingsModuleProps> = ({
   // Admin PIN for 2-Second Drive Email Switch & Protected Settings
   const [drivePinModalOpen, setDrivePinModalOpen] = useState(false);
   const [drivePinInput, setDrivePinInput] = useState('');
+  const [driveOtpInput, setDriveOtpInput] = useState('');
+  const [driveOtpChallenge, setDriveOtpChallenge] = useState<TwoFactorOtpChallenge | null>(null);
   const [drivePinError, setDrivePinError] = useState<string | null>(null);
   const [newAdminPinInput, setNewAdminPinInput] = useState(() => getStoredAdminPin());
   const isolatedDriveNames = useMemo(() => getIsolatedDriveFileNames(activeFy), [activeFy]);
@@ -365,33 +399,101 @@ const BackupSettingsModuleInner: React.FC<BackupSettingsModuleProps> = ({
     );
   }, [staffAccounts, debouncedStaffSearch]);
 
-  const handleBackupToDrive = () => {
+  const buildCompleteVaultBundle = () => ({
+    exportedAt: new Date().toISOString(),
+    company: compState,
+    ...allData,
+    ...(logisticsData
+      ? {
+          logisticsParties: logisticsData.parties,
+          logisticsVehicles: logisticsData.vehicles,
+          logisticsDrivers: logisticsData.drivers,
+          logisticsDockets: logisticsData.dockets,
+          logisticsManifests: logisticsData.manifests,
+          logisticsInvoices: logisticsData.invoices,
+          logisticsLedgers: logisticsData.ledgers,
+        }
+      : {}),
+  });
+
+  const ensureAuthorizedDriveReady = (): boolean => {
     if (!driveAccessToken) {
-      onSwitchGmail();
+      void onSwitchGmail();
+      return false;
+    }
+    if (!isAuthorizedBackupDriveEmail(connectedEmail)) {
+      playAlertBeep();
+      setDriveError(
+        `Drive Security Lock: Sync & Restore locked strictly to ${MASTER_ADMIN_EMAIL} (current: ${connectedEmail || 'unverified'}). Switch Gmail to ${MASTER_ADMIN_EMAIL}.`
+      );
+      return false;
+    }
+    return true;
+  };
+
+  const handleRequestVaultOtp = () => {
+    const ch = issueTwoFactorOtpChallenge('Unlock Backup & Restore Vault');
+    setVaultOtpChallenge(ch);
+    setVaultGateError(null);
+    playVerifiedBeep();
+  };
+
+  const handleUnlockVaultSubmit = (e: React.FormEvent) => {
+    e.preventDefault();
+    const res = unlockBackupVaultWithPinAndOtp({
+      pin: vaultPinInput,
+      otp: vaultOtpInput,
+    });
+    if (!res.unlocked) {
+      playAlertBeep();
+      setVaultGateError(res.error || 'PIN or 2FA OTP verification failed.');
       return;
     }
+    playVerifiedBeep();
+    setVaultUnlocked(true);
+    setVaultGateError(null);
+    setVaultPinInput('');
+    setVaultOtpInput('');
+  };
+
+  const handleBackupToDrive = () => {
+    if (!ensureAuthorizedDriveReady() || !driveAccessToken) return;
     onShowConfirm({
-      title: 'Upload Compact GZIP Backup to Google Drive?',
-      description: `This will create/overwrite compressed Master_Backup_DRC.json.gz inside DOLPHIN_ROAD_CARRIERS_MASTER on ${connectedEmail || 'your Google Drive'} (50-Year 15GB Storage Optimizer).`,
-      confirmLabel: 'Backup Compact GZIP to Drive',
+      title: 'Upload SHA-256 Sealed Union Backup to Google Drive?',
+      description: `Runs Append-Only Union Merge (local + Drive), seals with SHA-256, updates Master_Backup_DRC.json.gz & ${dailySnapshotName} on ${MASTER_ADMIN_EMAIL}.`,
+      confirmLabel: 'Union Merge & Backup Now',
       onConfirm: async () => {
         setBusyDrive(true);
         setDriveError(null);
         try {
-          const res = await uploadMasterBackupToDrive(driveAccessToken, {
-            exportedAt: new Date().toISOString(),
-            company: compState,
-            ...allData,
+          const remote = await downloadMasterBackupFromDrive(
+            driveAccessToken,
+            connectedEmail
+          ).catch(() => null);
+          const unionMerged = unionMergeBackupBundles(buildCompleteVaultBundle(), remote);
+          const res = await uploadMasterBackupToDrive(
+            driveAccessToken,
+            unionMerged,
+            connectedEmail
+          );
+          const snap = await uploadDailyVaultSnapshotToDrive({
+            accessToken: driveAccessToken,
+            payload: unionMerged,
+            connectedEmail,
           });
+          setLastSealHex(res.sha256);
           const rawKb = Math.max(1, Math.round(res.rawBytes / 1024));
           const compKb = Math.max(1, Math.round(res.compressedBytes / 1024));
-          const pctSaved = res.rawBytes > 0 ? Math.max(0, Math.round((1 - res.compressedBytes / res.rawBytes) * 100)) : 0;
+          const pctSaved =
+            res.rawBytes > 0 ? Math.max(0, Math.round((1 - res.compressedBytes / res.rawBytes) * 100)) : 0;
+          playVerifiedBeep();
           setDriveStatus(
-            `Backed up ${res.name} (${compKb} KB vs ${rawKb} KB raw · ${pctSaved}% saved for 50-year Drive space · File ID: ${res.id})`
+            `SHA-256 Sealed (${res.sha256.slice(0, 12)}…) · Union-merged ${res.recordCount} records to ${res.name} (${compKb} KB vs ${rawKb} KB · ${pctSaved}% saved) + Daily Snapshot ${snap.name}.`
           );
           const files = await listDriveBackupFiles(driveAccessToken);
           setDriveFiles(files);
         } catch (err) {
+          playAlertBeep();
           setDriveError(err instanceof Error ? err.message : 'Drive backup failed');
         } finally {
           setBusyDrive(false);
@@ -400,11 +502,72 @@ const BackupSettingsModuleInner: React.FC<BackupSettingsModuleProps> = ({
     });
   };
 
-  const handleUploadIsolated5Files = async () => {
-    if (!driveAccessToken) {
-      await onSwitchGmail();
-      return;
+  const handleUploadDailySnapshot = async () => {
+    if (!ensureAuthorizedDriveReady() || !driveAccessToken) return;
+    setBusyDrive(true);
+    setDriveError(null);
+    try {
+      const remote = await downloadMasterBackupFromDrive(driveAccessToken, connectedEmail).catch(
+        () => null
+      );
+      const unionMerged = unionMergeBackupBundles(buildCompleteVaultBundle(), remote);
+      const snap = await uploadDailyVaultSnapshotToDrive({
+        accessToken: driveAccessToken,
+        payload: unionMerged,
+        connectedEmail,
+      });
+      setLastSealHex(snap.sha256);
+      playVerifiedBeep();
+      setDriveStatus(
+        `Daily Snapshot Saved: ${snap.name} (${Math.max(1, Math.round(snap.bytes / 1024))} KB · ${snap.recordCount} records · SHA-256 ${snap.sha256.slice(0, 12)}…).`
+      );
+      const files = await listDriveBackupFiles(driveAccessToken);
+      setDriveFiles(files);
+    } catch (err) {
+      playAlertBeep();
+      setDriveError(err instanceof Error ? err.message : 'Daily snapshot upload failed.');
+    } finally {
+      setBusyDrive(false);
     }
+  };
+
+  const handleRestoreDailySnapshot = () => {
+    if (!ensureAuthorizedDriveReady() || !driveAccessToken) return;
+    onShowConfirm({
+      title: `Restore Daily Snapshot (${dailySnapshotName})?`,
+      description: `Downloads latest DRC_VAULT_SNAPSHOT_YYYY-MM-DD.json from ${MASTER_ADMIN_EMAIL}, verifies SHA-256 integrity, and performs Append-Only Union Merge without deleting local entries.`,
+      confirmLabel: 'Verify & Restore Snapshot',
+      variant: 'danger',
+      onConfirm: async () => {
+        setBusyDrive(true);
+        setDriveError(null);
+        try {
+          const snap = await downloadDailyVaultSnapshotFromDrive({
+            accessToken: driveAccessToken,
+            connectedEmail,
+          });
+          if (!snap) {
+            setDriveError('No DRC_VAULT_SNAPSHOT_YYYY-MM-DD.json found in Google Drive yet.');
+            return;
+          }
+          await restoreErpBackupBundle(snap.payload);
+          await restoreLogisticsBackupBundle(snap.payload);
+          playVerifiedBeep();
+          setDriveStatus(
+            `Daily Snapshot "${snap.fileName}" verified (SHA-256) and union-restored cleanly.`
+          );
+        } catch (err) {
+          playAlertBeep();
+          setDriveError(err instanceof Error ? err.message : 'Daily snapshot restore failed.');
+        } finally {
+          setBusyDrive(false);
+        }
+      },
+    });
+  };
+
+  const handleUploadIsolated5Files = async () => {
+    if (!ensureAuthorizedDriveReady() || !driveAccessToken) return;
     setBusyDrive(true);
     setDriveError(null);
     try {
@@ -469,14 +632,17 @@ const BackupSettingsModuleInner: React.FC<BackupSettingsModuleProps> = ({
         ptlPayload: buildDivisionPayload('PTL'),
         courierPayload: buildDivisionPayload('COURIER'),
         mastersVaultPayload,
+        connectedEmail,
       });
 
+      playVerifiedBeep();
       setDriveStatus(
-        `App-Only Sandbox Drive Backup Complete: Uploaded ${res.uploadedFiles.length} isolated JSON files (${res.names.all.join(', ')}) + ensured inactive "${INSTALLER_VAULT_FOLDER}" folder.`
+        `App-Only Sandbox Drive Backup Complete: Uploaded ${res.uploadedFiles.length} SHA-256 sealed JSON files (${res.names.all.join(', ')}) + ensured inactive "${INSTALLER_VAULT_FOLDER}" folder.`
       );
       const files = await listDriveBackupFiles(driveAccessToken);
       setDriveFiles(files);
     } catch (err) {
+      playAlertBeep();
       setDriveError(err instanceof Error ? err.message : 'Isolated 5-file Drive backup failed');
     } finally {
       setBusyDrive(false);
@@ -484,14 +650,15 @@ const BackupSettingsModuleInner: React.FC<BackupSettingsModuleProps> = ({
   };
 
   const handleRestoreIsolatedFile = async (fileName: string) => {
-    if (!driveAccessToken) {
-      await onSwitchGmail();
-      return;
-    }
+    if (!ensureAuthorizedDriveReady() || !driveAccessToken) return;
     setBusyDrive(true);
     setDriveError(null);
     try {
-      const payload = await downloadIsolatedBusinessFileFromDrive(driveAccessToken, fileName);
+      const payload = await downloadIsolatedBusinessFileFromDrive(
+        driveAccessToken,
+        fileName,
+        connectedEmail
+      );
       if (!payload) {
         setDriveError(`"${fileName}" was not found in your App Sandbox Drive folder yet. Upload first.`);
         return;
@@ -504,8 +671,10 @@ const BackupSettingsModuleInner: React.FC<BackupSettingsModuleProps> = ({
       } else {
         await restoreLogisticsBackupBundle(payload);
       }
-      setDriveStatus(`Restored isolated business data from "${fileName}" cleanly.`);
+      playVerifiedBeep();
+      setDriveStatus(`SHA-256 verified & union-restored isolated business data from "${fileName}".`);
     } catch (err) {
+      playAlertBeep();
       setDriveError(err instanceof Error ? err.message : `Restore of ${fileName} failed.`);
     } finally {
       setBusyDrive(false);
@@ -514,13 +683,20 @@ const BackupSettingsModuleInner: React.FC<BackupSettingsModuleProps> = ({
 
   const handleVerifyDrivePinAndSwitch = async (e: React.FormEvent) => {
     e.preventDefault();
-    if (!verifyAdminPin(drivePinInput)) {
-      setDrivePinError('Invalid Admin Security PIN. Default PIN is 1234 unless changed below.');
+    const res = unlockBackupVaultWithPinAndOtp({
+      pin: drivePinInput,
+      otp: driveOtpInput,
+    });
+    if (!res.unlocked) {
+      playAlertBeep();
+      setDrivePinError(res.error || 'Invalid Admin PIN or 6-digit 2FA OTP.');
       return;
     }
+    setVaultUnlocked(true);
     setDrivePinError(null);
     setDrivePinModalOpen(false);
     setDrivePinInput('');
+    setDriveOtpInput('');
     await onSwitchGmail();
   };
 
@@ -540,10 +716,13 @@ const BackupSettingsModuleInner: React.FC<BackupSettingsModuleProps> = ({
     const rawFiles = Array.from(fileList);
     // Security allowlist check on FoxPro / Spreadsheet files; flag any dangerous executables/scripts
     for (const f of rawFiles) {
-      if (/\.(exe|bat|cmd|sh|msi|vbs|ps1|js|mjs|ts|html|htm|svg|php)$/i.test(f.name)) {
+      if (isBlockedDangerousFileName(f.name)) {
         const chk = validateSafeUploadFile(f, 'foxpro_batch');
         playAlertBeep();
-        setDriveError(chk.reason || `Blocked unsafe file "${f.name}" by DRC Security Policy.`);
+        setDriveError(
+          chk.reason ||
+            `Security Blocker: File "${f.name}" rejected (.exe, .bat, .vbs, .js executables/scripts are strictly blocked).`
+        );
         return;
       }
     }
@@ -566,7 +745,7 @@ const BackupSettingsModuleInner: React.FC<BackupSettingsModuleProps> = ({
         setDriveError('No .DBF or Bank PNB Excel (.xlsx/.xls/.csv) files found in the selected folder/files.');
       } else {
         setDriveStatus(
-          `Auto-Collect scanned ${res.processedFiles.length} data file(s) & skipped ${res.ignoredScrapFiles.length} scrap file(s): Ready to import ${res.parties.length} Parties, ${res.consignments.length} CN/Bilty, ${res.invoices.length} Bills, ${res.lorryHires.length} Challans, ${res.bankReceipts.length} PNB Bank Receipts.`
+          `Auto-Collect scanned ${res.processedFiles.length} data file(s) & skipped ${res.ignoredScrapFiles.length} scrap file(s): Ready to import ${res.parties.length} Parties/Owners/Brokers, ${res.consignments.length} CN/Bilty, ${res.invoices.length} Bills, ${res.lorryHires.length} Challans, ${res.transactions.length} Ledger Vouchers, ${res.bankReceipts.length} PNB Receipts.`
         );
       }
     } catch (err) {
@@ -601,6 +780,9 @@ const BackupSettingsModuleInner: React.FC<BackupSettingsModuleProps> = ({
       if (autoCollectResult.lorryHires.length > 0) {
         totalImported += await bulkUpsertDocuments('lorry_hires', autoCollectResult.lorryHires as unknown as Array<Record<string, unknown>>);
       }
+      if (autoCollectResult.transactions.length > 0) {
+        totalImported += await bulkUpsertDocuments('transactions', autoCollectResult.transactions as unknown as Array<Record<string, unknown>>);
+      }
       if (autoCollectResult.bankReceipts.length > 0) {
         totalImported += await bulkUpsertDocuments('bank_receipts', autoCollectResult.bankReceipts as unknown as Array<Record<string, unknown>>);
       }
@@ -621,6 +803,7 @@ const BackupSettingsModuleInner: React.FC<BackupSettingsModuleProps> = ({
         setCompState(nextComp);
         await saveSettingsDocument('company', { ...nextComp, ownerUid }, hasCustomSettings);
       }
+      playVerifiedBeep();
       setDriveStatus(
         `One-Click Auto-Collect Complete: Imported ${totalImported} legacy FoxPro/PNB record(s) + ${autoCollectResult.destinations.length} Destination(s) into Firestore & Local Cache (${autoCollectResult.ignoredScrapFiles.length} scrap file(s) excluded).`
       );
@@ -629,6 +812,35 @@ const BackupSettingsModuleInner: React.FC<BackupSettingsModuleProps> = ({
       setDriveError(err instanceof Error ? err.message : 'Auto-Collect import failed.');
     } finally {
       setAutoCollectImporting(false);
+    }
+  };
+
+  const handleRestoreHeadParties = async () => {
+    setCleaningParties(true);
+    setDriveError(null);
+    try {
+      const { restoredParties, restoredCount } = restoreHeadPartiesToBillingCustomers(allData.parties);
+      if (restoredCount === 0) {
+        const billingCount = allData.parties.filter(
+          (p) => p.partyType === 'Customer' || p.partyType === 'Consignor' || p.partyType === 'Consignee'
+        ).length;
+        setDriveStatus(
+          `All ${billingCount} HEAD/Billing Customers are already correctly mapped to Billing Customers.`
+        );
+        return;
+      }
+      await bulkUpsertDocuments(
+        'parties',
+        restoredParties as unknown as Array<Record<string, unknown>>
+      );
+      playVerifiedBeep();
+      setDriveStatus(
+        `Restored ${restoredCount} HEAD.DBF party record(s) back to Billing Customers ('Customer'). They now appear cleanly under Billing Parties & Tax Invoice.`
+      );
+    } catch (err) {
+      setDriveError(err instanceof Error ? err.message : 'Failed to restore HEAD parties.');
+    } finally {
+      setCleaningParties(false);
     }
   };
 
@@ -686,16 +898,13 @@ const BackupSettingsModuleInner: React.FC<BackupSettingsModuleProps> = ({
   };
 
   const handleRunDailyDriveCleanup = async () => {
-    if (!driveAccessToken) {
-      onSwitchGmail();
-      return;
-    }
+    if (!ensureAuthorizedDriveReady() || !driveAccessToken) return;
     setBusyDrive(true);
     setDriveError(null);
     try {
       const res = await runDailyDrive8FileCleanup(driveAccessToken);
       setDriveStatus(
-        `Google Drive 8-File & Subfolder Cleanup Complete: ${res.trashedCount} redundant/temp/scrap files pruned, ${res.keptCount} essential master files preserved inside DOLPHIN_ROAD_CARRIERS_MASTER.`
+        `Google Drive Cleanup Complete: ${res.trashedCount} redundant/temp/scrap files pruned, ${res.keptCount} essential master + daily snapshot files preserved inside DOLPHIN_ROAD_CARRIERS_MASTER.`
       );
       const files = await listDriveBackupFiles(driveAccessToken);
       setDriveFiles(files);
@@ -707,10 +916,7 @@ const BackupSettingsModuleInner: React.FC<BackupSettingsModuleProps> = ({
   };
 
   const handleListDriveFiles = async () => {
-    if (!driveAccessToken) {
-      onSwitchGmail();
-      return;
-    }
+    if (!ensureAuthorizedDriveReady() || !driveAccessToken) return;
     setBusyDrive(true);
     try {
       const files = await listDriveBackupFiles(driveAccessToken);
@@ -724,29 +930,33 @@ const BackupSettingsModuleInner: React.FC<BackupSettingsModuleProps> = ({
   };
 
   const handleRestoreFromDrive = () => {
-    if (!driveAccessToken) {
-      onSwitchGmail();
-      return;
-    }
+    if (!ensureAuthorizedDriveReady() || !driveAccessToken) return;
     onShowConfirm({
-      title: 'Restore Records from Google Drive Master_Backup_DRC.json?',
-      description:
-        'This downloads Master_Backup_DRC.json from your connected Google Drive and re-imports missing records into Firestore.',
-      confirmLabel: 'Restore Backup',
+      title: 'Restore Records from Google Drive (SHA-256 Verified Union Merge)?',
+      description: `Downloads Master_Backup_DRC.json.gz from ${MASTER_ADMIN_EMAIL}, verifies SHA-256 tamper seal, and merges all records into local + Firestore without deleting newer entries.`,
+      confirmLabel: 'Verify & Restore Backup',
       variant: 'danger',
       onConfirm: async () => {
         setBusyDrive(true);
         setDriveError(null);
         try {
-          const payload = await downloadMasterBackupFromDrive(driveAccessToken);
+          const payload = await downloadMasterBackupFromDrive(
+            driveAccessToken,
+            connectedEmail
+          );
           if (!payload) {
             setDriveStatus('No Master_Backup_DRC.json found in Drive yet.');
             return;
           }
           await restoreErpBackupBundle(payload);
+          await restoreLogisticsBackupBundle(payload);
           const partiesList = (payload.parties as Party[]) || [];
-          setDriveStatus(`Restored full ERP backup snapshot cleanly (${partiesList.length} party records synced).`);
+          playVerifiedBeep();
+          setDriveStatus(
+            `SHA-256 Verified & Union-Restored full ERP snapshot (${partiesList.length} party records synced).`
+          );
         } catch (err) {
+          playAlertBeep();
           setDriveError(err instanceof Error ? err.message : 'Restore failed');
         } finally {
           setBusyDrive(false);
@@ -755,27 +965,68 @@ const BackupSettingsModuleInner: React.FC<BackupSettingsModuleProps> = ({
     });
   };
 
-  const handleDownloadLocalJson = () => {
-    const blob = new Blob(
-      [
-        JSON.stringify(
-          {
-            exportedAt: new Date().toISOString(),
-            company: compState,
-            ...allData,
-          },
-          null,
-          2
-        ),
-      ],
-      { type: 'application/json' }
+  const handleDownloadLocalJson = async () => {
+    const sealed = await sealBackupPayloadWithSha256(
+      buildCompleteVaultBundle(),
+      connectedEmail || MASTER_ADMIN_EMAIL
     );
+    setLastSealHex(sealed.sha256);
+    const blob = new Blob([JSON.stringify(sealed.sealedPayload, null, 2)], {
+      type: 'application/json',
+    });
     const url = URL.createObjectURL(blob);
     const a = document.createElement('a');
     a.href = url;
     a.download = `Master_Backup_DRC_${todayISO()}.json`;
     a.click();
     URL.revokeObjectURL(url);
+    playVerifiedBeep();
+    setDriveStatus(
+      `Exported SHA-256 sealed local backup (${sealed.sha256.slice(0, 12)}… · ${sealed.recordCount} records).`
+    );
+  };
+
+  const handleImportLocalJsonFile = async (file: File | undefined) => {
+    if (!file) return;
+    const uploadCheck = validateSafeUploadFile(file, 'json_backup');
+    if (!uploadCheck.valid || isBlockedDangerousFileName(file.name)) {
+      playAlertBeep();
+      setDriveError(
+        uploadCheck.reason ||
+          `Blocked unsafe file "${file.name}". Executables/scripts (.exe, .bat, .vbs, .js) are strictly prohibited.`
+      );
+      return;
+    }
+    setBusyDrive(true);
+    setDriveError(null);
+    try {
+      let parsed: Record<string, unknown>;
+      if (file.name.toLowerCase().endsWith('.gz') && typeof DecompressionStream !== 'undefined') {
+        const stream = file.stream().pipeThrough(new DecompressionStream('gzip'));
+        const text = await new Response(stream).text();
+        parsed = JSON.parse(text) as Record<string, unknown>;
+      } else {
+        const text = await file.text();
+        parsed = JSON.parse(text) as Record<string, unknown>;
+      }
+      const check = await verifyBackupPayloadSha256(parsed);
+      if (check.hasSeal && !check.valid) {
+        playAlertBeep();
+        setDriveError(check.reason || 'Blocked tampered backup: SHA-256 mismatch.');
+        return;
+      }
+      await restoreErpBackupBundle(parsed);
+      await restoreLogisticsBackupBundle(parsed);
+      playVerifiedBeep();
+      setDriveStatus(
+        `Imported & SHA-256 Verified "${file.name}" via Append-Only Union Merge${check.hasSeal ? ` (${check.expectedSha256?.slice(0, 12)}…)` : ''}.`
+      );
+    } catch (err) {
+      playAlertBeep();
+      setDriveError(err instanceof Error ? err.message : 'Failed to parse JSON/GZ backup file.');
+    } finally {
+      setBusyDrive(false);
+    }
   };
 
   const handleCreateStaff = async (e: React.FormEvent) => {
@@ -1515,8 +1766,185 @@ const BackupSettingsModuleInner: React.FC<BackupSettingsModuleProps> = ({
         </div>
       )}
 
-      {mode === 'backup' && (
+      {mode === 'backup' && (!isMasterAdmin || !vaultUnlocked) && (
+        <div className="bg-white rounded-xl border-2 border-amber-300 shadow-sm p-6 max-w-lg mx-auto space-y-4 text-xs">
+          <div className="flex items-center gap-3">
+            <div className="w-11 h-11 rounded-full bg-amber-100 text-amber-800 flex items-center justify-center shrink-0">
+              <Lock className="w-6 h-6" />
+            </div>
+            <div>
+              <h3 className="text-sm font-extrabold text-slate-900">
+                Backup &amp; Restore Vault Locked (Master Admin PIN + 2FA OTP)
+              </h3>
+              <p className="text-[11px] text-slate-600 mt-0.5">
+                Drive Sync &amp; Restore locked strictly to{' '}
+                <strong className="font-mono-num text-[#0D47A1]">{MASTER_ADMIN_EMAIL}</strong>.
+              </p>
+            </div>
+          </div>
+
+          {!isMasterAdmin ? (
+            <div className="p-3 rounded-lg bg-red-50 border border-red-200 text-red-800 font-bold">
+              Only Master Admin can unlock Backup / Restore. Contact your Administrator.
+            </div>
+          ) : (
+            <form onSubmit={handleUnlockVaultSubmit} className="space-y-3">
+              {vaultGateError && (
+                <div className="p-2.5 rounded-lg bg-red-50 border border-red-200 text-red-700 font-bold">
+                  {vaultGateError}
+                </div>
+              )}
+
+              <div className="p-3 rounded-lg bg-blue-50 border border-blue-200 flex flex-wrap items-center justify-between gap-2">
+                <div>
+                  <div className="font-extrabold text-blue-950">Step 1: 2FA Security OTP Challenge</div>
+                  {vaultOtpChallenge ? (
+                    <div className="text-[11px] text-blue-900 mt-0.5">
+                      Active Authenticator Code:{' '}
+                      <span className="px-2 py-0.5 rounded bg-blue-900 text-amber-300 font-mono-num font-extrabold tracking-widest">
+                        {vaultOtpChallenge.code}
+                      </span>{' '}
+                      (valid 5 mins)
+                    </div>
+                  ) : (
+                    <div className="text-[11px] text-blue-800">
+                      Click button to issue a fresh 6-digit 2FA OTP challenge.
+                    </div>
+                  )}
+                </div>
+                <button
+                  type="button"
+                  onClick={handleRequestVaultOtp}
+                  className="px-3 py-1.5 rounded-lg bg-[#0D47A1] hover:bg-blue-800 text-white font-bold cursor-pointer"
+                >
+                  {vaultOtpChallenge ? 'Regenerate 2FA OTP' : 'Generate 2FA OTP'}
+                </button>
+              </div>
+
+              <div className="grid grid-cols-1 sm:grid-cols-2 gap-3">
+                <div>
+                  <label className="block text-[11px] font-bold text-slate-700 mb-1">
+                    Master Admin PIN (Default: 1234)
+                  </label>
+                  <input
+                    type="password"
+                    inputMode="numeric"
+                    required
+                    value={vaultPinInput}
+                    onChange={(e) => setVaultPinInput(e.target.value)}
+                    placeholder="Enter Admin PIN"
+                    className="w-full px-3 py-2 rounded-lg border border-slate-300 font-mono-num"
+                  />
+                </div>
+                <div>
+                  <label className="block text-[11px] font-bold text-slate-700 mb-1">
+                    6-Digit 2FA OTP Code
+                  </label>
+                  <input
+                    type="text"
+                    inputMode="numeric"
+                    maxLength={6}
+                    required
+                    value={vaultOtpInput}
+                    onChange={(e) => setVaultOtpInput(e.target.value.replace(/\D/g, ''))}
+                    placeholder="6-digit OTP"
+                    className="w-full px-3 py-2 rounded-lg border border-slate-300 font-mono-num tracking-widest"
+                  />
+                </div>
+              </div>
+
+              <button
+                type="submit"
+                className="w-full py-2.5 rounded-lg bg-emerald-700 hover:bg-emerald-800 text-white font-extrabold cursor-pointer"
+              >
+                Verify Master Admin PIN + 2FA OTP &amp; Unlock Vault
+              </button>
+            </form>
+          )}
+        </div>
+      )}
+
+      {mode === 'backup' && isMasterAdmin && vaultUnlocked && (
         <div className="space-y-4">
+          {/* PART B Security Strip: Live Auto-Backup, SHA-256 Seal, Account Lock & New-Device Guard */}
+          <div className="bg-gradient-to-r from-slate-900 via-[#0B3B8C] to-emerald-900 text-white rounded-xl border border-emerald-400/50 p-4 shadow-sm space-y-2.5 text-xs">
+            <div className="flex flex-wrap items-center justify-between gap-2">
+              <div className="flex flex-wrap items-center gap-2">
+                <span className="inline-flex items-center gap-1.5 px-2.5 py-1 rounded-full bg-emerald-500 text-slate-950 font-extrabold">
+                  <ShieldCheck className="w-3.5 h-3.5" />
+                  Live Auto-Backup Active (3s)
+                </span>
+                <span
+                  className={`inline-flex items-center gap-1 px-2.5 py-1 rounded-full font-bold ${
+                    isDriveEmailAuthorized
+                      ? 'bg-emerald-400/20 border border-emerald-300 text-emerald-100'
+                      : 'bg-amber-400/20 border border-amber-300 text-amber-100'
+                  }`}
+                >
+                  Drive Account Lock: {MASTER_ADMIN_EMAIL}
+                </span>
+                <span className="px-2 py-1 rounded bg-white/10 font-mono-num text-[11px]">
+                  Blocker: .exe/.bat/.vbs/.js Blocked
+                </span>
+              </div>
+              <div className="flex flex-wrap items-center gap-2">
+                {onManualSyncNow && (
+                  <button
+                    type="button"
+                    disabled={busyDrive}
+                    onClick={() => void onManualSyncNow()}
+                    className="px-3 py-1.5 rounded-lg bg-amber-400 hover:bg-amber-300 text-slate-950 font-extrabold cursor-pointer disabled:opacity-60"
+                  >
+                    Sync Union Merge Now
+                  </button>
+                )}
+                <button
+                  type="button"
+                  onClick={() => {
+                    lockBackupVault();
+                    setVaultUnlocked(false);
+                  }}
+                  className="inline-flex items-center gap-1 px-2.5 py-1.5 rounded-lg bg-white/15 hover:bg-white/25 text-white font-bold cursor-pointer"
+                >
+                  <Lock className="w-3.5 h-3.5" />
+                  Lock Vault
+                </button>
+              </div>
+            </div>
+            <div className="flex flex-wrap items-center justify-between gap-2 text-[11px] text-blue-100">
+              <span>
+                Latest SHA-256 Seal:{' '}
+                <strong className="font-mono-num text-amber-300">
+                  {autoBackupInfo?.sha256 || lastSealHex
+                    ? `${(autoBackupInfo?.sha256 || lastSealHex).slice(0, 24)}…`
+                    : 'Auto-generated on next save or backup'}
+                </strong>{' '}
+                · Daily Snapshot: <strong className="font-mono-num text-white">{dailySnapshotName}</strong>
+              </span>
+              {autoBackupInfo?.lastBackedUpAt && (
+                <span className="font-mono-num text-emerald-200">
+                  Last Auto-Backup: {new Date(autoBackupInfo.lastBackedUpAt).toLocaleTimeString()} (
+                  {autoBackupInfo.recordCount ?? 0} records)
+                </span>
+              )}
+            </div>
+            {deviceTrust?.isNewDevice && (
+              <div className="p-2.5 rounded-lg bg-red-600/90 border border-red-300 flex flex-wrap items-center justify-between gap-2">
+                <span className="font-extrabold">
+                  New-Device Security Alert: Unrecognized device {deviceTrust.deviceLabel} [{deviceTrust.deviceId}] detected.
+                </span>
+                {onAcknowledgeNewDevice && (
+                  <button
+                    type="button"
+                    onClick={onAcknowledgeNewDevice}
+                    className="px-2.5 py-1 rounded bg-white text-red-900 font-extrabold cursor-pointer"
+                  >
+                    Trust This Device
+                  </button>
+                )}
+              </div>
+            )}
+          </div>
           {/* One-Click Auto-Collect FoxPro (.DBF) & Bank PNB Excel Importer (Excluding Scrap) */}
           <div className="bg-white rounded-xl border border-blue-200 shadow-sm overflow-hidden">
             <div className="bg-gradient-to-r from-[#0F3D7A] to-[#1D4ED8] text-white px-4 py-3 flex flex-wrap items-center justify-between gap-3">
@@ -1575,14 +2003,14 @@ const BackupSettingsModuleInner: React.FC<BackupSettingsModuleProps> = ({
               </div>
             </div>
 
-            {/* One-Click Cleanup Bar for Already-Imported FoxPro / Party Master Records */}
-            <div className="px-4 py-2.5 bg-slate-50 border-b border-slate-200 flex flex-wrap items-center justify-between gap-2 text-xs">
-              <div className="flex flex-wrap items-center gap-2 text-slate-700">
-                <Users className="w-4 h-4 text-blue-700 shrink-0" />
-                <span className="font-bold text-slate-900">Party Master Hygiene:</span>
+            {/* Verified Masters Status Strip & One-Click Restore / Role Hygiene Bar */}
+            <div className="px-4 py-2.5 bg-emerald-50/70 border-b border-emerald-200 flex flex-wrap items-center justify-between gap-2 text-xs">
+              <div className="flex flex-wrap items-center gap-2 text-emerald-950 font-bold">
+                <CheckCircle2 className="w-4 h-4 text-emerald-700 shrink-0" />
                 <span>
-                  Customers:{' '}
-                  <strong className="text-emerald-700 font-mono-num">
+                  ✅ Verified Masters: Billing Parties{' '}
+                  <span className="font-mono-num text-blue-900">
+                    [
                     {
                       allData.parties.filter(
                         (p) =>
@@ -1591,41 +2019,44 @@ const BackupSettingsModuleInner: React.FC<BackupSettingsModuleProps> = ({
                           p.partyType === 'Consignee'
                       ).length
                     }
-                  </strong>
-                  {' · '}Brokers:{' '}
-                  <strong className="text-indigo-700 font-mono-num">
-                    {allData.parties.filter((p) => p.partyType === 'Broker').length}
-                  </strong>
-                  {' · '}Vehicle Owners:{' '}
-                  <strong className="text-amber-700 font-mono-num">
-                    {allData.parties.filter((p) => p.partyType === 'TruckOwner').length}
-                  </strong>
-                </span>
-                {partySeparationPreview.brokersSeparated +
-                  partySeparationPreview.ownersSeparated +
-                  partySeparationPreview.driversSeparated +
-                  partySeparationPreview.duplicatesMerged >
-                  0 && (
-                  <span className="px-2 py-0.5 rounded bg-amber-100 text-amber-900 font-bold text-[11px]">
-                    {partySeparationPreview.brokersSeparated +
-                      partySeparationPreview.ownersSeparated +
-                      partySeparationPreview.driversSeparated +
-                      partySeparationPreview.duplicatesMerged}{' '}
-                    misclassified FoxPro / Broker record(s) found
+                    ]
                   </span>
-                )}
+                  {' | '}Brokers{' '}
+                  <span className="font-mono-num text-indigo-900">
+                    [{allData.parties.filter((p) => p.partyType === 'Broker').length}]
+                  </span>
+                  {' | '}Lorry Owners{' '}
+                  <span className="font-mono-num text-amber-900">
+                    [{allData.parties.filter((p) => p.partyType === 'TruckOwner').length}]
+                  </span>
+                  {' | '}Drivers{' '}
+                  <span className="font-mono-num text-emerald-900">
+                    [{allData.drivers.length}]
+                  </span>
+                </span>
               </div>
-              <button
-                type="button"
-                disabled={cleaningParties}
-                onClick={handleSeparateBrokersFromCustomers}
-                className="inline-flex items-center gap-1.5 px-3.5 py-1.5 rounded-lg bg-indigo-700 hover:bg-indigo-800 text-white text-xs font-extrabold cursor-pointer whitespace-nowrap disabled:opacity-60"
-              >
-                <Sparkles className="w-3.5 h-3.5" />
-                {cleaningParties
-                  ? 'Separating...'
-                  : 'Clean / Separate Brokers from Billing Parties'}
-              </button>
+              <div className="flex flex-wrap items-center gap-2">
+                <button
+                  type="button"
+                  disabled={cleaningParties}
+                  onClick={() => void handleRestoreHeadParties()}
+                  className="inline-flex items-center gap-1.5 px-3 py-1.5 rounded-lg bg-emerald-700 hover:bg-emerald-800 text-white text-xs font-extrabold cursor-pointer whitespace-nowrap disabled:opacity-60"
+                >
+                  <Users className="w-3.5 h-3.5" />
+                  {cleaningParties
+                    ? 'Working...'
+                    : '👥 Restore All HEAD Parties to Billing Customers'}
+                </button>
+                <button
+                  type="button"
+                  disabled={cleaningParties}
+                  onClick={handleSeparateBrokersFromCustomers}
+                  className="inline-flex items-center gap-1.5 px-3 py-1.5 rounded-lg bg-indigo-700 hover:bg-indigo-800 text-white text-xs font-bold cursor-pointer whitespace-nowrap disabled:opacity-60"
+                >
+                  <Sparkles className="w-3.5 h-3.5" />
+                  Sync Broker / Owner Tags
+                </button>
+              </div>
             </div>
 
             {autoCollectResult && (
@@ -1641,17 +2072,24 @@ const BackupSettingsModuleInner: React.FC<BackupSettingsModuleProps> = ({
                   )}
                 </div>
 
-                <div className="grid grid-cols-2 sm:grid-cols-4 lg:grid-cols-9 gap-2">
+                <div className="grid grid-cols-2 sm:grid-cols-5 lg:grid-cols-10 gap-2">
                   {[
-                    { label: 'Parties (HEAD)', val: autoCollectResult.parties.length },
+                    {
+                      label: 'Billing Parties',
+                      val: autoCollectResult.parties.filter((p) => p.partyType === 'Customer').length,
+                    },
                     { label: 'Brokers', val: autoCollectResult.brokersAddedCount },
+                    {
+                      label: 'Lorry Owners',
+                      val: autoCollectResult.parties.filter((p) => p.partyType === 'TruckOwner').length,
+                    },
                     { label: 'Destinations', val: autoCollectResult.destinations.length },
                     { label: 'Vehicles', val: autoCollectResult.vehicles.length },
                     { label: 'Drivers', val: autoCollectResult.drivers.length },
                     { label: 'CN / Bilty', val: autoCollectResult.consignments.length },
-                    { label: 'Tax Invoices', val: autoCollectResult.invoices.length },
-                    { label: 'Challans', val: autoCollectResult.lorryHires.length },
-                    { label: 'PNB Receipts+TDS', val: autoCollectResult.bankReceipts.length },
+                    { label: 'Bills (BILMAST/INV)', val: autoCollectResult.invoices.length },
+                    { label: 'Ledger (TRN/VOUCH)', val: autoCollectResult.transactions.length },
+                    { label: 'PNB Receipts', val: autoCollectResult.bankReceipts.length },
                   ].map((box) => (
                     <div
                       key={box.label}
@@ -1757,7 +2195,32 @@ const BackupSettingsModuleInner: React.FC<BackupSettingsModuleProps> = ({
                 </div>
               </div>
 
+              {connectedEmail && !isDriveEmailAuthorized && (
+                <div className="p-2.5 rounded-lg bg-red-50 border border-red-300 text-red-800 font-bold flex flex-wrap items-center justify-between gap-2">
+                  <span>
+                    Security Lock Alert: Connected Gmail "{connectedEmail}" is NOT authorized. Sync &amp; Restore are locked strictly to {MASTER_ADMIN_EMAIL}.
+                  </span>
+                  <button
+                    type="button"
+                    onClick={() => void onSwitchGmail()}
+                    className="px-3 py-1 rounded bg-red-700 text-white font-extrabold cursor-pointer"
+                  >
+                    Switch to {MASTER_ADMIN_EMAIL}
+                  </button>
+                </div>
+              )}
+
               <div className="flex flex-wrap gap-2.5 pt-2 border-t border-slate-200">
+                <input
+                  ref={localJsonInputRef}
+                  type="file"
+                  accept=".json,.gz,application/json,application/gzip"
+                  className="hidden"
+                  onChange={(e) => {
+                    void handleImportLocalJsonFile(e.target.files?.[0]);
+                    e.target.value = '';
+                  }}
+                />
                 <button
                   type="button"
                   disabled={busyDrive}
@@ -1765,7 +2228,7 @@ const BackupSettingsModuleInner: React.FC<BackupSettingsModuleProps> = ({
                   className="inline-flex items-center gap-1.5 px-4 py-2 rounded-lg bg-blue-700 hover:bg-blue-800 text-white font-bold cursor-pointer disabled:opacity-60"
                 >
                   <CloudUpload className="w-4 h-4" />
-                  Backup Compact Master_Backup_DRC.json.gz to Drive
+                  Union Backup + SHA-256 to Drive
                 </button>
                 <button
                   type="button"
@@ -1779,11 +2242,29 @@ const BackupSettingsModuleInner: React.FC<BackupSettingsModuleProps> = ({
                 <button
                   type="button"
                   disabled={busyDrive}
+                  onClick={() => void handleUploadDailySnapshot()}
+                  className="inline-flex items-center gap-1.5 px-4 py-2 rounded-lg bg-indigo-700 hover:bg-indigo-800 text-white font-bold cursor-pointer disabled:opacity-60"
+                >
+                  <ShieldCheck className="w-4 h-4" />
+                  Save {dailySnapshotName}
+                </button>
+                <button
+                  type="button"
+                  disabled={busyDrive}
+                  onClick={handleRestoreDailySnapshot}
+                  className="inline-flex items-center gap-1.5 px-4 py-2 rounded-lg bg-teal-700 hover:bg-teal-800 text-white font-bold cursor-pointer disabled:opacity-60"
+                >
+                  <RotateCcw className="w-4 h-4" />
+                  Restore Daily Snapshot
+                </button>
+                <button
+                  type="button"
+                  disabled={busyDrive}
                   onClick={handleRunDailyDriveCleanup}
                   className="inline-flex items-center gap-1.5 px-4 py-2 rounded-lg bg-amber-600 hover:bg-amber-700 text-white font-bold cursor-pointer disabled:opacity-60"
                 >
                   <Sparkles className="w-4 h-4" />
-                  Run Daily 8-File Drive Cleanup
+                  Run Daily Drive Cleanup
                 </button>
                 <button
                   type="button"
@@ -1796,10 +2277,20 @@ const BackupSettingsModuleInner: React.FC<BackupSettingsModuleProps> = ({
                 </button>
                 <button
                   type="button"
-                  onClick={handleDownloadLocalJson}
+                  onClick={() => void handleDownloadLocalJson()}
                   className="inline-flex items-center gap-1.5 px-4 py-2 rounded-lg border border-slate-300 bg-white hover:bg-slate-100 text-slate-800 font-semibold cursor-pointer"
                 >
-                  Export Local JSON
+                  <Download className="w-4 h-4" />
+                  Export Sealed Local JSON
+                </button>
+                <button
+                  type="button"
+                  disabled={busyDrive}
+                  onClick={() => localJsonInputRef.current?.click()}
+                  className="inline-flex items-center gap-1.5 px-4 py-2 rounded-lg border border-blue-300 bg-blue-50 hover:bg-blue-100 text-blue-900 font-bold cursor-pointer disabled:opacity-60"
+                >
+                  <Upload className="w-4 h-4" />
+                  Import Local JSON (.json/.gz)
                 </button>
               </div>
 
@@ -2178,12 +2669,14 @@ const BackupSettingsModuleInner: React.FC<BackupSettingsModuleProps> = ({
                   onClick={() => {
                     setDrivePinError(null);
                     setDrivePinInput('');
+                    setDriveOtpInput('');
+                    setDriveOtpChallenge(issueTwoFactorOtpChallenge('Switch Authorized Drive Gmail ID'));
                     setDrivePinModalOpen(true);
                   }}
                   className="inline-flex items-center gap-1.5 px-4 py-2 rounded-lg bg-[#0D47A1] hover:bg-blue-900 text-white font-extrabold cursor-pointer whitespace-nowrap"
                 >
                   <RefreshCw className="w-3.5 h-3.5" />
-                  Change Backup Email &amp; Google Drive
+                  Verify 2FA &amp; Link {MASTER_ADMIN_EMAIL}
                 </button>
               </div>
             </div>
@@ -2193,27 +2686,41 @@ const BackupSettingsModuleInner: React.FC<BackupSettingsModuleProps> = ({
                 onSubmit={(e) => void handleVerifyDrivePinAndSwitch(e)}
                 className="mx-4 mb-4 p-3.5 rounded-lg bg-amber-50 border border-amber-300 flex flex-wrap items-end justify-between gap-3 text-xs"
               >
-                <div className="space-y-1 flex-1 min-w-[210px]">
+                <div className="space-y-1 flex-1 min-w-[230px]">
                   <div className="font-extrabold text-amber-950 flex items-center gap-1.5">
                     <Lock className="w-3.5 h-3.5 text-amber-800" />
-                    <span>Enter Admin Security PIN to Switch Google Drive Email</span>
+                    <span>Enter Master Admin PIN + 2FA OTP ({MASTER_ADMIN_EMAIL} Lock)</span>
                   </div>
                   <p className="text-[11px] text-amber-900">
-                    Default Admin PIN is <strong className="font-mono-num">1234</strong> (unless customized above).
+                    Active 2FA OTP:{' '}
+                    <strong className="font-mono-num px-1.5 py-0.5 rounded bg-amber-900 text-amber-100 tracking-widest">
+                      {driveOtpChallenge?.code || '------'}
+                    </strong>{' '}
+                    · Default Admin PIN: <strong className="font-mono-num">1234</strong>
                   </p>
                   {drivePinError && (
                     <p className="text-[11px] font-bold text-red-700">{drivePinError}</p>
                   )}
                 </div>
-                <div className="flex items-center gap-2">
+                <div className="flex flex-wrap items-center gap-2">
                   <input
                     type="password"
                     autoFocus
                     required
                     value={drivePinInput}
                     onChange={(e) => setDrivePinInput(e.target.value)}
-                    placeholder="Enter Admin PIN"
-                    className="w-36 px-2.5 py-1.5 rounded border border-amber-400 bg-white font-mono-num"
+                    placeholder="Admin PIN"
+                    className="w-28 px-2.5 py-1.5 rounded border border-amber-400 bg-white font-mono-num"
+                  />
+                  <input
+                    type="text"
+                    inputMode="numeric"
+                    maxLength={6}
+                    required
+                    value={driveOtpInput}
+                    onChange={(e) => setDriveOtpInput(e.target.value.replace(/\D/g, ''))}
+                    placeholder="6-digit OTP"
+                    className="w-28 px-2.5 py-1.5 rounded border border-amber-400 bg-white font-mono-num tracking-widest"
                   />
                   <button
                     type="submit"

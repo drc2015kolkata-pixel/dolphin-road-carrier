@@ -51,8 +51,12 @@ export interface FoxproStatementSpec {
   totalsLine1?: string[];
   totalsLine2?: string[];
   totalAmountForWords?: number;
+  legalNotice?: string;
   orientation?: PdfOrientation;
 }
+
+const LEGAL_SHIELD_NOTICE =
+  "Consignor/Party must arrange valid Transit/Material Insurance before dispatch. Goods carried strictly at Owner's Risk under Carriage by Road Act 2007 Sec 10 & 17; Force Majeure; MSMED Act 2006 max 45-day payment; Kolkata Jurisdiction.";
 
 export type PdfTaskPayload =
   | {
@@ -649,11 +653,15 @@ function buildInvoiceDoc(
     // TOP-LEFT Blue-White Circular Road D.R.C Logo inside 8mm outer border
     drawInvoiceCircularRoadLogo(doc, M + 2.5, M + 2.5, 21, 21);
 
-    // TOP-RIGHT Copy Label Badge inside outer border
+    // TOP-RIGHT HEADER VERIFY QR (Strictly in top-right header corner, never side-by-side with UPI QR)
+    const verifyPayload = `DRC|INV|${invoice.invoiceNo || ''}|${invoice.invoiceDate || ''}|${Number(invoice.grandTotal || 0).toFixed(2)}|${invoice.partyGstin || invoice.partyPan || 'NA'}|${company.gstin || ''}`;
+    drawVectorVerificationQr(doc, verifyPayload, M + cw - 17, M + 2.8, 14.2, 'VERIFY QR');
+
+    // Copy Label Badge placed cleanly left of Header Verify QR
     doc.setFont('helvetica', 'bold');
-    doc.setFontSize(7.1);
-    const badgeW = 48;
-    const badgeX = M + cw - badgeW - 2.5;
+    doc.setFontSize(7.0);
+    const badgeW = 44;
+    const badgeX = M + cw - badgeW - 21;
     const badgeY = M + 2.5;
     doc.setFillColor(241, 245, 249);
     doc.setDrawColor(30, 64, 175);
@@ -662,17 +670,19 @@ function buildInvoiceDoc(
     doc.setTextColor(13, 71, 161);
     doc.text(copyLabel, badgeX + badgeW / 2, badgeY + 3.9, { align: 'center' });
 
+    const headerTextMaxW = cw - 26 - 68;
     doc.setTextColor(15, 76, 129);
     doc.setFont('helvetica', 'bold');
-    doc.setFontSize(13.5);
+    doc.setFontSize(13.2);
     doc.text(String(company.companyName || 'DOLPHIN ROAD CARRIER'), M + 26, M + 7);
 
     doc.setTextColor(30, 41, 59);
     doc.setFont('helvetica', 'normal');
-    doc.setFontSize(7.2);
-    doc.text(String(company.address || ''), M + 26, M + 11.2);
+    doc.setFontSize(7.0);
+    const addrWrapHdr = doc.splitTextToSize(String(company.address || ''), headerTextMaxW);
+    doc.text(addrWrapHdr.slice(0, 1), M + 26, M + 11.2);
     doc.text(`PAN: ${company.pan}   |   GSTIN: ${company.gstin}`, M + 26, M + 15.2);
-    doc.text(`PH: ${company.phones}   |   MSME: ${company.msme}   |   SAC/HSN: ${invoice.sac || company.hsn}`, M + 26, M + 19.2);
+    doc.text(`PH: ${company.phones}   |   MSME: ${company.msme}   |   SAC: ${invoice.sac || company.hsn}`, M + 26, M + 19.2);
 
     const docKindLabel = (invoice.docKind || 'Tax Invoice').toUpperCase();
     const spacedHeading =
@@ -830,7 +840,7 @@ function buildInvoiceDoc(
     });
 
     // Final Totals + Tax + Bank + Bottom-Right Stamp (NEVER split summary box across pages)
-    const SUMMARY_BLOCK_HEIGHT = 118;
+    const SUMMARY_BLOCK_HEIGHT = 122;
     if (curY + SUMMARY_BLOCK_HEIGHT > ph - M - 4) {
       doc.setFont('helvetica', 'italic');
       doc.setFontSize(7.2);
@@ -994,34 +1004,32 @@ function buildInvoiceDoc(
       doc.text(`UPI ID : ${String(selectedBank.upiId).slice(0, 44)}`, M + 2, bankBoxY + 24.2);
     }
 
-    // Scannable DRC Document Verification QR
-    const verifyPayload = `DRC|INV|${invoice.invoiceNo || ''}|${invoice.invoiceDate || ''}|${Number(invoice.grandTotal || 0).toFixed(2)}|${invoice.partyGstin || invoice.partyPan || 'NA'}|${company.gstin || ''}`;
-    drawVectorVerificationQr(doc, verifyPayload, M + cw - 92, bankBoxY + 2.4, 16.5, 'VERIFY QR');
-
-    // Scannable Vector UPI BANK QR right beside Bank Details
-    const qrBoxX = M + cw - 68;
+    // Scannable Vector UPI BANK QR exclusively beside Bank Details & Grand Total (Verify QR is strictly in top-right header)
+    const qrBoxX = M + cw - 58;
     drawVectorUpiQr(doc, upiUri, qrBoxX, bankBoxY + 2.2, 18);
 
     // BOTTOM-RIGHT Company Stamp & Signature on FINAL PAGE of each copy
     drawBottomRightStampAndSign(doc, assets, M + cw, bankBoxY + 5, 29, 16.5);
 
     const remBoxY = bankBoxY + 27;
-    doc.rect(M, remBoxY, cw, 15.5);
+    doc.rect(M, remBoxY, cw, 18.5);
     doc.setFont('helvetica', 'bold');
-    doc.setFontSize(7.2);
-    doc.text('REMARKS & TERMS :', M + 2, remBoxY + 4.5);
+    doc.setFontSize(7.1);
+    doc.text('REMARKS, PAYMENT TERMS & STATUTORY LEGAL SHIELD :', M + 2, remBoxY + 4.3);
     doc.setFont('helvetica', 'normal');
+    doc.setFontSize(6.6);
     const combinedRem = [
       invoice.narrationText || '',
-      invoice.remarks || '-',
+      invoice.remarks || '',
       invoice.additionalNotes || '',
       invoice.billFootnote ||
         'Payment Terms: 100% within credit period (18% p.a. thereafter). Pay via A/C Payee NEFT/RTGS.',
+      `Notice: ${LEGAL_SHIELD_NOTICE}`,
     ]
       .filter(Boolean)
       .join(' | ');
     const remLines = doc.splitTextToSize(combinedRem, cw - 4);
-    doc.text(remLines.slice(0, 2), M + 2, remBoxY + 9);
+    doc.text(remLines.slice(0, 3), M + 2, remBoxY + 8.5);
 
     // ANNEXURE inside same single combined PDF
     const annexRows =
@@ -1384,50 +1392,49 @@ function buildLR3CopyDoc(
     const lrRemLines = doc.splitTextToSize(largeRemarksText || '-', cw - 6);
     doc.text(lrRemLines.slice(0, orientation === 'l' ? 4 : 6), x0 + 2.5, remY + 10);
 
-    // Copy Footer + Checkboxes + BOTTOM-RIGHT Stamp
-    const footY = remY + remH + 2.5;
-    doc.setFont('helvetica', 'normal');
-    doc.setFontSize(6.6);
-    doc.text(
-      'Conditions: Sender declares packages contain declared lawful goods only. Subject to Kolkata Jurisdiction. Transporter not liable for leakage/breakage.',
-      x0 + 2.5,
-      footY + 2
-    );
+    // Copy Footer + Legal Notice + Checkboxes + BOTTOM-RIGHT Stamp
+    const footY = remY + remH + 2;
+    doc.setFont('helvetica', 'bold');
+    doc.setFontSize(5.9);
+    doc.setTextColor(15, 23, 42);
+    const legalWrap = doc.splitTextToSize(`Notice: ${LEGAL_SHIELD_NOTICE}`, cw - 64);
+    doc.text(legalWrap.slice(0, 2), x0 + 2.5, footY + 1.8);
 
+    const cbY = footY + 7.8;
     if (orientation === 'l') {
       let cx = x0 + 2.5;
-      const cbSpacing = 54;
+      const cbSpacing = 52;
       copies.forEach((lbl) => {
         const checked = lbl === copyLabel;
         doc.setDrawColor(15, 23, 42);
-        doc.rect(cx, footY + 6.5, 3.4, 3.4);
+        doc.rect(cx, cbY, 3.4, 3.4);
         if (checked) {
           doc.setFont('helvetica', 'bold');
           doc.setFontSize(7.2);
-          doc.text('X', cx + 0.7, footY + 9.4);
+          doc.text('X', cx + 0.7, cbY + 2.8);
         }
         doc.setFont('helvetica', checked ? 'bold' : 'normal');
-        doc.setFontSize(6.8);
-        doc.text(lbl, cx + 4.5, footY + 9.4);
+        doc.setFontSize(6.6);
+        doc.text(lbl, cx + 4.5, cbY + 2.8);
         cx += cbSpacing;
       });
     } else {
       copies.forEach((lbl, cIdx) => {
         const col = cIdx % 2;
         const row = Math.floor(cIdx / 2);
-        const cx = x0 + 2.5 + col * 60;
-        const cy = footY + 6 + row * 5.2;
+        const cx = x0 + 2.5 + col * 58;
+        const cy = cbY + row * 4.8;
         const checked = lbl === copyLabel;
         doc.setDrawColor(15, 23, 42);
         doc.rect(cx, cy, 3.2, 3.2);
         if (checked) {
           doc.setFont('helvetica', 'bold');
           doc.setFontSize(7);
-          doc.text('X', cx + 0.6, cy + 2.7);
+          doc.text('X', cx + 0.6, cy + 2.6);
         }
         doc.setFont('helvetica', checked ? 'bold' : 'normal');
-        doc.setFontSize(6.5);
-        doc.text(lbl, cx + 4.2, cy + 2.7);
+        doc.setFontSize(6.3);
+        doc.text(lbl, cx + 4.2, cy + 2.6);
       });
     }
 
@@ -1719,19 +1726,151 @@ function buildQuotationDoc(
     align: 'center',
   });
 
-  const ny = accY + accH + 4.5;
+  const ny = accY + accH + 4;
   doc.setFont('helvetica', 'bold');
-  doc.setFontSize(7.3);
+  doc.setFontSize(6.9);
   doc.setTextColor(15, 23, 42);
+  const legalLines = doc.splitTextToSize(`Notice: ${LEGAL_SHIELD_NOTICE}`, cw);
   const notices = [
-    'Notice: (Leakage, Damage, Breakage & Shortage Not Transporter Risk) Lorry Owner Risk.',
-    'Vehicle Border Pass & Detention beyond free time (Rs.1000/day) borne separately.',
-    'Payment Terms: Balance within 7 days of lorry unloading (No Discount / No Adjustment).',
+    ...legalLines,
+    'Detention beyond free time (Rs.1000/day) & Border Pass borne separately. Balance within agreed credit period (max 45d MSMED).',
   ];
   notices.forEach((line, idx) => {
-    if (ny + idx * 4.5 < ph - 9) {
-      doc.text(line, SAFE_MARGIN, ny + idx * 4.5);
+    if (ny + idx * 4 < ph - 8) {
+      doc.text(line, SAFE_MARGIN, ny + idx * 4);
     }
+  });
+
+  // PAGE 2: IRREVOCABLE PAYMENT GUARANTEE & LEGAL UNDERTAKING BOND (with dual Stamp & Signature boxes)
+  doc.addPage();
+  drawCenteredWatermark(doc, assets, 'LEGAL UNDERTAKING BOND');
+  doc.setDrawColor(15, 23, 42);
+  doc.setLineWidth(0.55);
+  doc.rect(SAFE_MARGIN, SAFE_MARGIN, cw, ph - SAFE_MARGIN * 2);
+
+  drawTopLeftLogo(doc, assets, SAFE_MARGIN + 3, SAFE_MARGIN + 3, 20, 20);
+
+  doc.setFillColor(13, 71, 161);
+  doc.rect(SAFE_MARGIN + 26, SAFE_MARGIN + 3.5, cw - 29, 10, 'F');
+  doc.setFont('helvetica', 'bold');
+  doc.setFontSize(11.5);
+  doc.setTextColor(255, 255, 255);
+  doc.text('IRREVOCABLE PAYMENT GUARANTEE & LEGAL UNDERTAKING BOND', SAFE_MARGIN + 26 + (cw - 29) / 2, SAFE_MARGIN + 10, {
+    align: 'center',
+  });
+
+  doc.setTextColor(15, 23, 42);
+  doc.setFont('helvetica', 'normal');
+  doc.setFontSize(8);
+  doc.text(
+    `Ref Quotation No: ${quote.quotationNo || '-'}   |   Date: ${formatDateDDMMYYYY(quote.quotationDate)}   |   Carrier GSTIN: ${company.gstin}`,
+    SAFE_MARGIN + 26,
+    SAFE_MARGIN + 18.5
+  );
+  doc.text(
+    `Carrier: ${company.companyName || 'DOLPHIN ROAD CARRIER'}   |   Official Email: ${company.email || 'drc.kolkata1@gmail.com'}`,
+    SAFE_MARGIN + 26,
+    SAFE_MARGIN + 23
+  );
+  doc.line(SAFE_MARGIN, SAFE_MARGIN + 26.5, pw - SAFE_MARGIN, SAFE_MARGIN + 26.5);
+
+  let by = SAFE_MARGIN + 33;
+  doc.setFont('helvetica', 'bold');
+  doc.setFontSize(8.8);
+  doc.text(`EXECUTED BY CONSIGNOR / BILLING PARTY / PAYMENT GUARANTOR:`, SAFE_MARGIN + 4, by);
+  by += 5.5;
+  doc.setFont('helvetica', 'normal');
+  doc.setFontSize(8.2);
+  doc.text(`M/S: ${quote.partyName || 'PARTY'}   |   GSTIN: ${quote.partyGstin || '-'}`, SAFE_MARGIN + 4, by);
+  by += 5;
+  doc.text(`Address: ${quote.partyAddress || '-'}`, SAFE_MARGIN + 4, by);
+  by += 5;
+  doc.text(
+    `Authorised Payment Guarantor: ${quote.guarantorName || 'Authorised Signatory'}${quote.guarantorPhone ? ` (Mob: ${quote.guarantorPhone})` : ''}   |   Route: ${quote.destination || '-'}   |   Agreed Freight: Rs. ${formatINR(quote.freight || 0)}`,
+    SAFE_MARGIN + 4,
+    by
+  );
+
+  by += 8;
+  const bondClauses: Array<[string, string]> = [
+    [
+      '1. IRREVOCABLE & UNCONDITIONAL PAYMENT GUARANTEE:',
+      'The Undersigned Party and Payment Guarantor jointly and severally undertake an irrevocable, unconditional obligation to pay 100% of freight, loading/unloading, detention, green tax/toll, and GST invoices strictly without deduction, set-off, counterclaim, or withholding.',
+    ],
+    [
+      '2. MSMED ACT 2006 & MAX 45-DAY STATUTORY CREDIT LIMIT:',
+      'Payment must be cleared within the agreed credit period and strictly not exceeding 45 days as mandated under the MSMED Act 2006 (Sec 15 & 16). Delayed payments attract compound interest at 18% p.a. (or 3x RBI Bank Rate) without further demand.',
+    ],
+    [
+      '3. OWNER RISK & MANDATORY TRANSIT INSURANCE (CARRIAGE BY ROAD ACT 2007 SEC 10 & 17):',
+      "Consignor/Party must arrange valid Transit/Material Insurance before dispatch. Goods are carried strictly at Owner's Risk under the Carriage by Road Act 2007 Sec 10 & Sec 17. Carrier is not liable for leakage, breakage, wet damage, pilferage, accident, or inherent vice.",
+    ],
+    [
+      '4. FORCE MAJEURE & OFFICIAL EMAIL ACCEPTANCE LOCK:',
+      `Carrier is exempt from Force Majeure delays (strikes, floods, riots, border/RTO blockades, highway closures). Any rate revision or acceptance is valid ONLY via official email (${company.email || 'drc.kolkata1@gmail.com'}).`,
+    ],
+    [
+      '5. KOLKATA EXCLUSIVE JURISDICTION:',
+      'All disputes, recovery proceedings, cheque dishonour (NI Act Sec 138), and arbitration arising out of this Undertaking Bond and connected Consignment Notes / Invoices are subject strictly to the exclusive jurisdiction of Courts at Kolkata, West Bengal.',
+    ],
+  ];
+
+  bondClauses.forEach(([heading, body]) => {
+    doc.setFont('helvetica', 'bold');
+    doc.setFontSize(8.2);
+    doc.setTextColor(13, 71, 161);
+    doc.text(heading, SAFE_MARGIN + 4, by);
+    by += 4.3;
+    doc.setFont('helvetica', 'normal');
+    doc.setFontSize(7.7);
+    doc.setTextColor(15, 23, 42);
+    const wrapped = doc.splitTextToSize(body, cw - 8);
+    doc.text(wrapped, SAFE_MARGIN + 4, by);
+    by += wrapped.length * 3.9 + 3.2;
+  });
+
+  // Dual Signature & Stamp Boxes at bottom of Page 2
+  const sigBoxY = Math.max(by + 4, ph - SAFE_MARGIN - 42);
+  const sigBoxH = 34;
+  const sigBoxW = (cw - 14) / 2;
+  const leftSigX = SAFE_MARGIN + 4;
+  const rightSigX = SAFE_MARGIN + cw - 4 - sigBoxW;
+
+  doc.setDrawColor(15, 23, 42);
+  doc.setLineWidth(0.4);
+  doc.rect(leftSigX, sigBoxY, sigBoxW, sigBoxH);
+  doc.setFillColor(248, 250, 252);
+  doc.rect(leftSigX, sigBoxY, sigBoxW, 6, 'FD');
+  doc.setFont('helvetica', 'bold');
+  doc.setFontSize(7.4);
+  doc.setTextColor(15, 23, 42);
+  doc.text('AUTHORIZED PARTY / GUARANTOR SIGN & STAMP', leftSigX + sigBoxW / 2, sigBoxY + 4.2, {
+    align: 'center',
+  });
+  doc.setFont('helvetica', 'normal');
+  doc.setFontSize(7);
+  doc.text(`M/S: ${String(quote.partyName || '').slice(0, 32)}`, leftSigX + 2.5, sigBoxY + 11);
+  doc.text(`Guarantor: ${String(quote.guarantorName || '____________________').slice(0, 26)}`, leftSigX + 2.5, sigBoxY + 16);
+  doc.text('Date & Place: _______________________', leftSigX + 2.5, sigBoxY + 28);
+  doc.setFont('helvetica', 'bold');
+  doc.text('Signatory Signature & Company Seal / Stamp', leftSigX + sigBoxW / 2, sigBoxY + 32.2, {
+    align: 'center',
+  });
+
+  doc.rect(rightSigX, sigBoxY, sigBoxW, sigBoxH);
+  doc.setFillColor(241, 245, 249);
+  doc.rect(rightSigX, sigBoxY, sigBoxW, 6, 'FD');
+  doc.setFont('helvetica', 'bold');
+  doc.setFontSize(7.4);
+  doc.setTextColor(13, 71, 161);
+  doc.text(`FOR ${(company.companyName || 'DOLPHIN ROAD CARRIER').slice(0, 28)}`, rightSigX + sigBoxW / 2, sigBoxY + 4.2, {
+    align: 'center',
+  });
+  drawBottomRightStampAndSign(doc, assets, rightSigX + sigBoxW - 3, sigBoxY + 8, 28, 16);
+  doc.setTextColor(15, 23, 42);
+  doc.setFontSize(7);
+  doc.text('Authorised Signatory & Carrier Stamp', rightSigX + sigBoxW / 2, sigBoxY + 32.2, {
+    align: 'center',
   });
 
   stampAllPageNumbers(doc);
@@ -2450,7 +2589,27 @@ function buildFoxproStatementDoc(
       doc.setFont('helvetica', 'bold');
       doc.setFontSize(7.3);
       doc.text(amountToIndianWords(spec.totalAmountForWords), M + 2, curY);
+      curY += 5;
     }
+  }
+
+  if (spec.legalNotice) {
+    const noticeW = cw - 36;
+    const noticeLines = doc.splitTextToSize(spec.legalNotice, noticeW - 4);
+    const noticeH = Math.max(10, noticeLines.length * 3.8 + 4.5);
+    if (curY + noticeH + 4 > ph - M) {
+      doc.addPage();
+      curY = drawHeader();
+    }
+    doc.setFillColor(254, 242, 242);
+    doc.setDrawColor(185, 28, 28);
+    doc.setLineWidth(0.35);
+    doc.rect(M + 2, curY, noticeW - 2, noticeH, 'FD');
+    doc.setFont('helvetica', 'bold');
+    doc.setFontSize(6.9);
+    doc.setTextColor(153, 27, 27);
+    doc.text(noticeLines, M + 4, curY + 4.5);
+    doc.setTextColor(15, 23, 42);
   }
 
   if (curY + 20 < ph - M) {
@@ -3095,7 +3254,7 @@ function buildAppFormatBlueprintDoc(
     '2. OFFICIAL COMMUNICATION EMAIL vs ISOLATED DRIVE BACKUP SANDBOX',
     [
       `• Official Party & Statutory Email: drc.kolkata1@gmail.com (printed on Tax Invoices, LRs, 194C Declarations & Quotation email-only acceptance clause).`,
-      `• Isolated Google Drive App Sandbox: Target backup account drc.kolkata2015@gmail.com uses strictly app-scoped OAuth permissions (drive.file + drive.appdata) — ZERO access to personal photos or unrelated files.`,
+      `• Isolated Google Drive App Sandbox: Target backup account drc.2015kolkata@gmail.com uses strictly app-scoped OAuth permissions (drive.file + drive.appdata) — ZERO access to personal photos or unrelated files.`,
       '• Visible Drive Root (DOLPHIN_ROAD_CARRIERS_MASTER): Stores 5 cleanly separated JSON files (DRC_FTL_BUSINESS_<FY>, DRC_LOGISTICS_BUSINESS_<FY>, DRC_PTL_BUSINESS_<FY>, DRC_COURIER_PARCEL_<FY>, DRC_MASTERS_AND_KYC_VAULT), DRC_APP_INSTALLER_VAULT, plus Compliance PDFs.',
       '• Hidden App Sandbox (appDataFolder): Mirrors DRC_APP_FORMAT_BLUEPRINT.pdf & recovery snapshots securely inside Google Drive hidden app space.',
     ],
@@ -3184,7 +3343,7 @@ function buildAppFormatBlueprintDoc(
     '9. STEP-BY-STEP DISASTER RECOVERY & FUTURE REBUILD PROTOCOL',
     [
       '• Step 1 (Device Reset / New PC or Android): Open https://dolphin-road-carrier.vercel.app in Chrome/Edge and tap Install App for instant PWA icon & offline database.',
-      '• Step 2 (Connect Backup Sandbox): Open C. Settings -> Backup / Restore -> Switch Gmail to drc.kolkata2015@gmail.com (protected by Master Admin PIN).',
+      '• Step 2 (Connect Backup Sandbox): Open C. Settings -> Backup / Restore -> Switch Gmail to drc.2015kolkata@gmail.com (locked by Master Admin PIN + 2FA OTP).',
       '• Step 3 (Restore All 4 Businesses): Click "Restore from Google Drive" (Master_Backup_DRC.json.gz) or restore each isolated division file individually (FTL, LOGISTICS, PTL, COURIER, MASTERS_AND_KYC_VAULT).',
       '• Step 4 (Verify Health & GST): Click Header "100% Health" badge -> Run Formula Guard scan; open Tax Invoice & GSTR-1/3B Hub to confirm FY closing balances match 100%.',
     ],

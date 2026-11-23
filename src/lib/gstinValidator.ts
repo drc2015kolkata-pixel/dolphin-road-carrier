@@ -196,6 +196,15 @@ const PROFILE_ALLOWED_EXTS: Record<SafeUploadProfile, string[]> = {
   json_backup: ['json', 'gz'],
 };
 
+export function isBlockedDangerousFileName(fileName: string): boolean {
+  const cleanName = String(fileName || '').trim().toLowerCase();
+  if (!cleanName) return true;
+  const parts = cleanName.split('.').filter(Boolean);
+  if (parts.length <= 1) return true;
+  // Block both trailing extension and embedded executable extensions (e.g. backup.json.exe)
+  return parts.slice(1).some((segment) => BLOCKED_DANGEROUS_EXTS.has(segment));
+}
+
 export function validateSafeUploadFile(
   file: File | null | undefined,
   profile: SafeUploadProfile,
@@ -207,10 +216,10 @@ export function validateSafeUploadFile(
   const cleanName = String(file.name || '').trim();
   const ext = cleanName.includes('.') ? cleanName.split('.').pop()?.toLowerCase() || '' : '';
 
-  if (!ext || BLOCKED_DANGEROUS_EXTS.has(ext)) {
+  if (!ext || isBlockedDangerousFileName(cleanName)) {
     return {
       valid: false,
-      reason: `Blocked unsafe file "${cleanName}". Executables and scripts are not permitted by DRC Security Policy.`,
+      reason: `Blocked unsafe file "${cleanName}". Executables and scripts (.exe, .bat, .vbs, .js, etc.) are strictly prohibited by DRC Security Policy.`,
     };
   }
 

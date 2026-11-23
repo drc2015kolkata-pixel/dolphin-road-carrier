@@ -308,3 +308,288 @@ export async function requestPhoneAlarmPermission(): Promise<PhoneAlarmPermissio
   }
   return result;
 }
+
+// ============================================================================
+// PART B: MASTER ADMIN PIN + 2FA OTP LOCK + NEW-DEVICE SECURITY ALERT SHIELD
+// ============================================================================
+
+const VAULT_UNLOCK_UNTIL_KEY = 'drc_backup_vault_unlock_until_v1';
+const TWO_FA_OTP_CHALLENGE_KEY = 'drc_2fa_otp_challenge_v1';
+const DEVICE_ID_STORAGE_KEY = 'drc_device_id_v1';
+const TRUSTED_DEVICES_STORAGE_KEY = 'drc_trusted_devices_v1';
+
+export interface TwoFactorOtpChallenge {
+  code: string;
+  purpose: string;
+  issuedAt: number;
+  expiresAt: number;
+}
+
+export function isBackupVaultUnlocked(): boolean {
+  try {
+    const raw = sessionStorage.getItem(VAULT_UNLOCK_UNTIL_KEY);
+    if (!raw) return false;
+    const until = Number(raw);
+    if (!Number.isFinite(until) || until <= Date.now()) {
+      sessionStorage.removeItem(VAULT_UNLOCK_UNTIL_KEY);
+      return false;
+    }
+    return true;
+  } catch {
+    return false;
+  }
+}
+
+export function lockBackupVault(): void {
+  try {
+    sessionStorage.removeItem(VAULT_UNLOCK_UNTIL_KEY);
+    sessionStorage.removeItem(TWO_FA_OTP_CHALLENGE_KEY);
+  } catch {
+    // Ignore storage unavailability
+  }
+}
+
+function generateSixDigitOtp(): string {
+  try {
+    if (typeof crypto !== 'undefined' && typeof crypto.getRandomValues === 'function') {
+      const arr = new Uint32Array(1);
+      crypto.getRandomValues(arr);
+      return String(arr[0] % 1000000).padStart(6, '0');
+    }
+  } catch {
+    // Fallback
+  }
+  return String(Math.floor(100000 + Math.random() * 900000));
+}
+
+export function issueTwoFactorOtpChallenge(
+  purpose = 'Backup Vault & Drive Security Unlock',
+  ttlMs = 5 * 60 * 1000
+): TwoFactorOtpChallenge {
+  const now = Date.now();
+  const challenge: TwoFactorOtpChallenge = {
+    code: generateSixDigitOtp(),
+    purpose,
+    issuedAt: now,
+    expiresAt: now + ttlMs,
+  };
+  try {
+    sessionStorage.setItem(TWO_FA_OTP_CHALLENGE_KEY, JSON.stringify(challenge));
+  } catch {
+    // Ignore sessionStorage unavailability
+  }
+  void dispatchBackgroundNotification({
+    title: 'DRC 2FA Security OTP Challenge',
+    body: `One-Time Security Code: ${challenge.code} (${purpose}) — Valid 5 mins.`,
+    tag: 'drc-2fa-otp',
+    requireInteraction: true,
+  });
+  return challenge;
+}
+
+export function getActiveTwoFactorOtpChallenge(): TwoFactorOtpChallenge | null {
+  try {
+    const raw = sessionStorage.getItem(TWO_FA_OTP_CHALLENGE_KEY);
+    if (!raw) return null;
+    const parsed = JSON.parse(raw) as TwoFactorOtpChallenge;
+    if (!parsed?.code || !parsed?.expiresAt || parsed.expiresAt <= Date.now()) {
+      sessionStorage.removeItem(TWO_FA_OTP_CHALLENGE_KEY);
+      return null;
+    }
+    return parsed;
+  } catch {
+    return null;
+  }
+}
+
+export function verifyTwoFactorOtp(inputOtp: string): boolean {
+  const clean = String(inputOtp || '').trim().replace(/\s+/g, '');
+  if (!/^\d{6}$/.test(clean)) return false;
+  const active = getActiveTwoFactorOtpChallenge();
+  if (!active) return false;
+  return active.code === clean;
+}
+
+export function unlockBackupVaultWithPinAndOtp(params: {
+  pin: string;
+  otp: string;
+  fallbackAdminPassword?: string;
+  durationMs?: number;
+}): { unlocked: boolean; error?: string } {
+  if (!verifyAdminPin(params.pin, params.fallbackAdminPassword)) {
+    return {
+      unlocked: false,
+      error: 'Invalid Master Admin PIN / Password.',
+    };
+  }
+  if (!verifyTwoFactorOtp(params.otp)) {
+    return {
+      unlocked: false,
+      error: 'Invalid or expired 6-digit 2FA OTP code. Check the active OTP badge or request a new code.',
+    };
+  }
+  const durationMs = params.durationMs ?? 15 * 60 * 1000;
+  try {
+    sessionStorage.setItem(VAULT_UNLOCK_UNTIL_KEY, String(Date.now() + durationMs));
+    sessionStorage.removeItem(TWO_FA_OTP_CHALLENGE_KEY);
+  } catch {
+    // Ignore
+  }
+  return { unlocked: true };
+}
+
+export interface TrustedDeviceRecord {
+  deviceId: string;
+  deviceLabel: string;
+  platform: string;
+  firstSeenAt: number;
+  lastSeenAt: number;
+  operatorLabel: string;
+  email?: string;
+  acknowledged: boolean;
+}
+
+export interface DeviceTrustCheckResult {
+  deviceId: string;
+  deviceLabel: string;
+  isNewDevice: boolean;
+  firstSeenAt: number;
+  knownDeviceCount: number;
+}
+
+function getBrowserDeviceLabel(): { label: string; platform: string } {
+  if (typeof navigator === 'undefined') {
+    return { label: 'DRC Workstation', platform: 'Unknown' };
+  }
+  const ua = navigator.userAgent || '';
+  const platform =
+    /Android/i.test(ua)
+      ? 'Android Device'
+      : /iPhone|iPad|iPod/i.test(ua)
+      ? 'iOS Device'
+      : /CrOS/i.test(ua)
+      ? 'Chromebook'
+      : /Windows/i.test(ua)
+      ? 'Windows PC'
+      : /Mac/i.test(ua)
+      ? 'macOS'
+      : 'Browser Client';
+  const browser =
+    /Edg\//i.test(ua)
+      ? 'Edge'
+      : /Chrome\//i.test(ua)
+      ? 'Chrome'
+      : /Firefox\//i.test(ua)
+      ? 'Firefox'
+      : /Safari\//i.test(ua)
+      ? 'Safari'
+      : 'WebView';
+  return { label: `${platform} (${browser})`, platform };
+}
+
+export function getOrCreateCurrentDeviceId(): string {
+  try {
+    const existing = localStorage.getItem(DEVICE_ID_STORAGE_KEY);
+    if (existing && existing.trim().length >= 8) return existing.trim();
+    const freshId =
+      typeof crypto !== 'undefined' && typeof crypto.randomUUID === 'function'
+        ? `DRC-${crypto.randomUUID().slice(0, 12).toUpperCase()}`
+        : `DRC-${Date.now().toString(36).toUpperCase()}-${Math.random().toString(36).slice(2, 8).toUpperCase()}`;
+    localStorage.setItem(DEVICE_ID_STORAGE_KEY, freshId);
+    return freshId;
+  } catch {
+    return 'DRC-EPHEMERAL-DEVICE';
+  }
+}
+
+export function getTrustedDevices(): TrustedDeviceRecord[] {
+  try {
+    const raw = localStorage.getItem(TRUSTED_DEVICES_STORAGE_KEY);
+    if (!raw) return [];
+    const parsed = JSON.parse(raw);
+    return Array.isArray(parsed) ? (parsed as TrustedDeviceRecord[]) : [];
+  } catch {
+    return [];
+  }
+}
+
+export function checkAndRegisterCurrentDevice(context: {
+  operatorLabel: string;
+  email?: string | null;
+}): DeviceTrustCheckResult {
+  const deviceId = getOrCreateCurrentDeviceId();
+  const { label, platform } = getBrowserDeviceLabel();
+  const now = Date.now();
+  const devices = getTrustedDevices();
+  const existingIdx = devices.findIndex((d) => d.deviceId === deviceId);
+
+  if (existingIdx >= 0) {
+    const existing = devices[existingIdx];
+    const updated: TrustedDeviceRecord = {
+      ...existing,
+      deviceLabel: label,
+      platform,
+      lastSeenAt: now,
+      operatorLabel: context.operatorLabel || existing.operatorLabel,
+      email: context.email || existing.email,
+    };
+    devices[existingIdx] = updated;
+    try {
+      localStorage.setItem(TRUSTED_DEVICES_STORAGE_KEY, JSON.stringify(devices.slice(-20)));
+    } catch {
+      // Ignore
+    }
+    return {
+      deviceId,
+      deviceLabel: label,
+      isNewDevice: !existing.acknowledged,
+      firstSeenAt: existing.firstSeenAt,
+      knownDeviceCount: devices.length,
+    };
+  }
+
+  const freshRecord: TrustedDeviceRecord = {
+    deviceId,
+    deviceLabel: label,
+    platform,
+    firstSeenAt: now,
+    lastSeenAt: now,
+    operatorLabel: context.operatorLabel || 'Operator',
+    email: context.email || undefined,
+    acknowledged: false,
+  };
+  const nextList = [...devices, freshRecord].slice(-20);
+  try {
+    localStorage.setItem(TRUSTED_DEVICES_STORAGE_KEY, JSON.stringify(nextList));
+  } catch {
+    // Ignore
+  }
+
+  void dispatchBackgroundNotification({
+    title: 'New-Device Security Alert — Dolphin Road Carriers',
+    body: `Unrecognized device ${label} [${deviceId}] signed in (${context.operatorLabel}). Verify Admin PIN & 2FA OTP if unauthorized.`,
+    tag: 'drc-new-device-alert',
+    requireInteraction: true,
+  });
+
+  return {
+    deviceId,
+    deviceLabel: label,
+    isNewDevice: true,
+    firstSeenAt: now,
+    knownDeviceCount: nextList.length,
+  };
+}
+
+export function acknowledgeNewDeviceAlert(deviceId?: string): void {
+  const targetId = deviceId || getOrCreateCurrentDeviceId();
+  const devices = getTrustedDevices().map((d) =>
+    d.deviceId === targetId ? { ...d, acknowledged: true, lastSeenAt: Date.now() } : d
+  );
+  try {
+    localStorage.setItem(TRUSTED_DEVICES_STORAGE_KEY, JSON.stringify(devices));
+  } catch {
+    // Ignore
+  }
+}
+

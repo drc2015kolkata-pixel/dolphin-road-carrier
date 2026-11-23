@@ -95,9 +95,13 @@ export function matchesSelectedFinancialYear(
 }
 
 export function daysUntilDate(dateStr?: string): number | null {
-  if (!dateStr) return null;
-  const target = new Date(dateStr);
+  if (!dateStr || !String(dateStr).trim()) return null;
+  const clean = String(dateStr).trim();
+  if (/^(0000|1899|1900)[-\/]/.test(clean) || /^[-–/]+$/.test(clean)) return null;
+  const target = new Date(clean);
   if (Number.isNaN(target.getTime())) return null;
+  const yr = target.getFullYear();
+  if (yr < 1990 || yr > 2100) return null;
   const now = new Date();
   now.setHours(0, 0, 0, 0);
   target.setHours(0, 0, 0, 0);

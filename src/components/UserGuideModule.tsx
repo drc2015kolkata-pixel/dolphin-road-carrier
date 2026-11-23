@@ -196,8 +196,8 @@ const OPERATING_BOOK_PARTS: OperatingBookPart[] = [
         bn: 'লাইভ ডেটা কখনো অটো-ডিলিট হয় না: স্থায়ী No-Auto-Delete শিল্ড সব বিল, বিল্টি ও লেজার রক্ষা করে এবং ২-ওয়ে টাইমস্ট্যাম্প সিঙ্ক Windows ও Android-এর নতুন এন্ট্রি নির্ভুলভাবে একসঙ্গে জুড়ে দেয়।',
       },
       {
-        en: 'Dedicated Isolated App Backup Drive (drc.kolkata2015@gmail.com) uses strict app-only permissions (drive.file + hidden appDataFolder) separately from official party email (drc.kolkata1@gmail.com), and supports 1-click FoxPro .DBF migration.',
-        bn: 'ব্যাকআপের জন্য আলাদা ইমেইল (drc.kolkata2015@gmail.com) শুধু অ্যাপের ফোল্ডারেই কাজ করে (পার্টি ইমেইল drc.kolkata1@gmail.com থেকে সম্পূর্ণ আলাদা) এবং এক ক্লিকে FoxPro .DBF ডেটা ইমপোর্ট করা যায়।',
+        en: 'Dedicated Isolated App Backup Drive (drc.2015kolkata@gmail.com) uses strict app-only permissions (drive.file + hidden appDataFolder) separately from official party email (drc.kolkata1@gmail.com), enforces SHA-256 tamper seal + Append-Only Union Merge + 3-sec Auto-Backup, and supports 1-click FoxPro .DBF migration.',
+        bn: 'ব্যাকআপের জন্য আলাদা ইমেইল (drc.2015kolkata@gmail.com) শুধু অ্যাপের ফোল্ডারেই কাজ করে (পার্টি ইমেইল drc.kolkata1@gmail.com থেকে সম্পূর্ণ আলাদা), SHA-256 সিল ও ৩-সেকেন্ড অটো-ব্যাকআপ চালায় এবং এক ক্লিকে FoxPro .DBF ডেটা ইমপোর্ট করা যায়।',
       },
       {
         en: 'Click "3-Page App Blueprint PDF" above to preview, print, or upload compact DRC_APP_FORMAT_BLUEPRINT.pdf (complete workflow diagram, GST rules & disaster recovery handbook), and click red "Switch Off / Exit App" before closing.',

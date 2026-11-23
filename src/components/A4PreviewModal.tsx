@@ -12,12 +12,7 @@ import {
 } from 'lucide-react';
 import { GeneratedPdfResult } from '../lib/pdfEngine';
 import { PdfOrientation } from '../lib/pdfBuilders';
-import {
-  buildEmailShareHref,
-  buildWhatsAppShareHref,
-  sendViaWhatsAppCloudApi,
-  triggerExternalShareLink,
-} from '../lib/shareUtils';
+import { sharePdfDirect } from '../lib/shareUtils';
 import { isLogisticsDriveFolder } from '../lib/driveBackup';
 import { OFFICIAL_PARTY_EMAIL } from '../lib/firebase';
 import { AnyDriveFolderName, BillCopyCount, CompanySettings, Party } from '../types/erp';
@@ -121,38 +116,37 @@ export const A4PreviewModal: React.FC<A4PreviewModalProps> = ({
     }
   };
 
-  const companyReplyEmail = company?.email || OFFICIAL_PARTY_EMAIL;
-  const shareText = [
-    pdf.shareMeta?.summaryText || pdf.title,
-    `Document File: ${pdf.fileName}`,
-    company?.companyName ? `Sent by: ${company.companyName} (${company.phones}) | Email: ${companyReplyEmail}` : '',
-  ]
-    .filter(Boolean)
-    .join('\n');
+  const docNoForShare =
+    pdf.shareMeta?.docNo || pdf.fileName.replace(/\.pdf$/i, '').replace(/_/g, '/');
+  const docLabelForShare =
+    pdf.title.split(/[—-]/)[0]?.trim() || 'Document';
 
   const handleShareWhatsApp = async () => {
-    if (company?.whatsappCloud?.enabled && sharePhone) {
-      const apiRes = await sendViaWhatsAppCloudApi({
-        company,
-        toPhone: sharePhone,
-        message: shareText,
-      });
-      if (apiRes.ok) {
-        setUploadMsg(`Sent directly via WhatsApp Cloud API to ${sharePhone}.`);
-        return;
-      }
-    }
-    triggerExternalShareLink(buildWhatsAppShareHref({ phone: sharePhone, message: shareText }));
+    const res = await sharePdfDirect({
+      pdf,
+      channel: 'whatsapp',
+      phone: sharePhone,
+      email: shareEmail,
+      partyName: pdf.shareMeta?.partyName,
+      docNo: docNoForShare,
+      docLabel: docLabelForShare,
+      company,
+    });
+    if (!res.cancelled) setUploadMsg(res.message);
   };
 
-  const handleShareEmail = () => {
-    triggerExternalShareLink(
-      buildEmailShareHref({
-        email: shareEmail || companyReplyEmail,
-        subject: `${pdf.title} — ${company?.companyName || 'Dolphin Road Carriers'}`,
-        body: `${shareText}\n\nNote: Please find the attached PDF (${pdf.fileName}) downloaded from Dolphin Road Carriers ERP.\nReply To: ${companyReplyEmail}`,
-      })
-    );
+  const handleShareEmail = async () => {
+    const res = await sharePdfDirect({
+      pdf,
+      channel: 'email',
+      phone: sharePhone,
+      email: shareEmail || company?.email || OFFICIAL_PARTY_EMAIL,
+      partyName: pdf.shareMeta?.partyName,
+      docNo: docNoForShare,
+      docLabel: docLabelForShare,
+      company,
+    });
+    if (!res.cancelled) setUploadMsg(res.message);
   };
 
   return (
@@ -233,19 +227,19 @@ export const A4PreviewModal: React.FC<A4PreviewModalProps> = ({
               type="button"
               onClick={() => void handleShareWhatsApp()}
               className="inline-flex items-center gap-1.5 px-3 py-1.5 rounded-lg bg-green-600 hover:bg-green-700 text-white text-xs font-semibold transition-colors whitespace-nowrap cursor-pointer"
-              title="Share on WhatsApp (wa.me or Cloud API)"
+              title="Share PDF directly on WhatsApp"
             >
               <MessageCircle className="w-3.5 h-3.5" />
-              Share on WhatsApp
+              WhatsApp PDF
             </button>
             <button
               type="button"
-              onClick={handleShareEmail}
+              onClick={() => void handleShareEmail()}
               className="inline-flex items-center gap-1.5 px-3 py-1.5 rounded-lg bg-sky-600 hover:bg-sky-700 text-white text-xs font-semibold transition-colors whitespace-nowrap cursor-pointer"
-              title="Send via Email"
+              title="Share PDF via Email"
             >
               <Mail className="w-3.5 h-3.5" />
-              Send via Email
+              Email PDF
             </button>
             {hasDriveToken ? (
               <button

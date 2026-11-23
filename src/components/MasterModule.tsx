@@ -66,6 +66,8 @@ import {
   VEHICLE_COLOR_OPTIONS,
   VEHICLE_MAKE_OPTIONS,
 } from '../lib/dropdownMasterStore';
+import { SupportedCountry } from '../lib/postalPinLookup';
+import { PinCountryInputs, useAutoPinLookup } from './CityPinCountryAutoFill';
 
 export type MasterTabId = 'parties' | 'owners' | 'brokers' | 'vehicles' | 'drivers';
 
@@ -179,6 +181,8 @@ const MasterModuleInner: React.FC<MasterModuleProps> = ({
   const [pName, setPName] = useState('');
   const [pType, setPType] = useState<Party['partyType']>('Customer');
   const [pAddr, setPAddr] = useState('');
+  const [pPinCode, setPPinCode] = useState('');
+  const [pCountry, setPCountry] = useState<SupportedCountry>('India');
   const [pGstin, setPGstin] = useState('');
   const [pPan, setPPan] = useState('');
   const [pPhone, setPPhone] = useState('');
@@ -195,6 +199,8 @@ const MasterModuleInner: React.FC<MasterModuleProps> = ({
   const [oName, setOName] = useState('');
   const [oPhone, setOPhone] = useState('');
   const [oAddr, setOAddr] = useState('');
+  const [oPinCode, setOPinCode] = useState('');
+  const [oCountry, setOCountry] = useState<SupportedCountry>('India');
   const [oAadhaar, setOAadhaar] = useState('');
   const [oPan, setOPan] = useState('');
   const [oGstin, setOGstin] = useState('');
@@ -208,6 +214,8 @@ const MasterModuleInner: React.FC<MasterModuleProps> = ({
   const [bName, setBName] = useState('');
   const [bPhone, setBPhone] = useState('');
   const [bAddr, setBAddr] = useState('');
+  const [bPinCode, setBPinCode] = useState('');
+  const [bCountry, setBCountry] = useState<SupportedCountry>('India');
   const [bGstin, setBGstin] = useState('');
   const [bTradeLicense, setBTradeLicense] = useState('');
   const [bAadhaar, setBAadhaar] = useState('');
@@ -241,11 +249,30 @@ const MasterModuleInner: React.FC<MasterModuleProps> = ({
   const [dExp, setDExp] = useState('');
   const [dPhone, setDPhone] = useState('');
   const [dAddr, setDAddr] = useState('');
+  const [dPinCode, setDPinCode] = useState('');
+  const [dCountry, setDCountry] = useState<SupportedCountry>('India');
   const [dAadhaar, setDAadhaar] = useState('');
   const [dPan, setDPan] = useState('');
   const [dBankName, setDBankName] = useState('');
   const [dBankAcc, setDBankAcc] = useState('');
   const [dBankIfsc, setDBankIfsc] = useState('');
+
+  useAutoPinLookup(pAddr, pPinCode, pCountry, (pin, country) => {
+    setPPinCode(pin);
+    setPCountry(country);
+  });
+  useAutoPinLookup(oAddr, oPinCode, oCountry, (pin, country) => {
+    setOPinCode(pin);
+    setOCountry(country);
+  });
+  useAutoPinLookup(bAddr, bPinCode, bCountry, (pin, country) => {
+    setBPinCode(pin);
+    setBCountry(country);
+  });
+  useAutoPinLookup(dAddr, dPinCode, dCountry, (pin, country) => {
+    setDPinCode(pin);
+    setDCountry(country);
+  });
 
   const ownersList = useMemo(
     () => parties.filter((p) => p.partyType === 'TruckOwner'),
@@ -341,6 +368,8 @@ const MasterModuleInner: React.FC<MasterModuleProps> = ({
     setPName('');
     setPType('Customer');
     setPAddr('');
+    setPPinCode('');
+    setPCountry('India');
     setPGstin('');
     setPPan('');
     setPPhone('');
@@ -358,6 +387,8 @@ const MasterModuleInner: React.FC<MasterModuleProps> = ({
     setPName(p.name || '');
     setPType(p.partyType || 'Customer');
     setPAddr(p.address || '');
+    setPPinCode(p.pinCode || '');
+    setPCountry((p.country as SupportedCountry) || 'India');
     setPGstin(p.gstin || '');
     setPPan(p.pan || '');
     setPPhone(p.phone || '');
@@ -377,6 +408,8 @@ const MasterModuleInner: React.FC<MasterModuleProps> = ({
     setOName('');
     setOPhone('');
     setOAddr('');
+    setOPinCode('');
+    setOCountry('India');
     setOAadhaar('');
     setOPan('');
     setOGstin('');
@@ -393,6 +426,8 @@ const MasterModuleInner: React.FC<MasterModuleProps> = ({
     setOName(o.name || '');
     setOPhone(o.phone || '');
     setOAddr(o.address || '');
+    setOPinCode(o.pinCode || '');
+    setOCountry((o.country as SupportedCountry) || 'India');
     setOAadhaar(o.aadhaarNo || '');
     setOPan(o.pan || '');
     setOGstin(o.gstin || '');
@@ -409,6 +444,8 @@ const MasterModuleInner: React.FC<MasterModuleProps> = ({
     setBName('');
     setBPhone('');
     setBAddr('');
+    setBPinCode('');
+    setBCountry('India');
     setBGstin('');
     setBTradeLicense('');
     setBAadhaar('');
@@ -426,6 +463,8 @@ const MasterModuleInner: React.FC<MasterModuleProps> = ({
     setBName(b.name || '');
     setBPhone(b.phone || '');
     setBAddr(b.address || '');
+    setBPinCode(b.pinCode || '');
+    setBCountry((b.country as SupportedCountry) || 'India');
     setBGstin(b.gstin || '');
     setBTradeLicense(b.tradeLicenseNo || '');
     setBAadhaar(b.aadhaarNo || '');
@@ -485,6 +524,8 @@ const MasterModuleInner: React.FC<MasterModuleProps> = ({
     setDExp('');
     setDPhone('');
     setDAddr('');
+    setDPinCode('');
+    setDCountry('India');
     setDAadhaar('');
     setDPan('');
     setDBankName('');
@@ -501,6 +542,8 @@ const MasterModuleInner: React.FC<MasterModuleProps> = ({
     setDExp(d.dlExpiry || '');
     setDPhone(d.phone || '');
     setDAddr(d.address || '');
+    setDPinCode(d.pinCode || '');
+    setDCountry((d.country as SupportedCountry) || 'India');
     setDAadhaar(d.aadhaarNo || '');
     setDPan(d.panNo || '');
     setDBankName(d.bankName || '');
@@ -560,6 +603,8 @@ const MasterModuleInner: React.FC<MasterModuleProps> = ({
         name: pName.trim(),
         partyType: pType,
         address: pAddr.trim(),
+        pinCode: pPinCode.trim(),
+        country: pCountry,
         gstin: guard.normalizedGstin,
         pan: guard.normalizedPan,
         phone: guard.normalizedPhone,
@@ -599,6 +644,8 @@ const MasterModuleInner: React.FC<MasterModuleProps> = ({
         partyType: 'TruckOwner',
         phone: oPhone.trim(),
         address: oAddr.trim(),
+        pinCode: oPinCode.trim(),
+        country: oCountry,
         aadhaarNo: oAadhaar.trim(),
         pan: oPan.trim().toUpperCase(),
         gstin: oGstin.trim().toUpperCase(),
@@ -640,6 +687,8 @@ const MasterModuleInner: React.FC<MasterModuleProps> = ({
         partyType: 'Broker',
         phone: bPhone.trim(),
         address: bAddr.trim(),
+        pinCode: bPinCode.trim(),
+        country: bCountry,
         gstin: bGstin.trim().toUpperCase(),
         tradeLicenseNo: bTradeLicense.trim().toUpperCase(),
         aadhaarNo: bAadhaar.trim(),
@@ -706,6 +755,8 @@ const MasterModuleInner: React.FC<MasterModuleProps> = ({
         dlExpiry: dExp,
         phone: dPhone.trim(),
         address: dAddr.trim(),
+        pinCode: dPinCode.trim(),
+        country: dCountry,
         aadhaarNo: dAadhaar.trim(),
         panNo: dPan.trim().toUpperCase(),
         bankName: dBankName.trim(),
@@ -949,6 +1000,29 @@ const MasterModuleInner: React.FC<MasterModuleProps> = ({
     );
   };
 
+  const handleQuickSwitchPartyRole = async (
+    party: Party,
+    targetType: 'Customer' | 'Broker' | 'TruckOwner'
+  ) => {
+    if (readOnly || party.partyType === targetType) return;
+    await upsertDocument(
+      'parties',
+      party.id,
+      {
+        partyType: targetType,
+        balanceType: targetType === 'Customer' ? 'Dr' : 'Cr',
+      },
+      false
+    );
+    const label =
+      targetType === 'Customer'
+        ? 'Billing Customer'
+        : targetType === 'Broker'
+          ? 'Broker'
+          : 'Lorry Owner';
+    setStatusMsg(`Moved "${party.name}" to ${label}.`);
+  };
+
   const selectedPartyObj = useMemo(
     () => parties.find((p) => p.id === pickerPartyId) || null,
     [parties, pickerPartyId]
@@ -1013,7 +1087,12 @@ const MasterModuleInner: React.FC<MasterModuleProps> = ({
         rows.push({
           date: tx.txDate || '',
           voucherNo: tx.txCode || '-',
-          type: tx.txType,
+          type:
+            tx.ledgerAccount === 'Party Ledger Receivable (Dr)'
+              ? 'Debit (TRN)'
+              : tx.ledgerAccount === 'Party Ledger Receipt (Cr)'
+                ? 'Credit (TRN)'
+                : tx.txType,
           narration: tx.narration || tx.ledgerAccount || tx.txType,
           debit: tx.txType === 'Expense' ? Number(tx.amount || 0) : 0,
           credit: tx.txType === 'Income' ? Number(tx.amount || 0) : 0,
@@ -1050,6 +1129,8 @@ const MasterModuleInner: React.FC<MasterModuleProps> = ({
       };
     });
     return {
+      openingAmt: Math.round(obAmt * 100) / 100,
+      openingSide: obType,
       rows: enriched,
       totalDr: Math.round(runDr * 100) / 100,
       totalCr: Math.round(runCr * 100) / 100,
@@ -1171,14 +1252,55 @@ const MasterModuleInner: React.FC<MasterModuleProps> = ({
       },
       {
         key: 'action',
-        header: 'Action',
+        header: 'Action & Role Switch',
         align: 'right',
         cellClassName: 'whitespace-nowrap space-x-1',
         render: (p) =>
           readOnly ? (
             <span className="text-[10px] font-bold text-slate-400">View</span>
           ) : (
-            <>
+            <div className="inline-flex flex-wrap items-center justify-end gap-1">
+              <span className="inline-flex items-center rounded border border-slate-200 bg-slate-50 p-0.5 text-[10px] font-bold">
+                <button
+                  type="button"
+                  onClick={() => void handleQuickSwitchPartyRole(p, 'Customer')}
+                  disabled={p.partyType === 'Customer'}
+                  title="Switch to Customer / Billing Party"
+                  className={`px-1.5 py-0.5 rounded cursor-pointer ${
+                    p.partyType === 'Customer'
+                      ? 'bg-emerald-600 text-white'
+                      : 'text-slate-700 hover:bg-emerald-100'
+                  }`}
+                >
+                  ⇄ Customer
+                </button>
+                <button
+                  type="button"
+                  onClick={() => void handleQuickSwitchPartyRole(p, 'Broker')}
+                  disabled={p.partyType === 'Broker'}
+                  title="Switch to Broker"
+                  className={`px-1.5 py-0.5 rounded cursor-pointer ${
+                    p.partyType === 'Broker'
+                      ? 'bg-indigo-600 text-white'
+                      : 'text-slate-700 hover:bg-indigo-100'
+                  }`}
+                >
+                  Broker
+                </button>
+                <button
+                  type="button"
+                  onClick={() => void handleQuickSwitchPartyRole(p, 'TruckOwner')}
+                  disabled={p.partyType === 'TruckOwner'}
+                  title="Switch to Lorry Owner"
+                  className={`px-1.5 py-0.5 rounded cursor-pointer ${
+                    p.partyType === 'TruckOwner'
+                      ? 'bg-amber-600 text-white'
+                      : 'text-slate-700 hover:bg-amber-100'
+                  }`}
+                >
+                  Owner
+                </button>
+              </span>
               <button
                 type="button"
                 onClick={() => loadPartyForEdit(p)}
@@ -1202,10 +1324,11 @@ const MasterModuleInner: React.FC<MasterModuleProps> = ({
               >
                 <Trash2 className="w-3.5 h-3.5" />
               </button>
-            </>
+            </div>
           ),
       },
     ],
+    // eslint-disable-next-line react-hooks/exhaustive-deps
     [onShowConfirm, readOnly]
   );
 
@@ -1239,11 +1362,30 @@ const MasterModuleInner: React.FC<MasterModuleProps> = ({
       },
       {
         key: 'action',
-        header: 'Profile & Actions',
+        header: 'Profile & Role Switch',
         align: 'right',
         cellClassName: 'whitespace-nowrap space-x-1',
         render: (o) => (
-          <>
+          <div className="inline-flex flex-wrap items-center justify-end gap-1">
+            {!readOnly && (
+              <span className="inline-flex items-center rounded border border-slate-200 bg-slate-50 p-0.5 text-[10px] font-bold">
+                <button
+                  type="button"
+                  onClick={() => void handleQuickSwitchPartyRole(o, 'Customer')}
+                  className="px-1.5 py-0.5 rounded text-slate-700 hover:bg-emerald-100 cursor-pointer"
+                >
+                  ⇄ Customer
+                </button>
+                <button
+                  type="button"
+                  onClick={() => void handleQuickSwitchPartyRole(o, 'Broker')}
+                  className="px-1.5 py-0.5 rounded text-slate-700 hover:bg-indigo-100 cursor-pointer"
+                >
+                  Broker
+                </button>
+                <span className="px-1.5 py-0.5 rounded bg-amber-600 text-white">Owner</span>
+              </span>
+            )}
             {!readOnly && (
               <button
                 type="button"
@@ -1278,7 +1420,7 @@ const MasterModuleInner: React.FC<MasterModuleProps> = ({
                 <Trash2 className="w-3.5 h-3.5" />
               </button>
             )}
-          </>
+          </div>
         ),
       },
     ],
@@ -1327,11 +1469,30 @@ const MasterModuleInner: React.FC<MasterModuleProps> = ({
       },
       {
         key: 'action',
-        header: 'Profile & Actions',
+        header: 'Profile & Role Switch',
         align: 'right',
         cellClassName: 'whitespace-nowrap space-x-1',
         render: (b) => (
-          <>
+          <div className="inline-flex flex-wrap items-center justify-end gap-1">
+            {!readOnly && (
+              <span className="inline-flex items-center rounded border border-slate-200 bg-slate-50 p-0.5 text-[10px] font-bold">
+                <button
+                  type="button"
+                  onClick={() => void handleQuickSwitchPartyRole(b, 'Customer')}
+                  className="px-1.5 py-0.5 rounded text-slate-700 hover:bg-emerald-100 cursor-pointer"
+                >
+                  ⇄ Customer
+                </button>
+                <span className="px-1.5 py-0.5 rounded bg-indigo-600 text-white">Broker</span>
+                <button
+                  type="button"
+                  onClick={() => void handleQuickSwitchPartyRole(b, 'TruckOwner')}
+                  className="px-1.5 py-0.5 rounded text-slate-700 hover:bg-amber-100 cursor-pointer"
+                >
+                  Owner
+                </button>
+              </span>
+            )}
             {!readOnly && (
               <button
                 type="button"
@@ -1366,7 +1527,7 @@ const MasterModuleInner: React.FC<MasterModuleProps> = ({
                 <Trash2 className="w-3.5 h-3.5" />
               </button>
             )}
-          </>
+          </div>
         ),
       },
     ],
@@ -1670,14 +1831,23 @@ const MasterModuleInner: React.FC<MasterModuleProps> = ({
                     {selectedPartyLedgerData && (
                       <div className="rounded-lg border border-slate-200 bg-slate-50 p-3 space-y-2 text-xs">
                         <div className="flex flex-wrap items-center justify-between gap-2">
-                          <div className="font-extrabold text-slate-900 flex items-center gap-1.5">
+                          <div className="font-extrabold text-slate-900 flex flex-wrap items-center gap-2">
                             <FileText className="w-4 h-4 text-blue-700" />
                             <span>
-                              Tally-Grade Party Ledger ({activeFy}):{' '}
-                              <span className="text-blue-800">{selectedPartyObj.name}</span> · Closing:{' '}
-                              <span className="font-mono-num text-emerald-800">
-                                ₹{formatINR(selectedPartyLedgerData.closing)} {selectedPartyLedgerData.side}
-                              </span>
+                              Party Ledger ({activeFy}):{' '}
+                              <span className="text-blue-800">{selectedPartyObj.name}</span>
+                            </span>
+                            <span className="px-2 py-0.5 rounded bg-slate-200 text-slate-800 font-mono-num text-[11px]">
+                              Opening: ₹{formatINR(selectedPartyLedgerData.openingAmt)} {selectedPartyLedgerData.openingSide}
+                            </span>
+                            <span className="px-2 py-0.5 rounded bg-blue-100 text-blue-900 font-mono-num text-[11px]">
+                              Dr: ₹{formatINR(selectedPartyLedgerData.totalDr)}
+                            </span>
+                            <span className="px-2 py-0.5 rounded bg-indigo-100 text-indigo-900 font-mono-num text-[11px]">
+                              Cr: ₹{formatINR(selectedPartyLedgerData.totalCr)}
+                            </span>
+                            <span className="px-2 py-0.5 rounded bg-emerald-100 text-emerald-900 font-mono-num text-[11px]">
+                              Closing: ₹{formatINR(selectedPartyLedgerData.closing)} {selectedPartyLedgerData.side}
                             </span>
                           </div>
                           <div className="flex flex-wrap gap-1.5">
@@ -1849,12 +2019,21 @@ const MasterModuleInner: React.FC<MasterModuleProps> = ({
                 />
               </div>
               <div className="md:col-span-2">
-                <label className="block font-semibold text-slate-700 mb-1">Address (Region / State / Export Country)</label>
+                <label className="block font-semibold text-slate-700 mb-1">Address / City (Auto-fills PIN &amp; Country)</label>
                 <input
                   type="text"
                   value={pAddr}
                   onChange={(e) => setPAddr(e.target.value)}
+                  placeholder="e.g. Baranagar, Kolkata / Petrapole / Dhaka / Birgunj / Thimphu"
                   className="w-full px-2.5 py-1.5 rounded border border-slate-300"
+                />
+                <PinCountryInputs
+                  labelPrefix="Party"
+                  pinCode={pPinCode}
+                  country={pCountry}
+                  onPinChange={setPPinCode}
+                  onCountryChange={setPCountry}
+                  compact
                 />
               </div>
               <div>
@@ -2013,12 +2192,21 @@ const MasterModuleInner: React.FC<MasterModuleProps> = ({
                 />
               </div>
               <div className="md:col-span-2">
-                <label className="block font-semibold text-slate-700 mb-1">Address</label>
+                <label className="block font-semibold text-slate-700 mb-1">Address / City (Auto-fills PIN &amp; Country)</label>
                 <input
                   type="text"
                   value={oAddr}
                   onChange={(e) => setOAddr(e.target.value)}
+                  placeholder="City / Address (4-country PIN auto-fill)"
                   className="w-full px-2.5 py-1.5 rounded border border-slate-300"
+                />
+                <PinCountryInputs
+                  labelPrefix="Owner"
+                  pinCode={oPinCode}
+                  country={oCountry}
+                  onPinChange={setOPinCode}
+                  onCountryChange={setOCountry}
+                  compact
                 />
               </div>
               <div>
@@ -2205,12 +2393,21 @@ const MasterModuleInner: React.FC<MasterModuleProps> = ({
                 />
               </div>
               <div className="md:col-span-2">
-                <label className="block font-semibold text-slate-700 mb-1">Address</label>
+                <label className="block font-semibold text-slate-700 mb-1">Address / City (Auto-fills PIN &amp; Country)</label>
                 <input
                   type="text"
                   value={bAddr}
                   onChange={(e) => setBAddr(e.target.value)}
+                  placeholder="City / Address (4-country PIN auto-fill)"
                   className="w-full px-2.5 py-1.5 rounded border border-slate-300"
+                />
+                <PinCountryInputs
+                  labelPrefix="Broker"
+                  pinCode={bPinCode}
+                  country={bCountry}
+                  onPinChange={setBPinCode}
+                  onCountryChange={setBCountry}
+                  compact
                 />
               </div>
               <div>
@@ -2652,12 +2849,21 @@ const MasterModuleInner: React.FC<MasterModuleProps> = ({
                 />
               </div>
               <div className="md:col-span-2">
-                <label className="block font-semibold text-slate-700 mb-1">Address</label>
+                <label className="block font-semibold text-slate-700 mb-1">Address / City (Auto-fills PIN &amp; Country)</label>
                 <input
                   type="text"
                   value={dAddr}
                   onChange={(e) => setDAddr(e.target.value)}
+                  placeholder="City / Address (4-country PIN auto-fill)"
                   className="w-full px-2.5 py-1.5 rounded border border-slate-300"
+                />
+                <PinCountryInputs
+                  labelPrefix="Driver"
+                  pinCode={dPinCode}
+                  country={dCountry}
+                  onPinChange={setDPinCode}
+                  onCountryChange={setDCountry}
+                  compact
                 />
               </div>
               <div>
