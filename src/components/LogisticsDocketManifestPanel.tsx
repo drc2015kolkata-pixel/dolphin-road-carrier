@@ -1,16 +1,21 @@
-import React, { useMemo, useState } from 'react';
+import React, { useEffect, useMemo, useRef, useState } from 'react';
 import {
   Camera,
   CheckCircle2,
   ExternalLink,
   FileJson,
+  Mail,
+  MessageSquare,
   Package,
   Plus,
   Printer,
   QrCode,
   Search,
+  Sparkles,
   Trash2,
   Truck,
+  Upload,
+  Usb,
   Warehouse,
 } from 'lucide-react';
 import {
@@ -27,14 +32,16 @@ import {
   makeDivisionDocId,
 } from '../types/erp';
 import { removeDocument, upsertDocument } from '../lib/firestoreStore';
-import { formatDateDDMMYYYY, formatINR, normalizeFyLabel } from '../lib/formatters';
+import { formatDateDDMMYYYY, formatDateHyphenDDMMYYYY, formatINR, normalizeFyLabel } from '../lib/formatters';
 import { downloadNicPartBJson, getEwayBillExpiryState } from '../lib/ewayBillUtils';
 import {
   GeneratedPdfResult,
   generateFoxproStatementPDF,
   generateLogisticsDocketPDF,
   generateLogisticsManifestPDF,
+  generatePodScanPDF,
 } from '../lib/pdfEngine';
+import { sharePdfDirect } from '../lib/shareUtils';
 import { CameraPodQrScannerModal } from './CameraPodQrScannerModal';
 import {
   EntityQuickPreviewCard,
@@ -55,6 +62,15 @@ import { validateIndianGstin } from '../lib/gstinValidator';
 import { GstinInputField } from './GstinInputField';
 import { PinCountryInputs, useAutoPinLookup } from './CityPinCountryAutoFill';
 import { resolvePinSync, SupportedCountry } from '../lib/postalPinLookup';
+import { uploadPdfToDivisionVaultFolder } from '../lib/driveBackup';
+import {
+  applyScanner300DpiAutoCropAndFilter,
+  connectUsbScannerFolder,
+  isFileSystemDirectorySupported,
+  ScannerFilterMode,
+  startUsbScannerFolderWatcher,
+  UsbScannerWatcherHandle,
+} from '../lib/usbScannerWatch';
 
 interface LogisticsDocketManifestPanelProps {
   divisionMode?: LogisticsDivisionCode;
@@ -69,6 +85,7 @@ interface LogisticsDocketManifestPanelProps {
   vehicles: LogisticsVehicle[];
   drivers: LogisticsDriver[];
   company: CompanySettings;
+  driveAccessToken?: string | null;
   onPreviewPdf: (pdf: GeneratedPdfResult, folder: LogisticsDriveFolderName) => void;
   onShowConfirm: (opts: {
     title: string;
@@ -126,6 +143,7 @@ export const LogisticsDocketManifestPanel: React.FC<LogisticsDocketManifestPanel
   vehicles,
   drivers,
   company,
+  driveAccessToken = null,
   onPreviewPdf,
   onShowConfirm,
 }) => {
@@ -205,10 +223,142 @@ export const LogisticsDocketManifestPanel: React.FC<LogisticsDocketManifestPanel
   const [docketSaving, setDocketSaving] = useState(false);
   const [docketError, setDocketError] = useState<string | null>(null);
 
-  // Camera & QR Scanner modal
+  // Camera, USB Scanner Auto-Watch & QR Scanner modal
   const [scannerOpen, setScannerOpen] = useState(false);
   const [scannerMode, setScannerMode] = useState<'pod' | 'qr' | 'both'>('qr');
   const [scannerDocketTarget, setScannerDocketTarget] = useState<LogisticsDocket | null>(null);
+  const [podModalDocket, setPodModalDocket] = useState<LogisticsDocket | null>(null);
+  const [logiPodTruckNo, setLogiPodTruckNo] = useState('');
+  const [logiPodDate, setLogiPodDate] = useState(today);
+  const [logiPodImg, setLogiPodImg] = useState('');
+  const [logiPodStatus, setLogiPodStatus] = useState<string | null>(null);
+  const [logiPodSaving, setLogiPodSaving] = useState(false);
+  const [logiUsbFolder, setLogiUsbFolder] = useState('');
+  const [logiUsbWatching, setLogiUsbWatching] = useState(false);
+  const [logiUsbFilter, setLogiUsbFilter] = useState<ScannerFilterMode>('magic_color');
+  const [logiUsbAutoCrop, setLogiUsbAutoCrop] = useState(true);
+  const logiUsbWatcherRef = useRef<UsbScannerWatcherHandle | null>(null);
+  const logiPodFileInputRef = useRef<HTMLInputElement | null>(null);
+
+  useEffect(() => {
+    return () => {
+      logiUsbWatcherRef.current?.stop();
+      logiUsbWatcherRef.current = null;
+    };
+  }, []);
+
+  useEffect(() => {
+    if (!podModalDocket && logiUsbWatcherRef.current) {
+      logiUsbWatcherRef.current.stop();
+      logiUsbWatcherRef.current = null;
+      setLogiUsbWatching(false);
+      setLogiUsbFolder('');
+    }
+  }, [podModalDocket]);
+
+  const handleLogiPodFileCapture = async (file: File | undefined, brandHint?: string) => {
+    if (!file || !podModalDocket) return;
+    if (!file.type.startsWith('image/') && !/\.(jpe?g|png|webp|bmp)$/i.test(file.name)) {
+      playAlertBeep();
+      setLogiPodStatus('Please select a JPG/PNG image or set your USB scanner output to JPG/PNG.');
+      return;
+    }
+    setLogiPodStatus(
+      brandHint
+        ? `USB Auto-Captured (${brandHint}) · Applying ${logiUsbAutoCrop ? '300-DPI Auto-Crop + ' : ''}${logiUsbFilter === 'bw_sharp' ? 'B&W Sharp' : 'Magic Color'}...`
+        : 'Applying 300-DPI Auto-Crop & scanner enhancement...'
+    );
+    try {
+      const enhanced = logiUsbAutoCrop
+        ? await applyScanner300DpiAutoCropAndFilter(file, logiUsbFilter)
+        : await new Promise<{ dataUrl: string }>((resolve, reject) => {
+            const reader = new FileReader();
+            reader.onload = () => resolve({ dataUrl: String(reader.result || '') });
+            reader.onerror = reject;
+            reader.readAsDataURL(file);
+          });
+      setLogiPodImg(enhanced.dataUrl.slice(0, 440000));
+      playVerifiedBeep();
+      setLogiPodStatus(
+        `Scan ready${brandHint ? ` (${brandHint})` : ''}. Confirm Truck No & POD Date, then click Save.`
+      );
+    } catch (err) {
+      playAlertBeep();
+      setLogiPodStatus(err instanceof Error ? err.message : 'Failed to process POD scan.');
+    }
+  };
+
+  const handleToggleLogiUsbWatch = async () => {
+    if (logiUsbWatcherRef.current) {
+      logiUsbWatcherRef.current.stop();
+      logiUsbWatcherRef.current = null;
+      setLogiUsbWatching(false);
+      setLogiUsbFolder('');
+      setLogiPodStatus('USB Scanner Folder Auto-Watch stopped.');
+      return;
+    }
+    try {
+      const dir = await connectUsbScannerFolder();
+      const handle = await startUsbScannerFolderWatcher(dir, async (evt) => {
+        await handleLogiPodFileCapture(evt.file, evt.scannerBrandHint);
+      });
+      logiUsbWatcherRef.current = handle;
+      setLogiUsbFolder(handle.folderName);
+      setLogiUsbWatching(true);
+      playVerifiedBeep();
+      setLogiPodStatus(`USB Auto-Watch ACTIVE on "${handle.folderName}" — Press SCAN on your HP / Canon / Epson / Brother scanner!`);
+    } catch (err) {
+      playAlertBeep();
+      setLogiPodStatus(err instanceof Error ? err.message : 'USB folder access unavailable.');
+    }
+  };
+
+  const handleSaveLogiPodModal = async () => {
+    if (!podModalDocket || !logiPodImg || !logiPodDate) return;
+    setLogiPodSaving(true);
+    try {
+      const finalTruck = (logiPodTruckNo.trim() || podModalDocket.manifestNo || podModalDocket.docketNo || 'TRUCK').toUpperCase();
+      await upsertDocument(
+        'logistics_dockets',
+        podModalDocket.id,
+        {
+          stockStage: 'Delivered',
+          podImageDataUrl: logiPodImg.slice(0, 440000),
+          podDate: logiPodDate,
+        },
+        false
+      );
+      const podPdf = await generatePodScanPDF({
+        imageDataUrl: logiPodImg,
+        truckNo: finalTruck,
+        cnNo: podModalDocket.docketNo,
+        podDate: logiPodDate,
+        partyName: podModalDocket.consigneeName || podModalDocket.billingPartyName,
+        division: divisionMode,
+        company,
+      });
+      if (driveAccessToken) {
+        await uploadPdfToDivisionVaultFolder({
+          accessToken: driveAccessToken,
+          division: divisionMode,
+          folderName: '5. POD_Scans_PDFs',
+          fileName: podPdf.fileName,
+          blob: podPdf.blob,
+        });
+      }
+      onPreviewPdf(podPdf, 'Godown_POD_Scans');
+      playVerifiedBeep();
+      logiUsbWatcherRef.current?.stop();
+      logiUsbWatcherRef.current = null;
+      setLogiUsbWatching(false);
+      setLogiUsbFolder('');
+      setPodModalDocket(null);
+      setLogiPodImg('');
+      setLogiPodStatus(null);
+    } finally {
+      setLogiPodSaving(false);
+    }
+  };
 
   // ---------------- MANIFEST STATE ----------------
   const [manifestNo, setManifestNo] = useState(() => buildNextManifestNo(manifests, activeFy));
@@ -1320,6 +1470,66 @@ export const LogisticsDocketManifestPanel: React.FC<LogisticsDocketManifestPanel
                             </button>
                             <button
                               type="button"
+                              onClick={async () => {
+                                const pdf = await generateLogisticsDocketPDF(d, company);
+                                const matched = parties.find(
+                                  (p) =>
+                                    p.name.trim().toLowerCase() ===
+                                      (d.consigneeName || '').trim().toLowerCase() ||
+                                    p.name.trim().toLowerCase() ===
+                                      (d.billingPartyName || '').trim().toLowerCase() ||
+                                    p.name.trim().toLowerCase() ===
+                                      (d.consignorName || '').trim().toLowerCase()
+                                );
+                                await sharePdfDirect({
+                                  pdf,
+                                  channel: 'whatsapp',
+                                  phone: matched?.phone,
+                                  email: matched?.email,
+                                  partyName: d.consigneeName || d.billingPartyName,
+                                  docNo: d.docketNo,
+                                  docLabel: 'Docket LR',
+                                  company,
+                                });
+                                URL.revokeObjectURL(pdf.blobUrl);
+                              }}
+                              className="p-1.5 rounded bg-emerald-50 hover:bg-emerald-100 text-emerald-700 cursor-pointer"
+                              title="Share Pure Binary LR PDF on WhatsApp"
+                            >
+                              <MessageSquare className="w-3.5 h-3.5" />
+                            </button>
+                            <button
+                              type="button"
+                              onClick={async () => {
+                                const pdf = await generateLogisticsDocketPDF(d, company);
+                                const matched = parties.find(
+                                  (p) =>
+                                    p.name.trim().toLowerCase() ===
+                                      (d.consigneeName || '').trim().toLowerCase() ||
+                                    p.name.trim().toLowerCase() ===
+                                      (d.billingPartyName || '').trim().toLowerCase() ||
+                                    p.name.trim().toLowerCase() ===
+                                      (d.consignorName || '').trim().toLowerCase()
+                                );
+                                await sharePdfDirect({
+                                  pdf,
+                                  channel: 'email',
+                                  phone: matched?.phone,
+                                  email: matched?.email,
+                                  partyName: d.consigneeName || d.billingPartyName,
+                                  docNo: d.docketNo,
+                                  docLabel: 'Docket LR',
+                                  company,
+                                });
+                                URL.revokeObjectURL(pdf.blobUrl);
+                              }}
+                              className="p-1.5 rounded bg-sky-50 hover:bg-sky-100 text-sky-700 cursor-pointer"
+                              title="Share Pure Binary LR PDF via Email"
+                            >
+                              <Mail className="w-3.5 h-3.5" />
+                            </button>
+                            <button
+                              type="button"
                               onClick={() =>
                                 onShowConfirm({
                                   title: `Delete Docket ${d.docketNo}?`,
@@ -1918,9 +2128,12 @@ export const LogisticsDocketManifestPanel: React.FC<LogisticsDocketManifestPanel
                           <button
                             type="button"
                             onClick={() => {
-                              setScannerDocketTarget(d);
-                              setScannerMode('pod');
-                              setScannerOpen(true);
+                              const linkedMnf = manifests.find((m) => m.manifestNo === d.manifestNo);
+                              setPodModalDocket(d);
+                              setLogiPodTruckNo((linkedMnf?.truckNo || d.manifestNo || d.docketNo || '').toUpperCase());
+                              setLogiPodDate(d.podDate || today);
+                              setLogiPodImg(d.podImageDataUrl || '');
+                              setLogiPodStatus(null);
                             }}
                             className="inline-flex items-center gap-1 px-2.5 py-1 rounded bg-emerald-600 hover:bg-emerald-700 text-white text-[11px] font-bold cursor-pointer"
                           >
@@ -1934,6 +2147,176 @@ export const LogisticsDocketManifestPanel: React.FC<LogisticsDocketManifestPanel
                 )}
               </tbody>
             </table>
+          </div>
+        </div>
+      )}
+
+      {/* Logistics / PTL / Courier USB Scanner + Camera POD Capture Modal */}
+      {podModalDocket && (
+        <div className="fixed inset-0 z-50 flex items-center justify-center bg-slate-900/55 p-4">
+          <div className="w-full max-w-xl max-h-[92vh] overflow-y-auto bg-white rounded-xl border border-slate-200 shadow-xl">
+            <div className="bg-[#0F766E] text-white px-5 py-3 flex items-center justify-between sticky top-0 z-10">
+              <h3 className="text-sm font-bold">
+                Deliver &amp; Scan POD — {podModalDocket.docketNo}
+              </h3>
+              <button
+                type="button"
+                onClick={() => setPodModalDocket(null)}
+                className="text-xs text-teal-100 hover:text-white cursor-pointer"
+              >
+                Close
+              </button>
+            </div>
+            <div className="p-5 space-y-3 text-xs">
+              <input
+                ref={logiPodFileInputRef}
+                type="file"
+                accept="image/*"
+                className="hidden"
+                onChange={(e) => handleLogiPodFileCapture(e.target.files?.[0])}
+              />
+              <div className="flex flex-wrap gap-2">
+                <button
+                  type="button"
+                  onClick={() => {
+                    setScannerDocketTarget(podModalDocket);
+                    setScannerMode('pod');
+                    setScannerOpen(true);
+                  }}
+                  className="inline-flex items-center gap-1.5 px-3 py-2 rounded-lg bg-emerald-600 hover:bg-emerald-700 text-white font-bold cursor-pointer"
+                >
+                  <Camera className="w-4 h-4" />
+                  Live Camera POD
+                </button>
+                <button
+                  type="button"
+                  onClick={() => logiPodFileInputRef.current?.click()}
+                  className="inline-flex items-center gap-1.5 px-3 py-2 rounded-lg bg-blue-700 hover:bg-blue-800 text-white font-bold cursor-pointer"
+                >
+                  <Upload className="w-4 h-4" />
+                  Upload POD Scan
+                </button>
+                <button
+                  type="button"
+                  onClick={handleToggleLogiUsbWatch}
+                  disabled={!isFileSystemDirectorySupported()}
+                  className={`inline-flex items-center gap-1.5 px-3 py-2 rounded-lg text-white font-bold cursor-pointer disabled:opacity-50 ${
+                    logiUsbWatching
+                      ? 'bg-amber-600 hover:bg-amber-700'
+                      : 'bg-indigo-700 hover:bg-indigo-800'
+                  }`}
+                >
+                  <Usb className="w-4 h-4" />
+                  {logiUsbWatching
+                    ? `Watching "${logiUsbFolder}" (Stop)`
+                    : '🔌 Connect Any USB Scanner Folder (Auto-Watch)'}
+                </button>
+              </div>
+
+              <div className="flex flex-wrap items-center justify-between gap-2 bg-indigo-50 border border-indigo-200 rounded-lg px-3 py-2">
+                <div className="flex items-center gap-2 text-indigo-950 font-bold">
+                  <Sparkles className="w-4 h-4 text-indigo-600 shrink-0" />
+                  <span>Filter:</span>
+                  <button
+                    type="button"
+                    onClick={() => setLogiUsbFilter('magic_color')}
+                    className={`px-2 py-0.5 rounded border text-[11px] font-bold cursor-pointer ${
+                      logiUsbFilter === 'magic_color'
+                        ? 'bg-indigo-700 text-white border-indigo-700'
+                        : 'bg-white text-slate-700 border-slate-300'
+                    }`}
+                  >
+                    Magic Color
+                  </button>
+                  <button
+                    type="button"
+                    onClick={() => setLogiUsbFilter('bw_sharp')}
+                    className={`px-2 py-0.5 rounded border text-[11px] font-bold cursor-pointer ${
+                      logiUsbFilter === 'bw_sharp'
+                        ? 'bg-slate-900 text-white border-slate-900'
+                        : 'bg-white text-slate-700 border-slate-300'
+                    }`}
+                  >
+                    B&amp;W Sharp
+                  </button>
+                </div>
+                <label className="inline-flex items-center gap-1.5 font-bold text-indigo-900 cursor-pointer">
+                  <input
+                    type="checkbox"
+                    checked={logiUsbAutoCrop}
+                    onChange={(e) => setLogiUsbAutoCrop(e.target.checked)}
+                    className="rounded border-indigo-400"
+                  />
+                  <span>300-DPI Auto-Crop</span>
+                </label>
+              </div>
+
+              {logiPodStatus && (
+                <p className="text-xs font-semibold p-2.5 rounded-lg border text-blue-800 bg-blue-50 border-blue-200">
+                  {logiPodStatus}
+                </p>
+              )}
+
+              {logiPodImg && (
+                <div className="border border-slate-200 rounded-lg p-2 bg-slate-50 space-y-1">
+                  <img
+                    src={logiPodImg}
+                    alt="POD Preview"
+                    referrerPolicy="no-referrer"
+                    className="max-h-44 mx-auto rounded object-contain"
+                  />
+                  <p className="text-[11px] font-mono-num text-center font-bold text-slate-700">
+                    Output PDF: POD_{(logiPodTruckNo.trim() || podModalDocket.manifestNo || podModalDocket.docketNo || 'TRUCK').toUpperCase().replace(/[^a-zA-Z0-9_-]/g, '_')}_{formatDateHyphenDDMMYYYY(logiPodDate || today)}.pdf
+                  </p>
+                </div>
+              )}
+
+              <div className="grid grid-cols-1 sm:grid-cols-2 gap-3 bg-amber-50 border border-amber-200 rounded-lg p-3">
+                <div>
+                  <label className="block font-bold text-amber-950 mb-1">
+                    Truck No (Editable for POD PDF) *
+                  </label>
+                  <input
+                    type="text"
+                    required
+                    value={logiPodTruckNo}
+                    onChange={(e) => setLogiPodTruckNo(e.target.value.toUpperCase())}
+                    placeholder="e.g. WB23D4589"
+                    className="w-full px-3 py-2 rounded border border-amber-300 bg-white font-mono-num font-bold uppercase"
+                  />
+                </div>
+                <div>
+                  <label className="block font-bold text-amber-950 mb-1">
+                    POD Submission Date *
+                  </label>
+                  <input
+                    type="date"
+                    required
+                    value={logiPodDate}
+                    onChange={(e) => setLogiPodDate(e.target.value)}
+                    className="w-full px-3 py-2 rounded border border-amber-300 bg-white font-mono-num font-bold"
+                  />
+                </div>
+              </div>
+
+              <div className="flex justify-end gap-2 pt-2 border-t border-slate-200">
+                <button
+                  type="button"
+                  onClick={() => setPodModalDocket(null)}
+                  className="px-4 py-2 rounded-lg border border-slate-300 text-slate-700 font-semibold cursor-pointer"
+                >
+                  Cancel
+                </button>
+                <button
+                  type="button"
+                  disabled={!logiPodImg || !logiPodDate || !logiPodTruckNo.trim() || logiPodSaving}
+                  onClick={handleSaveLogiPodModal}
+                  className="px-4 py-2 rounded-lg bg-emerald-600 hover:bg-emerald-700 disabled:opacity-50 text-white font-bold cursor-pointer"
+                >
+                  {logiPodSaving ? 'Saving POD PDF...' : 'Save POD & Mark Delivered'}
+                </button>
+              </div>
+            </div>
           </div>
         </div>
       )}
@@ -1957,17 +2340,34 @@ export const LogisticsDocketManifestPanel: React.FC<LogisticsDocketManifestPanel
           setScannerOpen(false);
         }}
         onCapturePodImage={async (dataUrl) => {
+          if (podModalDocket) {
+            setLogiPodImg(dataUrl);
+            setLogiPodStatus('Live camera POD captured. Confirm Truck No & POD Date, then click Save.');
+            setScannerOpen(false);
+            return;
+          }
           if (scannerDocketTarget) {
+            const podDateStr = new Date().toISOString().slice(0, 10);
             await upsertDocument(
               'logistics_dockets',
               scannerDocketTarget.id,
               {
                 stockStage: 'Delivered',
                 podImageDataUrl: dataUrl,
-                podDate: new Date().toISOString().slice(0, 10),
+                podDate: podDateStr,
               },
               false
             );
+            const podPdf = await generatePodScanPDF({
+              imageDataUrl: dataUrl,
+              truckNo: scannerDocketTarget.manifestNo || scannerDocketTarget.docketNo,
+              cnNo: scannerDocketTarget.docketNo,
+              podDate: podDateStr,
+              partyName: scannerDocketTarget.consigneeName || scannerDocketTarget.billingPartyName,
+              division: divisionMode,
+              company,
+            });
+            onPreviewPdf(podPdf, 'Godown_POD_Scans');
           }
         }}
       />

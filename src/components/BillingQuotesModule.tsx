@@ -27,6 +27,7 @@ import {
 } from 'lucide-react';
 import {
   BillCopyCount,
+  BusinessMode,
   CompanySettings,
   ConsignmentNote,
   Declaration194C,
@@ -101,6 +102,7 @@ import {
 import { PinCountryInputs, useAutoPinLookup } from './CityPinCountryAutoFill';
 import { resolvePinSync, SupportedCountry } from '../lib/postalPinLookup';
 import { VoiceDraftFields } from '../lib/voicePilot';
+import { deleteIdbObject, loadIdbObject, saveIdbObject } from '../lib/indexedDbStore';
 
 interface BillingQuotesModuleProps {
   ownerUid: string;
@@ -323,9 +325,12 @@ const BillingQuotesModuleInner: React.FC<BillingQuotesModuleProps> = ({
   const [editCnFreightMap, setEditCnFreightMap] = useState<Record<string, string>>({});
   const [divideFreightMap, setDivideFreightMap] = useState<Record<string, string>>({});
   const [busyCnActionId, setBusyCnActionId] = useState<string | null>(null);
+  const [manualTotalOverride, setManualTotalOverride] = useState<string | null>(null);
 
   const [invSearch, setInvSearch] = useState('');
   const debouncedInvSearch = useDebouncedValue(invSearch, 200);
+  const invDraftHydratedRef = useRef(false);
+  const INVOICE_DRAFT_KEY = 'drc_draft_invoice_v1';
 
   // Sync Due Date automatically from Invoice Date + Credit Days
   const updateDueDateFromCredit = (baseInvDate: string, days: number) => {
@@ -396,6 +401,78 @@ const BillingQuotesModuleInner: React.FC<BillingQuotesModuleProps> = ({
     window.addEventListener('drc:voice-draft-fill', onVoiceDraftFill);
     return () => window.removeEventListener('drc:voice-draft-fill', onVoiceDraftFill);
   }, [subTab]);
+
+  useEffect(() => {
+    let cancelled = false;
+    void loadIdbObject<Record<string, unknown>>(INVOICE_DRAFT_KEY).then((draft) => {
+      invDraftHydratedRef.current = true;
+      if (cancelled || !draft || editingInvoiceId || pendingCnForInvoice) return;
+      if (typeof draft.invoiceNo === 'string' && draft.invoiceNo.trim()) setInvoiceNo(draft.invoiceNo);
+      if (typeof draft.invoiceDate === 'string' && draft.invoiceDate) setInvoiceDate(draft.invoiceDate);
+      if (typeof draft.dueDate === 'string' && draft.dueDate) setDueDate(draft.dueDate);
+      if (typeof draft.partyName === 'string') setPartyName(draft.partyName);
+      if (typeof draft.partyAddress === 'string') setPartyAddress(draft.partyAddress);
+      if (typeof draft.partyGstin === 'string') setPartyGstin(draft.partyGstin);
+      if (typeof draft.partyPan === 'string') setPartyPan(draft.partyPan);
+      if (typeof draft.billedAtBranch === 'string' && draft.billedAtBranch) setBilledAtBranch(draft.billedAtBranch);
+      if (typeof draft.remarks === 'string') setRemarks(draft.remarks);
+      if (typeof draft.advanceReceived === 'string') setAdvanceReceived(draft.advanceReceived);
+      if (draft.manualTotalOverride === null || typeof draft.manualTotalOverride === 'string') {
+        setManualTotalOverride(draft.manualTotalOverride as string | null);
+      }
+      if (Array.isArray(draft.rows) && draft.rows.length > 0) {
+        setRows(draft.rows as InvoiceConsignmentRow[]);
+      }
+      if (draft.partyName || (Array.isArray(draft.rows) && draft.rows.some((r: Record<string, unknown>) => r.cnNo || Number(r.freight || 0) > 0))) {
+        setScanMsg('Restored unsaved Tax Invoice draft cleanly from offline vault.');
+      }
+    });
+    return () => {
+      cancelled = true;
+    };
+  }, []);
+
+  useEffect(() => {
+    if (!invDraftHydratedRef.current || editingInvoiceId) return;
+    const hasInput = Boolean(
+      partyName.trim() ||
+        rows.some((r) => r.cnNo || r.vehicle || Number(r.freight || 0) > 0) ||
+        manualTotalOverride !== null
+    );
+    if (!hasInput) return;
+    const timer = window.setTimeout(() => {
+      void saveIdbObject(INVOICE_DRAFT_KEY, {
+        invoiceNo,
+        invoiceDate,
+        dueDate,
+        partyName,
+        partyAddress,
+        partyGstin,
+        partyPan,
+        billedAtBranch,
+        remarks,
+        advanceReceived,
+        manualTotalOverride,
+        rows,
+        savedAt: Date.now(),
+      });
+    }, 350);
+    return () => window.clearTimeout(timer);
+  }, [
+    editingInvoiceId,
+    invoiceNo,
+    invoiceDate,
+    dueDate,
+    partyName,
+    partyAddress,
+    partyGstin,
+    partyPan,
+    billedAtBranch,
+    remarks,
+    advanceReceived,
+    manualTotalOverride,
+    rows,
+  ]);
 
   useAutoPinLookup(partyAddress, partyPinCode, billingCountry, (pin, country) => {
     setPartyPinCode(pin);
@@ -583,7 +660,11 @@ const BillingQuotesModuleInner: React.FC<BillingQuotesModuleProps> = ({
   const roundOffAmt = autoRoundOff
     ? Number((Math.round(rawGrossBillAmount) - rawGrossBillAmount).toFixed(2))
     : 0;
-  const grossBillAmount = Number((rawGrossBillAmount + roundOffAmt).toFixed(2));
+  const computedGrossBillAmount = Number((rawGrossBillAmount + roundOffAmt).toFixed(2));
+  const hasManualTotalOverride = manualTotalOverride !== null && manualTotalOverride.trim() !== '';
+  const grossBillAmount = hasManualTotalOverride
+    ? Math.max(0, Number(Number(manualTotalOverride || 0).toFixed(2)))
+    : computedGrossBillAmount;
   const advRecNum = Math.min(grossBillAmount, Math.max(0, Number(advanceReceived) || 0));
   const netBalanceAfterAdvance = Number(Math.max(0, grossBillAmount - advRecNum).toFixed(2));
   const grandTotal = grossBillAmount;
@@ -674,6 +755,7 @@ const BillingQuotesModuleInner: React.FC<BillingQuotesModuleProps> = ({
         advanceMode,
         fullPaymentReceived,
         fullPaymentMode,
+        manualTotalOverride,
         remarks,
         billFootnote,
         additionalNotes,
@@ -722,6 +804,7 @@ const BillingQuotesModuleInner: React.FC<BillingQuotesModuleProps> = ({
       advanceMode,
       fullPaymentReceived,
       fullPaymentMode,
+      manualTotalOverride,
       remarks,
       billFootnote,
       additionalNotes,
@@ -1583,6 +1666,7 @@ const BillingQuotesModuleInner: React.FC<BillingQuotesModuleProps> = ({
     setExtraCharge('0');
     setAdvanceReceived('0');
     setFullPaymentReceived(false);
+    setManualTotalOverride(null);
     setRemarks('');
     setAdditionalNotes('');
     setRows([
@@ -1600,6 +1684,7 @@ const BillingQuotesModuleInner: React.FC<BillingQuotesModuleProps> = ({
         description: '',
       },
     ]);
+    void deleteIdbObject('drc_draft_invoice_v1');
   };
 
   const handleLoadInvoiceForEdit = (inv: Invoice) => {
@@ -1667,6 +1752,7 @@ const BillingQuotesModuleInner: React.FC<BillingQuotesModuleProps> = ({
     setAdvanceMode(inv.advanceMode || 'NEFT');
     setFullPaymentMode(inv.fullPaymentMode || 'NEFT');
     setFullPaymentReceived(inv.status === 'Paid');
+    setManualTotalOverride(inv.manualTotalOverride ? String(inv.grandTotal ?? 0) : null);
     setRemarks(inv.remarks || '');
     setBillFootnote(inv.billFootnote || BILL_FOOTNOTE_PRESETS[0] || '');
     setAdditionalNotes(inv.additionalNotes || '');
@@ -1825,6 +1911,7 @@ const BillingQuotesModuleInner: React.FC<BillingQuotesModuleProps> = ({
       advanceMode,
       fullPaymentMode,
       grandTotal,
+      manualTotalOverride: hasManualTotalOverride,
       paidAmount: settlement.paid,
       status: settlement.status,
       remarks,
@@ -1938,6 +2025,7 @@ const BillingQuotesModuleInner: React.FC<BillingQuotesModuleProps> = ({
           advanceMode: invObj.advanceMode || 'NEFT',
           fullPaymentMode: invObj.fullPaymentMode || 'NEFT',
           grandTotal: invObj.grandTotal,
+          manualTotalOverride: Boolean(invObj.manualTotalOverride),
           paidAmount: invObj.paidAmount,
           status: invObj.status,
           remarks: invObj.remarks || '',
@@ -2002,6 +2090,7 @@ const BillingQuotesModuleInner: React.FC<BillingQuotesModuleProps> = ({
       setEditingInvoiceId(id);
       setLastSavedInvoiceId(id);
       setSyncCounter((c) => c + 1);
+      await deleteIdbObject('drc_draft_invoice_v1');
       playVerifiedBeep();
 
       if (finalizeBill) {
@@ -2024,7 +2113,7 @@ const BillingQuotesModuleInner: React.FC<BillingQuotesModuleProps> = ({
 
   // ---- QUOTATION STATE (10-Second Auto-Fill) ----
   const [autoAtomicQuotation, setAutoAtomicQuotation] = useState(true);
-  const [qDivision, setQDivision] = useState<'FTL' | 'LOGISTICS'>('FTL');
+  const [qDivision, setQDivision] = useState<BusinessMode>('FTL');
   const [qNo, setQNo] = useState(`QTN/2026/${String(19 + quotations.length).padStart(3, '0')}`);
   const [qDate, setQDate] = useState(todayISO());
   const [qParty, setQParty] = useState('');
@@ -2188,6 +2277,7 @@ const BillingQuotesModuleInner: React.FC<BillingQuotesModuleProps> = ({
   };
 
   // ---- SECTION 194C DECLARATION STATE ----
+  const [dDivision, setDDivision] = useState<BusinessMode>('FTL');
   const [dParty, setDParty] = useState('');
   const [selectedDPartyId, setSelectedDPartyId] = useState('');
   const [dAddr, setDAddr] = useState('');
@@ -2205,6 +2295,22 @@ const BillingQuotesModuleInner: React.FC<BillingQuotesModuleProps> = ({
     setDPlaceCountry(country);
   });
 
+  const buildDeclarationObject = (overrideId?: string): Declaration194C => ({
+    id: overrideId || 'preview_decl',
+    division: dDivision,
+    partyName: dParty.trim(),
+    partyAddress: dAddr.trim(),
+    partyGstin: dGstin.trim(),
+    financialYear: dFy.trim(),
+    declarationDate: dDate,
+    place: dPlace.trim(),
+    placePinCode: dPlacePinCode.trim(),
+    placeCountry: dPlaceCountry,
+    branchCode: activeBranchCode,
+    createdByStaff: activeStaffCode,
+    ownerUid,
+  });
+
   const handleSave194C = async (e: React.FormEvent) => {
     e.preventDefault();
     if (!dParty.trim() || declarationReadOnly) return;
@@ -2217,24 +2323,12 @@ const BillingQuotesModuleInner: React.FC<BillingQuotesModuleProps> = ({
       }
     }
     const id = makeSafeDocId('decl');
-    const decl: Declaration194C = {
-      id,
-      partyName: dParty.trim(),
-      partyAddress: dAddr.trim(),
-      partyGstin: dGstin.trim(),
-      financialYear: dFy.trim(),
-      declarationDate: dDate,
-      place: dPlace.trim(),
-      placePinCode: dPlacePinCode.trim(),
-      placeCountry: dPlaceCountry,
-      branchCode: activeBranchCode,
-      createdByStaff: activeStaffCode,
-      ownerUid,
-    };
+    const decl = buildDeclarationObject(id);
     await upsertDocument(
       'declarations',
       id,
       {
+        division: decl.division || 'FTL',
         partyName: decl.partyName,
         partyAddress: decl.partyAddress,
         partyGstin: decl.partyGstin,
@@ -2770,23 +2864,74 @@ const BillingQuotesModuleInner: React.FC<BillingQuotesModuleProps> = ({
         key: 'actions',
         header: 'Action',
         headerClassName: 'text-right',
-        cellClassName: 'text-right',
-        render: (d) => (
-          <button
-            type="button"
-            onClick={async () => {
-              const pdf = await generateDeclaration194CPDF(d, company);
-              onPreviewPdf(pdf, 'Declarations');
-            }}
-            className="inline-flex items-center gap-1 px-2.5 py-1 rounded bg-blue-50 hover:bg-blue-100 text-blue-800 font-semibold cursor-pointer"
-          >
-            <Printer className="w-3 h-3" />
-            PDF
-          </button>
-        ),
+        cellClassName: 'text-right whitespace-nowrap space-x-1',
+        render: (d) => {
+          const matchedParty = parties.find(
+            (p) => p.name.trim().toLowerCase() === d.partyName.trim().toLowerCase()
+          );
+          return (
+            <>
+              <button
+                type="button"
+                onClick={async () => {
+                  const pdf = await generateDeclaration194CPDF(d, company);
+                  onPreviewPdf(pdf, 'Declarations');
+                }}
+                className="inline-flex items-center gap-1 px-2.5 py-1 rounded bg-blue-50 hover:bg-blue-100 text-blue-800 font-semibold cursor-pointer"
+              >
+                <Printer className="w-3 h-3" />
+                PDF
+              </button>
+              <button
+                type="button"
+                onClick={async () => {
+                  const pdf = await generateDeclaration194CPDF(d, company);
+                  const res = await sharePdfDirect({
+                    pdf,
+                    channel: 'whatsapp',
+                    phone: matchedParty?.phone,
+                    email: matchedParty?.email,
+                    partyName: d.partyName,
+                    docNo: `194C-${d.financialYear}`,
+                    docLabel: 'Section 194C Declaration',
+                    company,
+                  });
+                  setScanMsg(res.message);
+                  URL.revokeObjectURL(pdf.blobUrl);
+                }}
+                className="p-1.5 rounded bg-emerald-50 hover:bg-emerald-100 text-emerald-700 cursor-pointer"
+                title="Share Pure Binary 194C PDF on WhatsApp"
+              >
+                <MessageSquare className="w-3.5 h-3.5" />
+              </button>
+              <button
+                type="button"
+                onClick={async () => {
+                  const pdf = await generateDeclaration194CPDF(d, company);
+                  const res = await sharePdfDirect({
+                    pdf,
+                    channel: 'email',
+                    phone: matchedParty?.phone,
+                    email: matchedParty?.email,
+                    partyName: d.partyName,
+                    docNo: `194C-${d.financialYear}`,
+                    docLabel: 'Section 194C Declaration',
+                    company,
+                  });
+                  setScanMsg(res.message);
+                  URL.revokeObjectURL(pdf.blobUrl);
+                }}
+                className="p-1.5 rounded bg-sky-50 hover:bg-sky-100 text-sky-700 cursor-pointer"
+                title="Share Pure Binary 194C PDF via Email"
+              >
+                <Mail className="w-3.5 h-3.5" />
+              </button>
+            </>
+          );
+        },
       },
     ],
-    [company, onPreviewPdf]
+    [company, onPreviewPdf, parties]
   );
 
   return (
@@ -4110,17 +4255,14 @@ const BillingQuotesModuleInner: React.FC<BillingQuotesModuleProps> = ({
                     </div>
                     <div>
                       <label className="block text-[10px] font-bold text-slate-600">Adv. Mode</label>
-                      <select
+                      <SearchableSelect
+                        ariaLabel="Advance Payment Mode"
                         value={advanceMode}
-                        onChange={(e) => setAdvanceMode(e.target.value)}
-                        className="w-full px-2 py-1 rounded border border-slate-300 bg-white"
-                      >
-                        {PAYMENT_MODE_OPTIONS.map((m) => (
-                          <option key={m} value={m}>
-                            {m}
-                          </option>
-                        ))}
-                      </select>
+                        onChange={setAdvanceMode}
+                        sortAlphabetically={false}
+                        options={PAYMENT_MODE_OPTIONS}
+                        buttonClassName="!py-1 !text-xs"
+                      />
                     </div>
                     <div className="flex items-end pb-1">
                       <label className="inline-flex items-center gap-1.5 font-bold text-emerald-800 cursor-pointer">
@@ -4134,17 +4276,14 @@ const BillingQuotesModuleInner: React.FC<BillingQuotesModuleProps> = ({
                     </div>
                     <div>
                       <label className="block text-[10px] font-bold text-slate-600">Pay Mode</label>
-                      <select
+                      <SearchableSelect
+                        ariaLabel="Full Payment Mode"
                         value={fullPaymentMode}
-                        onChange={(e) => setFullPaymentMode(e.target.value)}
-                        className="w-full px-2 py-1 rounded border border-slate-300 bg-white"
-                      >
-                        {PAYMENT_MODE_OPTIONS.map((m) => (
-                          <option key={m} value={m}>
-                            {m}
-                          </option>
-                        ))}
-                      </select>
+                        onChange={setFullPaymentMode}
+                        sortAlphabetically={false}
+                        options={PAYMENT_MODE_OPTIONS}
+                        buttonClassName="!py-1 !text-xs"
+                      />
                     </div>
                   </div>
 
@@ -4159,11 +4298,34 @@ const BillingQuotesModuleInner: React.FC<BillingQuotesModuleProps> = ({
                         Auto Round-Off ({roundOffAmt >= 0 ? '+' : ''}
                         {roundOffAmt.toFixed(2)})
                       </label>
-                      <div>
-                        <span className="font-bold text-slate-900">GROSS / GRAND TOTAL:</span>{' '}
+                      <div className="flex flex-wrap items-center gap-2">
+                        <span className="font-bold text-slate-900">GROSS / GRAND TOTAL:</span>
                         <span className="text-base font-extrabold font-mono-num text-[#0D47A1]">
                           ₹ {formatINR(grandTotal)}
                         </span>
+                        <label className="inline-flex items-center gap-1 text-[11px] font-bold text-amber-800 cursor-pointer ml-1">
+                          <input
+                            type="checkbox"
+                            checked={hasManualTotalOverride}
+                            onChange={(e) =>
+                              setManualTotalOverride(
+                                e.target.checked ? String(computedGrossBillAmount) : null
+                              )
+                            }
+                          />
+                          Manual Override
+                        </label>
+                        {hasManualTotalOverride && (
+                          <input
+                            type="number"
+                            step="0.01"
+                            min={0}
+                            aria-label="Manual Grand Total Override"
+                            value={manualTotalOverride ?? ''}
+                            onChange={(e) => setManualTotalOverride(e.target.value)}
+                            className="w-28 px-2 py-0.5 rounded border border-amber-400 bg-amber-50 font-mono-num font-bold text-amber-950 text-xs"
+                          />
+                        )}
                       </div>
                     </div>
                     {advRecNum > 0 && !fullPaymentReceived && (
@@ -4308,9 +4470,9 @@ const BillingQuotesModuleInner: React.FC<BillingQuotesModuleProps> = ({
                             }}
                             className={`px-4 py-2.5 flex items-center justify-between gap-3 cursor-pointer ${
                               isSelected
-                                ? 'bg-emerald-50 border-l-4 border-emerald-600'
+                                ? 'bg-emerald-50 ring-1 ring-inset ring-emerald-600'
                                 : isCursor
-                                  ? 'bg-amber-50 border-l-4 border-amber-500'
+                                  ? 'bg-amber-50 ring-1 ring-inset ring-amber-500'
                                   : 'hover:bg-slate-50'
                             }`}
                           >
@@ -4592,14 +4754,20 @@ const BillingQuotesModuleInner: React.FC<BillingQuotesModuleProps> = ({
             <div className="bg-gradient-to-r from-[#0D47A1] to-[#1976D2] text-white px-4 py-2.5 flex flex-wrap items-center justify-between gap-2">
               <span className="text-sm font-bold">Proforma Invoice / Rate of Quotation Generator</span>
               <div className="flex flex-wrap items-center gap-2">
-                <div className="w-40">
+                <div className="w-44">
                   <SearchableSelect
                     ariaLabel="Quotation Division"
                     value={qDivision}
-                    onChange={(val) => setQDivision(val === 'LOGISTICS' ? 'LOGISTICS' : 'FTL')}
+                    onChange={(val) =>
+                      setQDivision(
+                        val === 'LOGISTICS' || val === 'PTL' || val === 'COURIER' ? val : 'FTL'
+                      )
+                    }
                     options={[
                       { value: 'FTL', label: 'FTL Division' },
                       { value: 'LOGISTICS', label: 'LOGISTICS Division' },
+                      { value: 'PTL', label: 'PTL Division' },
+                      { value: 'COURIER', label: 'COURIER Division' },
                     ]}
                     buttonClassName="py-1 text-[#0D47A1] font-extrabold"
                   />
@@ -5007,8 +5175,28 @@ const BillingQuotesModuleInner: React.FC<BillingQuotesModuleProps> = ({
             onSubmit={handleSave194C}
             className="bg-white rounded-xl border border-slate-200 shadow-sm overflow-hidden"
           >
-            <div className="bg-gradient-to-r from-[#0D47A1] to-[#1976D2] text-white px-4 py-2.5 text-sm font-bold">
-              Declaration Under Section 194C (Non-Deduction of Tax) — Proprietor: Subhajit Saha (PAN: DOTPS3540M)
+            <div className="bg-gradient-to-r from-[#0D47A1] to-[#1976D2] text-white px-4 py-2.5 flex flex-wrap items-center justify-between gap-2">
+              <span className="text-sm font-bold">
+                Declaration Under Section 194C (Non-Deduction of Tax) — Proprietor: Subhajit Saha (PAN: {company.pan})
+              </span>
+              <div className="w-44">
+                <SearchableSelect
+                  ariaLabel="194C Division"
+                  value={dDivision}
+                  onChange={(val) =>
+                    setDDivision(
+                      val === 'LOGISTICS' || val === 'PTL' || val === 'COURIER' ? val : 'FTL'
+                    )
+                  }
+                  options={[
+                    { value: 'FTL', label: 'FTL Division' },
+                    { value: 'LOGISTICS', label: 'LOGISTICS Division' },
+                    { value: 'PTL', label: 'PTL Division' },
+                    { value: 'COURIER', label: 'COURIER Division' },
+                  ]}
+                  buttonClassName="py-1 text-[#0D47A1] font-extrabold"
+                />
+              </div>
             </div>
             <div className="p-4 grid grid-cols-1 md:grid-cols-3 gap-3 text-xs">
               <div>
@@ -5128,10 +5316,71 @@ const BillingQuotesModuleInner: React.FC<BillingQuotesModuleProps> = ({
               </div>
             </div>
             <div className="px-4 py-2.5 bg-blue-50 border-t border-blue-200 text-xs text-blue-900">
-              Includes Proprietor PAN Card photo auto-attached on the RIGHT below Declarant Details (PAN: {company.pan}), Dolphin Road Carrier diagonal
-              watermark, Verification block, and TOP-LEFT Triangular DRC Logo (strictly NO stamp or signature at bottom).
+              Includes Royal Blue Dolphin Ring top-left logo, 11% Twin-Dolphin Heart D.R.C center watermark, Proprietor PAN Card photo bottom-left (PAN: {company.pan}), and Subhajit Saha Proprietor Signature with Blue Round Seal bottom-right identically across all 4 divisions.
             </div>
-            <div className="px-4 py-3 bg-slate-50 border-t border-slate-200 flex justify-end">
+            <div className="px-4 py-3 bg-slate-50 border-t border-slate-200 flex flex-wrap justify-end gap-2">
+              <button
+                type="button"
+                onClick={async () => {
+                  const decl = buildDeclarationObject();
+                  if (!decl.partyName) {
+                    setScanMsg('Select or enter Party Name before sharing 194C PDF.');
+                    return;
+                  }
+                  const matched = parties.find(
+                    (p) => p.name.trim().toLowerCase() === decl.partyName.trim().toLowerCase()
+                  );
+                  const pdf = await generateDeclaration194CPDF(decl, company);
+                  const res = await sharePdfDirect({
+                    pdf,
+                    channel: 'whatsapp',
+                    phone: matched?.phone,
+                    email: matched?.email,
+                    partyName: decl.partyName,
+                    docNo: `194C-${decl.financialYear}`,
+                    docLabel: 'Section 194C Declaration',
+                    company,
+                  });
+                  setScanMsg(res.message);
+                  URL.revokeObjectURL(pdf.blobUrl);
+                }}
+                className="inline-flex items-center gap-1.5 px-3 py-1.5 rounded-md bg-emerald-600 hover:bg-emerald-700 text-white text-xs font-bold cursor-pointer"
+                title="Share Pure Binary 194C PDF on WhatsApp"
+              >
+                <MessageSquare className="w-3.5 h-3.5" />
+                WhatsApp PDF
+              </button>
+              <button
+                type="button"
+                onClick={async () => {
+                  const decl = buildDeclarationObject();
+                  if (!decl.partyName) {
+                    setScanMsg('Select or enter Party Name before sharing 194C PDF.');
+                    return;
+                  }
+                  const matched = parties.find(
+                    (p) => p.name.trim().toLowerCase() === decl.partyName.trim().toLowerCase()
+                  );
+                  const pdf = await generateDeclaration194CPDF(decl, company);
+                  const res = await sharePdfDirect({
+                    pdf,
+                    channel: 'email',
+                    phone: matched?.phone,
+                    email: matched?.email,
+                    partyName: decl.partyName,
+                    docNo: `194C-${decl.financialYear}`,
+                    docLabel: 'Section 194C Declaration',
+                    company,
+                  });
+                  setScanMsg(res.message);
+                  URL.revokeObjectURL(pdf.blobUrl);
+                }}
+                className="inline-flex items-center gap-1.5 px-3 py-1.5 rounded-md bg-indigo-600 hover:bg-indigo-700 text-white text-xs font-bold cursor-pointer"
+                title="Share Pure Binary 194C PDF via Email"
+              >
+                <Mail className="w-3.5 h-3.5" />
+                Email PDF
+              </button>
               <button
                 type="submit"
                 disabled={declarationReadOnly}

@@ -34,6 +34,23 @@ export function formatDateDDMMYYYY(isoDate: string | undefined): string {
   return isoDate;
 }
 
+export function formatDateHyphenDDMMYYYY(isoDate: string | undefined): string {
+  const raw = String(isoDate || '').trim();
+  if (!raw) {
+    return formatDateHyphenDDMMYYYY(todayISO());
+  }
+  if (/^\d{2}-\d{2}-\d{4}$/.test(raw)) return raw;
+  const slashMatch = raw.match(/^(\d{2})\/(\d{2})\/(\d{4})$/);
+  if (slashMatch) {
+    return `${slashMatch[1]}-${slashMatch[2]}-${slashMatch[3]}`;
+  }
+  const isoMatch = raw.match(/^(\d{4})-(\d{2})-(\d{2})/);
+  if (isoMatch) {
+    return `${isoMatch[3]}-${isoMatch[2]}-${isoMatch[1]}`;
+  }
+  return raw.replace(/\//g, '-');
+}
+
 export function todayISO(): string {
   const d = new Date();
   const y = d.getFullYear();

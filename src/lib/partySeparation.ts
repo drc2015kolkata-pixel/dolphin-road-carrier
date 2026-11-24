@@ -521,20 +521,46 @@ export function analyzeAndSeparateMisclassifiedParties(params: {
 }
 
 /**
- * Restores any HEAD / PARTY / ACCT FoxPro customer records that were mistakenly moved
- * into Broker / TruckOwner / Vendor back to Billing Customers ('Customer').
+ * Restores any HEAD / PARTY / ACCT FoxPro customer records (plus invoiced/consigned billing parties)
+ * that were mistakenly moved into Broker / TruckOwner / Vendor back to Billing Customers ('Customer').
  */
-export function restoreHeadPartiesToBillingCustomers(parties: Party[]): {
+export function restoreHeadPartiesToBillingCustomers(
+  parties: Party[],
+  consignments: ConsignmentNote[] = [],
+  invoices: Invoice[] = []
+): {
   restoredParties: Party[];
   restoredCount: number;
 } {
+  const billedCustomerKeys = new Set<string>();
+  for (const inv of invoices) {
+    const k = normalizePartyMatchKey(inv.partyName);
+    if (k) billedCustomerKeys.add(k);
+  }
+  for (const cn of consignments) {
+    const k1 = normalizePartyMatchKey(cn.billingPartyName);
+    const k2 = normalizePartyMatchKey(cn.consignorName);
+    if (k1) billedCustomerKeys.add(k1);
+    if (k2) billedCustomerKeys.add(k2);
+  }
+
   const restoredParties: Party[] = [];
   for (const p of parties) {
+    const isExplicitNonCustomer =
+      p.id.startsWith('dbf_brk_') ||
+      p.id.startsWith('brk_') ||
+      p.id.startsWith('dbf_own_') ||
+      p.id.startsWith('own_') ||
+      p.id.startsWith('dbf_drv_');
+    if (isExplicitNonCustomer) continue;
+
     const isHeadOrigin =
       p.id.startsWith('dbf_head_') ||
       p.id.startsWith('dbf_party_') ||
       p.id.startsWith('dbf_acct_');
-    if (isHeadOrigin && p.partyType !== 'Customer') {
+    const isBilledCustomer = billedCustomerKeys.has(normalizePartyMatchKey(p.name));
+
+    if ((isHeadOrigin || isBilledCustomer) && p.partyType !== 'Customer') {
       restoredParties.push({
         ...p,
         partyType: 'Customer',
@@ -547,3 +573,4 @@ export function restoreHeadPartiesToBillingCustomers(parties: Party[]): {
     restoredCount: restoredParties.length,
   };
 }
+

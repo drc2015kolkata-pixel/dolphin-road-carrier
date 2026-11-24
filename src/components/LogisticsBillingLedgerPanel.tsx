@@ -2,6 +2,8 @@ import React, { useMemo, useState } from 'react';
 import {
   FileText,
   IndianRupee,
+  Mail,
+  MessageSquare,
   Plus,
   Printer,
   Receipt,
@@ -26,6 +28,7 @@ import {
   generateFoxproStatementPDF,
   generateLogisticsInvoicePDF,
 } from '../lib/pdfEngine';
+import { sharePdfDirect } from '../lib/shareUtils';
 import {
   EntityQuickPreviewCard,
   formatPartyDetailsLine,
@@ -800,6 +803,54 @@ export const LogisticsBillingLedgerPanel: React.FC<LogisticsBillingLedgerPanelPr
                             title="Preview A4 PDF"
                           >
                             <Printer className="w-3.5 h-3.5" />
+                          </button>
+                          <button
+                            type="button"
+                            onClick={async () => {
+                              const pdf = await generateLogisticsInvoicePDF(inv, company);
+                              const matched = parties.find(
+                                (p) => p.name.trim().toLowerCase() === inv.partyName.trim().toLowerCase()
+                              );
+                              await sharePdfDirect({
+                                pdf,
+                                channel: 'whatsapp',
+                                phone: matched?.phone,
+                                email: matched?.email,
+                                partyName: inv.partyName,
+                                docNo: inv.docNo,
+                                docLabel: inv.docType,
+                                company,
+                              });
+                              URL.revokeObjectURL(pdf.blobUrl);
+                            }}
+                            className="p-1.5 rounded bg-emerald-50 hover:bg-emerald-100 text-emerald-700 cursor-pointer"
+                            title="Share Pure Binary Invoice PDF on WhatsApp"
+                          >
+                            <MessageSquare className="w-3.5 h-3.5" />
+                          </button>
+                          <button
+                            type="button"
+                            onClick={async () => {
+                              const pdf = await generateLogisticsInvoicePDF(inv, company);
+                              const matched = parties.find(
+                                (p) => p.name.trim().toLowerCase() === inv.partyName.trim().toLowerCase()
+                              );
+                              await sharePdfDirect({
+                                pdf,
+                                channel: 'email',
+                                phone: matched?.phone,
+                                email: matched?.email,
+                                partyName: inv.partyName,
+                                docNo: inv.docNo,
+                                docLabel: inv.docType,
+                                company,
+                              });
+                              URL.revokeObjectURL(pdf.blobUrl);
+                            }}
+                            className="p-1.5 rounded bg-sky-50 hover:bg-sky-100 text-sky-700 cursor-pointer"
+                            title="Share Pure Binary Invoice PDF via Email"
+                          >
+                            <Mail className="w-3.5 h-3.5" />
                           </button>
                           <button
                             type="button"

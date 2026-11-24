@@ -104,3 +104,76 @@ export async function saveAllCollectionsToIdb(state: Record<string, unknown[]>):
     }
   });
 }
+
+interface IdbObjectEnvelope<T> {
+  __drcBlob: true;
+  updatedAt: number;
+  payload: T;
+}
+
+export async function saveIdbObject<T>(key: string, payload: T): Promise<void> {
+  const db = await openErpDb();
+  if (!db) return;
+
+  const envelope: IdbObjectEnvelope<T> = {
+    __drcBlob: true,
+    updatedAt: Date.now(),
+    payload,
+  };
+
+  await new Promise<void>((resolve) => {
+    try {
+      const tx = db.transaction(STORE_NAME, 'readwrite');
+      const store = tx.objectStore(STORE_NAME);
+      store.put(envelope, key);
+      tx.oncomplete = () => resolve();
+      tx.onerror = () => resolve();
+      tx.onabort = () => resolve();
+    } catch {
+      resolve();
+    }
+  });
+}
+
+export async function loadIdbObject<T>(key: string): Promise<T | null> {
+  const db = await openErpDb();
+  if (!db) return null;
+
+  return new Promise<T | null>((resolve) => {
+    try {
+      const tx = db.transaction(STORE_NAME, 'readonly');
+      const store = tx.objectStore(STORE_NAME);
+      const req = store.get(key);
+      req.onsuccess = () => {
+        const val = req.result as IdbObjectEnvelope<T> | T | undefined;
+        if (val && typeof val === 'object' && '__drcBlob' in val && (val as IdbObjectEnvelope<T>).__drcBlob) {
+          resolve((val as IdbObjectEnvelope<T>).payload);
+        } else {
+          resolve((val as T) ?? null);
+        }
+      };
+      req.onerror = () => resolve(null);
+    } catch {
+      resolve(null);
+    }
+  });
+}
+
+export async function deleteIdbObject(key: string): Promise<void> {
+  const db = await openErpDb();
+  if (!db) return;
+
+  await new Promise<void>((resolve) => {
+    try {
+      const tx = db.transaction(STORE_NAME, 'readwrite');
+      const store = tx.objectStore(STORE_NAME);
+      store.delete(key);
+      tx.oncomplete = () => resolve();
+      tx.onerror = () => resolve();
+      tx.onabort = () => resolve();
+    } catch {
+      resolve();
+    }
+  });
+}
+

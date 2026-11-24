@@ -1,4 +1,4 @@
-import React, { useMemo, useRef, useState } from 'react';
+import React, { useEffect, useMemo, useRef, useState } from 'react';
 import {
   AlertTriangle,
   Camera,
@@ -8,17 +8,22 @@ import {
   CloudUpload,
   Edit3,
   Lock,
+  Mail,
+  MessageSquare,
   Plus,
   Printer,
   RotateCcw,
   Save,
   Search,
+  Sparkles,
   Trash2,
   Truck,
   Unlock,
   Upload,
+  Usb,
 } from 'lucide-react';
 import {
+  BusinessMode,
   CompanySettings,
   ConsignmentNote,
   DEFAULT_COMPANY_SETTINGS,
@@ -30,11 +35,23 @@ import {
   StaffCommissionEntry,
   Vehicle,
 } from '../types/erp';
-import { formatDateDDMMYYYY, formatINR, makeSafeDocId, normalizeFyLabel, todayISO } from '../lib/formatters';
+import {
+  formatDateDDMMYYYY,
+  formatDateHyphenDDMMYYYY,
+  formatINR,
+  makeSafeDocId,
+  normalizeFyLabel,
+  todayISO,
+} from '../lib/formatters';
 import { scanPODDocument } from '../lib/ocrEngine';
 import { logBranchActivity, removeDocument, upsertDocument } from '../lib/firestoreStore';
-import { uploadBlobToDriveFolder } from '../lib/driveBackup';
-import { GeneratedPdfResult, generateFoxproStatementPDF } from '../lib/pdfEngine';
+import { uploadPdfToDivisionVaultFolder } from '../lib/driveBackup';
+import {
+  GeneratedPdfResult,
+  generateFoxproStatementPDF,
+  generatePodScanPDF,
+} from '../lib/pdfEngine';
+import { sharePdfDirect } from '../lib/shareUtils';
 import { useDebouncedValue } from '../hooks/useDebounce';
 import { PaginatedDataTable, TableColumn } from './PaginatedDataTable';
 import { StaffCommissionModule } from './StaffCommissionModule';
@@ -51,6 +68,14 @@ import { playAlertBeep, playVerifiedBeep } from '../lib/audioFeedback';
 import { validateSafeUploadFile } from '../lib/gstinValidator';
 import { PinCountryInputs, useAutoPinLookup } from './CityPinCountryAutoFill';
 import { SupportedCountry } from '../lib/postalPinLookup';
+import {
+  applyScanner300DpiAutoCropAndFilter,
+  connectUsbScannerFolder,
+  isFileSystemDirectorySupported,
+  ScannerFilterMode,
+  startUsbScannerFolderWatcher,
+  UsbScannerWatcherHandle,
+} from '../lib/usbScannerWatch';
 
 interface LorryHirePodModuleProps {
   ownerUid: string;
@@ -253,8 +278,9 @@ const LorryHirePodModuleInner: React.FC<LorryHirePodModuleProps> = ({
   const [search, setSearch] = useState('');
   const debouncedSearch = useDebouncedValue(search, 200);
 
-  // Active POD modal state (includes Pkgs & Shortage/Damage Reconciliation)
+  // Active POD modal state (includes Pkgs, Truck No Override, USB Scanner Auto-Watch & Shortage Reconciliation)
   const [activePodTarget, setActivePodTarget] = useState<LorryHire | null>(null);
+  const [podTruckNo, setPodTruckNo] = useState('');
   const [podDate, setPodDate] = useState(todayISO());
   const [podBookedPkgs, setPodBookedPkgs] = useState('');
   const [podDeliveredPkgs, setPodDeliveredPkgs] = useState('');
@@ -267,6 +293,27 @@ const LorryHirePodModuleInner: React.FC<LorryHirePodModuleProps> = ({
   const [podScanStatus, setPodScanStatus] = useState<string | null>(null);
   const [podUploading, setPodUploading] = useState(false);
   const [camScannerOpen, setCamScannerOpen] = useState(false);
+  const [usbFolderName, setUsbFolderName] = useState('');
+  const [usbWatcherActive, setUsbWatcherActive] = useState(false);
+  const [usbFilterMode, setUsbFilterMode] = useState<ScannerFilterMode>('magic_color');
+  const [usbAutoCrop, setUsbAutoCrop] = useState(true);
+  const usbWatcherRef = useRef<UsbScannerWatcherHandle | null>(null);
+
+  useEffect(() => {
+    return () => {
+      usbWatcherRef.current?.stop();
+      usbWatcherRef.current = null;
+    };
+  }, []);
+
+  useEffect(() => {
+    if (!activePodTarget && usbWatcherRef.current) {
+      usbWatcherRef.current.stop();
+      usbWatcherRef.current = null;
+      setUsbWatcherActive(false);
+      setUsbFolderName('');
+    }
+  }, [activePodTarget]);
 
   // Balance payment modal state
   const [payTarget, setPayTarget] = useState<LorryHire | null>(null);
@@ -600,7 +647,7 @@ const LorryHirePodModuleInner: React.FC<LorryHirePodModuleProps> = ({
     }
   };
 
-  const handlePodScanUpload = async (file: File | undefined) => {
+  const handlePodScanUpload = async (file: File | undefined, scannerBrandHint?: string) => {
     if (!file || !activePodTarget) return;
     const uploadCheck = validateSafeUploadFile(file, 'image_only');
     if (!uploadCheck.valid) {
@@ -608,14 +655,27 @@ const LorryHirePodModuleInner: React.FC<LorryHirePodModuleProps> = ({
       setPodScanStatus(uploadCheck.reason || 'Blocked unsupported file.');
       return;
     }
-    setPodScanStatus('Compressing & scanning POD in background worker...');
+    setPodScanStatus(
+      scannerBrandHint
+        ? `USB Auto-Captured (${scannerBrandHint}) · Applying ${usbAutoCrop ? '300-DPI Auto-Crop + ' : ''}${usbFilterMode === 'bw_sharp' ? 'B&W Sharp' : 'Magic Color'} & OCR...`
+        : 'Compressing & scanning POD in background worker...'
+    );
     setPodShortageAlert(false);
     try {
-      const { result, compressedDataUrl } = await scanPODDocument(file, (m) =>
+      let fileToScan: File = file;
+      if (usbAutoCrop && file.type.startsWith('image/')) {
+        const enhanced = await applyScanner300DpiAutoCropAndFilter(file, usbFilterMode);
+        const resBlob = await (await fetch(enhanced.dataUrl)).blob();
+        fileToScan = new File([resBlob], file.name.replace(/\.[^.]+$/, '.jpg'), { type: 'image/jpeg' });
+      }
+      const { result, compressedDataUrl } = await scanPODDocument(fileToScan, (m) =>
         setPodScanStatus(m)
       );
       setPodImageUrl(compressedDataUrl);
-      const cleanName = `POD_${activePodTarget.cnNo.replace(/[^a-zA-Z0-9]/g, '_')}_${todayISO()}.jpg`;
+      const effectiveTruck = (podTruckNo.trim() || activePodTarget.truckNo || activePodTarget.cnNo || 'TRUCK')
+        .toUpperCase()
+        .replace(/[^a-zA-Z0-9_-]/g, '_');
+      const cleanName = `POD_${effectiveTruck}_${formatDateHyphenDDMMYYYY(podDate || todayISO())}.pdf`;
       setPodFileName(cleanName);
       if (result.podDate) setPodDate(result.podDate);
       if (result.shortageBreakageLeakageDetected) {
@@ -625,15 +685,49 @@ const LorryHirePodModuleInner: React.FC<LorryHirePodModuleProps> = ({
       } else if (result.remarks) {
         setPodRemarks(result.remarks);
       }
+      if (!result.shortageBreakageLeakageDetected) {
+        playVerifiedBeep();
+      }
       setPodScanStatus(
         result.shortageBreakageLeakageDetected
           ? `RED ALERT: Shortage / Breakage / Leakage detected! ${result.remarks || ''}`
           : result.signedDetected
-            ? `Signed POD verified! ${result.remarks || ''}`
-            : 'POD scanned. Confirm receiver signature, Delivered Pkgs & POD Receive Date.'
+            ? `Signed POD verified${scannerBrandHint ? ` (${scannerBrandHint})` : ''}! ${result.remarks || ''}`
+            : `POD enhanced & ready (${cleanName}). Verify Truck No & POD Date, then click Save.`
       );
     } catch (err) {
       setPodScanStatus(err instanceof Error ? err.message : 'POD scan failed');
+    }
+  };
+
+  const handleToggleUsbScannerWatch = async () => {
+    if (usbWatcherRef.current) {
+      usbWatcherRef.current.stop();
+      usbWatcherRef.current = null;
+      setUsbWatcherActive(false);
+      setUsbFolderName('');
+      setPodScanStatus('USB Scanner Folder Auto-Watch stopped.');
+      return;
+    }
+    try {
+      const dirHandle = await connectUsbScannerFolder();
+      const watcher = await startUsbScannerFolderWatcher(dirHandle, async (evt) => {
+        if (!evt.file.type.startsWith('image/') && !/\.(jpe?g|png|webp|bmp)$/i.test(evt.fileName)) {
+          setPodScanStatus(`Skipped non-image scanner file ${evt.fileName}. Set scanner output to JPG/PNG for auto-crop.`);
+          return;
+        }
+        await handlePodScanUpload(evt.file, evt.scannerBrandHint);
+      });
+      usbWatcherRef.current = watcher;
+      setUsbFolderName(watcher.folderName);
+      setUsbWatcherActive(true);
+      playVerifiedBeep();
+      setPodScanStatus(
+        `USB Auto-Watch ACTIVE on folder "${watcher.folderName}" — Press SCAN on your HP / Canon / Epson / Brother scanner!`
+      );
+    } catch (err) {
+      playAlertBeep();
+      setPodScanStatus(err instanceof Error ? err.message : 'Could not open USB scanner folder.');
     }
   };
 
@@ -646,6 +740,7 @@ const LorryHirePodModuleInner: React.FC<LorryHirePodModuleProps> = ({
       const sdPkgs = Math.max(0, bPkgs - dPkgs);
       const sChg = Number(podShortageCharge) || 0;
       const dChg = Number(podDamageCharge) || 0;
+      const finalTruckNo = (podTruckNo.trim() || activePodTarget.truckNo || '').toUpperCase();
 
       const { balancePayable: recomputedNet } = computeLorryNetPayable({
         hireAmount: Number(activePodTarget.hireAmount || 0),
@@ -661,10 +756,24 @@ const LorryHirePodModuleInner: React.FC<LorryHirePodModuleProps> = ({
         tdsAmount: Number(activePodTarget.tdsAmount || 0),
       });
 
+      const targetDivision: BusinessMode =
+        (activePodTarget.division as BusinessMode) || 'FTL';
+      const podPdf = await generatePodScanPDF({
+        imageDataUrl: podImageUrl,
+        truckNo: finalTruckNo || activePodTarget.cnNo,
+        cnNo: activePodTarget.cnNo,
+        podDate,
+        remarks: podRemarks.trim(),
+        partyName: activePodTarget.ownerName || activePodTarget.brokerName,
+        division: targetDivision,
+        company: effectiveCompany,
+      });
+
       await upsertDocument(
         'lorry_hires',
         activePodTarget.id,
         {
+          truckNo: finalTruckNo || activePodTarget.truckNo,
           bookedPkgs: bPkgs,
           deliveredPkgs: dPkgs,
           shortageDamagePkgs: sdPkgs,
@@ -674,29 +783,32 @@ const LorryHirePodModuleInner: React.FC<LorryHirePodModuleProps> = ({
           podReceived: true,
           podReceiveDate: podDate,
           podImageDataUrl: podImageUrl.slice(0, 440000),
-          podFileName: podFileName || `POD_${activePodTarget.cnNo}.jpg`,
+          podFileName: podPdf.fileName,
           podRemarks: podRemarks.trim(),
         },
         false
       );
 
       if (driveAccessToken) {
-        const res = await fetch(podImageUrl);
-        const blob = await res.blob();
-        await uploadBlobToDriveFolder({
+        await uploadPdfToDivisionVaultFolder({
           accessToken: driveAccessToken,
-          folderName: 'POD_Scans',
-          fileName: podFileName || `POD_${activePodTarget.cnNo}.jpg`,
-          blob,
-          mimeType: 'image/jpeg',
+          division: targetDivision,
+          folderName: '5. POD_Scans_PDFs',
+          fileName: podPdf.fileName,
+          blob: podPdf.blob,
         });
+      }
+      if (onPreviewPdf) {
+        onPreviewPdf(podPdf, 'POD_Scans');
+      } else {
+        URL.revokeObjectURL(podPdf.blobUrl);
       }
 
       await logBranchActivity({
         action: 'Verified POD & Reconciled Pkgs',
         module: 'Lorry Hire',
         docRefCode: activePodTarget.cnNo,
-        summary: `POD ${activePodTarget.truckNo} · Deliv ${dPkgs}/${bPkgs} Pkgs (${sdPkgs} Short/Dmg) · Net ₹${formatINR(recomputedNet)}`,
+        summary: `POD ${finalTruckNo} · ${podPdf.fileName} · Deliv ${dPkgs}/${bPkgs} Pkgs (${sdPkgs} Short/Dmg) · Net ₹${formatINR(recomputedNet)}`,
         staffCode: activeStaffCode,
         staffName: activeStaffName,
         branchCode: activeBranchCode,
@@ -704,7 +816,12 @@ const LorryHirePodModuleInner: React.FC<LorryHirePodModuleProps> = ({
       });
 
       playVerifiedBeep();
+      usbWatcherRef.current?.stop();
+      usbWatcherRef.current = null;
+      setUsbWatcherActive(false);
+      setUsbFolderName('');
       setActivePodTarget(null);
+      setPodTruckNo('');
       setPodImageUrl('');
       setPodFileName('');
       setPodRemarks('');
@@ -846,6 +963,45 @@ const LorryHirePodModuleInner: React.FC<LorryHirePodModuleProps> = ({
     onPreviewPdf(pdf, 'Reports_Ledgers');
   };
 
+  const handlePodPdfAction = async (
+    h: LorryHire,
+    action: 'preview' | 'whatsapp' | 'email'
+  ) => {
+    if (!h.podImageDataUrl) return;
+    const matchedParty = parties.find(
+      (p) =>
+        p.name.trim().toLowerCase() === (h.ownerName || '').trim().toLowerCase() ||
+        p.name.trim().toLowerCase() === (h.brokerName || '').trim().toLowerCase()
+    );
+    const pdf = await generatePodScanPDF({
+      imageDataUrl: h.podImageDataUrl,
+      truckNo: h.truckNo,
+      cnNo: h.cnNo,
+      podDate: h.podReceiveDate || todayISO(),
+      remarks: h.podRemarks,
+      partyName: h.ownerName || h.brokerName,
+      division: (h.division as BusinessMode) || 'FTL',
+      company: effectiveCompany,
+    });
+    if (action === 'preview') {
+      if (onPreviewPdf) {
+        onPreviewPdf(pdf, 'POD_Scans');
+      }
+      return;
+    }
+    await sharePdfDirect({
+      pdf,
+      channel: action,
+      phone: matchedParty?.phone,
+      email: matchedParty?.email,
+      partyName: h.ownerName || h.brokerName,
+      docNo: h.cnNo || h.truckNo,
+      docLabel: 'POD Scan',
+      company: effectiveCompany,
+    });
+    URL.revokeObjectURL(pdf.blobUrl);
+  };
+
   const hireColumns = useMemo<Array<TableColumn<LorryHire>>>(
     () => [
       {
@@ -954,7 +1110,8 @@ const LorryHirePodModuleInner: React.FC<LorryHirePodModuleProps> = ({
               type="button"
               onClick={() => {
                 setActivePodTarget(h);
-                setPodDate(todayISO());
+                setPodTruckNo(h.truckNo || '');
+                setPodDate(h.podReceiveDate || todayISO());
                 setPodBookedPkgs(h.bookedPkgs != null ? String(h.bookedPkgs) : '');
                 setPodDeliveredPkgs(
                   h.deliveredPkgs != null
@@ -998,6 +1155,35 @@ const LorryHirePodModuleInner: React.FC<LorryHirePodModuleProps> = ({
                   <Printer className="w-3 h-3" />
                   PDF
                 </button>
+              )}
+              {isUnlocked && h.podImageDataUrl && (
+                <>
+                  <button
+                    type="button"
+                    onClick={() => void handlePodPdfAction(h, 'preview')}
+                    className="inline-flex items-center gap-1 px-2 py-1 rounded bg-indigo-50 hover:bg-indigo-100 text-indigo-800 font-semibold cursor-pointer"
+                    title="Preview Binary POD PDF"
+                  >
+                    <Camera className="w-3 h-3" />
+                    POD PDF
+                  </button>
+                  <button
+                    type="button"
+                    onClick={() => void handlePodPdfAction(h, 'whatsapp')}
+                    className="p-1 rounded bg-emerald-50 hover:bg-emerald-100 text-emerald-700 cursor-pointer"
+                    title="Share Pure Binary POD PDF on WhatsApp"
+                  >
+                    <MessageSquare className="w-3.5 h-3.5" />
+                  </button>
+                  <button
+                    type="button"
+                    onClick={() => void handlePodPdfAction(h, 'email')}
+                    className="p-1 rounded bg-sky-50 hover:bg-sky-100 text-sky-700 cursor-pointer"
+                    title="Share Pure Binary POD PDF via Email"
+                  >
+                    <Mail className="w-3.5 h-3.5" />
+                  </button>
+                </>
               )}
               {h.balancePaid ? (
                 <span className="inline-flex items-center gap-1 text-emerald-700 font-bold">
@@ -1405,10 +1591,11 @@ const LorryHirePodModuleInner: React.FC<LorryHirePodModuleProps> = ({
             </div>
             <div>
               <label className="block font-semibold text-slate-700 mb-1">Hire Rate Mode</label>
-              <select
+              <SearchableSelect
+                ariaLabel="Hire Rate Mode"
                 value={rateMode}
-                onChange={(e) => {
-                  const m = e.target.value === 'Per MT' ? 'Per MT' : 'Fixed';
+                onChange={(val) => {
+                  const m = val === 'Per MT' ? 'Per MT' : 'Fixed';
                   setRateMode(m);
                   if (m === 'Per MT') {
                     const wt = Number(weightMt) || 0;
@@ -1420,11 +1607,12 @@ const LorryHirePodModuleInner: React.FC<LorryHirePodModuleProps> = ({
                     }
                   }
                 }}
-                className="w-full px-2 py-1.5 rounded border border-slate-300 bg-white font-semibold"
-              >
-                <option value="Fixed">Fixed Lorry</option>
-                <option value="Per MT">Per MT</option>
-              </select>
+                options={[
+                  { value: 'Fixed', label: 'Fixed Lorry' },
+                  { value: 'Per MT', label: 'Per MT' },
+                ]}
+                triggerClassName="!py-1.5 !font-semibold"
+              />
             </div>
             <div>
               <label className="block font-semibold text-slate-700 mb-1">Rate (₹ / MT)</label>
@@ -1485,15 +1673,17 @@ const LorryHirePodModuleInner: React.FC<LorryHirePodModuleProps> = ({
 
             <div>
               <label className="block font-semibold text-slate-700 mb-1">TDS 194C (%)</label>
-              <select
+              <SearchableSelect
+                ariaLabel="TDS 194C Percentage"
                 value={tdsRatePct}
-                onChange={(e) => handleTdsPctChange(e.target.value)}
-                className="w-full px-2 py-1.5 rounded border border-slate-300 bg-white font-semibold"
-              >
-                <option value="0">0% (194C Decl)</option>
-                <option value="1">1% (Individual/HUF)</option>
-                <option value="2">2% (Company/Firm)</option>
-              </select>
+                onChange={(val) => handleTdsPctChange(val)}
+                options={[
+                  { value: '0', label: '0% (194C Decl)' },
+                  { value: '1', label: '1% (Individual/HUF)' },
+                  { value: '2', label: '2% (Company/Firm)' },
+                ]}
+                triggerClassName="!py-1.5 !font-semibold"
+              />
             </div>
             <div>
               <label className="block font-semibold text-slate-700 mb-1">(-) TDS Amount (₹)</label>
@@ -1597,33 +1787,25 @@ const LorryHirePodModuleInner: React.FC<LorryHirePodModuleProps> = ({
             <div className="flex flex-wrap items-center justify-between gap-2">
               <div className="flex items-center gap-2">
                 <span className="font-bold text-slate-900">ADVANCE PAYMENTS ({activeAdvanceRows.length}/50)</span>
-                <label className="inline-flex items-center gap-1.5 font-semibold text-slate-700">
+                <div className="inline-flex items-center gap-1.5 font-semibold text-slate-700">
                   <span>Multi-Advance:</span>
-                  <select
-                    aria-label="Multi-Advance (Yes/No)"
+                  <SearchableSelect
+                    ariaLabel="Multi-Advance (Yes/No)"
                     value={hasMultiAdvance ? 'Yes' : 'No'}
-                    onChange={(e) => {
-                      const next = e.target.value === 'Yes';
+                    onChange={(val) => {
+                      const next = val === 'Yes';
                       setHasMultiAdvance(next);
                       if (next && advances.length === 0) {
                         setAdvances([DEFAULT_ADVANCE_ROW()]);
                       }
                     }}
-                    onKeyDown={(e) => {
-                      if (e.key === 'y' || e.key === 'Y') {
-                        e.preventDefault();
-                        setHasMultiAdvance(true);
-                      } else if (e.key === 'n' || e.key === 'N') {
-                        e.preventDefault();
-                        setHasMultiAdvance(false);
-                      }
-                    }}
-                    className="px-2 py-0.5 rounded border border-slate-300 bg-white font-bold text-blue-900"
-                  >
-                    <option value="No">No</option>
-                    <option value="Yes">Yes</option>
-                  </select>
-                </label>
+                    options={[
+                      { value: 'No', label: 'No' },
+                      { value: 'Yes', label: 'Yes' },
+                    ]}
+                    triggerClassName="!py-0.5 !px-2 !text-xs !font-bold !text-blue-900 !min-w-[82px]"
+                  />
+                </div>
               </div>
               {hasMultiAdvance && (
                 <button
@@ -2061,6 +2243,22 @@ const LorryHirePodModuleInner: React.FC<LorryHirePodModuleProps> = ({
                   <Upload className="w-4 h-4" />
                   Upload POD Image
                 </button>
+                <button
+                  type="button"
+                  onClick={handleToggleUsbScannerWatch}
+                  disabled={!isFileSystemDirectorySupported()}
+                  className={`inline-flex items-center gap-1.5 px-3 py-2 rounded-lg text-white font-bold cursor-pointer disabled:opacity-50 ${
+                    usbWatcherActive
+                      ? 'bg-amber-600 hover:bg-amber-700'
+                      : 'bg-indigo-700 hover:bg-indigo-800'
+                  }`}
+                  title="Works with HP, Canon, Epson & Brother USB Scanners saving to a folder"
+                >
+                  <Usb className="w-4 h-4" />
+                  {usbWatcherActive
+                    ? `Watching "${usbFolderName}" (Click to Stop)`
+                    : '🔌 Connect Any USB Scanner Folder (Auto-Watch)'}
+                </button>
                 {!driveAccessToken && (
                   <button
                     type="button"
@@ -2073,8 +2271,47 @@ const LorryHirePodModuleInner: React.FC<LorryHirePodModuleProps> = ({
                 )}
               </div>
 
+              {/* USB 300-DPI Auto-Crop + CamScanner Magic Color / B&W Sharp Enhancement Controls */}
+              <div className="flex flex-wrap items-center justify-between gap-2 bg-indigo-50 border border-indigo-200 rounded-lg px-3 py-2">
+                <div className="flex items-center gap-2 text-indigo-950 font-bold">
+                  <Sparkles className="w-4 h-4 text-indigo-600 shrink-0" />
+                  <span>Scanner Engine:</span>
+                  <button
+                    type="button"
+                    onClick={() => setUsbFilterMode('magic_color')}
+                    className={`px-2 py-0.5 rounded border text-[11px] font-bold cursor-pointer ${
+                      usbFilterMode === 'magic_color'
+                        ? 'bg-indigo-700 text-white border-indigo-700'
+                        : 'bg-white text-slate-700 border-slate-300'
+                    }`}
+                  >
+                    Magic Color
+                  </button>
+                  <button
+                    type="button"
+                    onClick={() => setUsbFilterMode('bw_sharp')}
+                    className={`px-2 py-0.5 rounded border text-[11px] font-bold cursor-pointer ${
+                      usbFilterMode === 'bw_sharp'
+                        ? 'bg-slate-900 text-white border-slate-900'
+                        : 'bg-white text-slate-700 border-slate-300'
+                    }`}
+                  >
+                    B&amp;W Sharp
+                  </button>
+                </div>
+                <label className="inline-flex items-center gap-1.5 font-bold text-indigo-900 cursor-pointer">
+                  <input
+                    type="checkbox"
+                    checked={usbAutoCrop}
+                    onChange={(e) => setUsbAutoCrop(e.target.checked)}
+                    className="rounded border-indigo-400"
+                  />
+                  <span>300-DPI Auto-Crop</span>
+                </label>
+              </div>
+
               {podShortageAlert && (
-                <div className="p-3 rounded-lg bg-red-600 text-white font-extrabold flex items-center gap-2 shadow-sm animate-pulse">
+                <div className="p-3 rounded-lg bg-red-600 text-white font-extrabold flex items-center gap-2 shadow-sm">
                   <AlertTriangle className="w-5 h-5 shrink-0" />
                   <span>
                     SHORTAGE / BREAKAGE / LEAKAGE DETECTED ON POD! Verify Delivered Pkgs &amp; Deduction Charges before unlocking payment.
@@ -2095,13 +2332,16 @@ const LorryHirePodModuleInner: React.FC<LorryHirePodModuleProps> = ({
               )}
 
               {podImageUrl && (
-                <div className="border border-slate-200 rounded-lg p-2 bg-slate-50">
+                <div className="border border-slate-200 rounded-lg p-2 bg-slate-50 space-y-1">
                   <img
                     src={podImageUrl}
                     alt="Scanned POD"
                     referrerPolicy="no-referrer"
                     className="max-h-44 mx-auto rounded object-contain"
                   />
+                  <p className="text-[11px] font-mono-num text-center font-bold text-slate-700">
+                    Output PDF: POD_{(podTruckNo.trim() || activePodTarget.truckNo || activePodTarget.cnNo || 'TRUCK').toUpperCase().replace(/[^a-zA-Z0-9_-]/g, '_')}_{formatDateHyphenDDMMYYYY(podDate || todayISO())}.pdf
+                  </p>
                 </div>
               )}
 
@@ -2179,17 +2419,32 @@ const LorryHirePodModuleInner: React.FC<LorryHirePodModuleProps> = ({
                 />
               </div>
 
-              <div>
-                <label className="block font-semibold text-slate-700 mb-1">
-                  POD Receive Date (Mandatory to Unlock Balance Payment) *
-                </label>
-                <input
-                  type="date"
-                  required
-                  value={podDate}
-                  onChange={(e) => setPodDate(e.target.value)}
-                  className="w-full px-3 py-2 rounded border border-slate-300 font-mono-num"
-                />
+              <div className="grid grid-cols-1 sm:grid-cols-2 gap-3 bg-amber-50 border border-amber-200 rounded-lg p-3">
+                <div>
+                  <label className="block font-bold text-amber-950 mb-1">
+                    Truck No (Editable for POD PDF Filename) *
+                  </label>
+                  <input
+                    type="text"
+                    required
+                    value={podTruckNo}
+                    onChange={(e) => setPodTruckNo(e.target.value.toUpperCase())}
+                    placeholder="e.g. WB23D4589"
+                    className="w-full px-3 py-2 rounded border border-amber-300 bg-white font-mono-num font-bold uppercase"
+                  />
+                </div>
+                <div>
+                  <label className="block font-bold text-amber-950 mb-1">
+                    POD Submission / Receive Date *
+                  </label>
+                  <input
+                    type="date"
+                    required
+                    value={podDate}
+                    onChange={(e) => setPodDate(e.target.value)}
+                    className="w-full px-3 py-2 rounded border border-amber-300 bg-white font-mono-num font-bold"
+                  />
+                </div>
               </div>
 
               <div className="flex justify-end gap-2 pt-2 border-t border-slate-200">
@@ -2202,7 +2457,7 @@ const LorryHirePodModuleInner: React.FC<LorryHirePodModuleProps> = ({
                 </button>
                 <button
                   type="button"
-                  disabled={!podImageUrl || !podDate || podUploading}
+                  disabled={!podImageUrl || !podDate || !podTruckNo.trim() || podUploading}
                   onClick={handleSavePodScan}
                   className="px-4 py-2 rounded-lg bg-emerald-600 hover:bg-emerald-700 disabled:opacity-50 text-white font-bold cursor-pointer"
                 >

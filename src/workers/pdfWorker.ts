@@ -35,37 +35,41 @@ async function renderTwinDolphinWatermarkOffscreen(): Promise<string | undefined
     ctx.fillRect(0, 0, canvas.width, canvas.height);
 
     ctx.save();
-    ctx.globalAlpha = 0.095;
+    ctx.globalAlpha = 0.11;
     ctx.strokeStyle = '#1E40AF';
-    ctx.fillStyle = '#60A5FA';
+    ctx.fillStyle = '#3B82F6';
     ctx.lineWidth = 4;
 
-    // Symmetrical 1:1 outer crest ring
+    // Outer circular seal crest
     ctx.beginPath();
     ctx.arc(260, 260, 224, 0, Math.PI * 2);
     ctx.stroke();
 
-    // Twin dolphins inside circular crest (1:1 aspect)
+    // Twin dolphins curving into a heart frame around D.R.C
     ctx.beginPath();
-    ctx.moveTo(116, 295);
-    ctx.bezierCurveTo(106, 180, 178, 118, 248, 150);
-    ctx.bezierCurveTo(212, 172, 182, 225, 174, 300);
+    ctx.moveTo(260, 412);
+    ctx.bezierCurveTo(132, 336, 94, 214, 154, 148);
+    ctx.bezierCurveTo(192, 108, 242, 128, 258, 174);
+    ctx.bezierCurveTo(222, 166, 176, 198, 180, 268);
+    ctx.bezierCurveTo(184, 326, 226, 372, 260, 412);
     ctx.closePath();
     ctx.fill();
 
     ctx.beginPath();
-    ctx.moveTo(404, 295);
-    ctx.bezierCurveTo(414, 180, 342, 118, 272, 150);
-    ctx.bezierCurveTo(308, 172, 338, 225, 346, 300);
+    ctx.moveTo(260, 412);
+    ctx.bezierCurveTo(388, 336, 426, 214, 366, 148);
+    ctx.bezierCurveTo(328, 108, 278, 128, 262, 174);
+    ctx.bezierCurveTo(298, 166, 344, 198, 340, 268);
+    ctx.bezierCurveTo(336, 326, 294, 372, 260, 412);
     ctx.closePath();
     ctx.fill();
 
-    ctx.font = '900 58px Arial, sans-serif';
+    ctx.font = '900 54px Georgia, serif';
     ctx.textAlign = 'center';
     ctx.fillStyle = '#1E3A8A';
-    ctx.fillText('D.R.C', 260, 338);
-    ctx.font = 'bold 20px Arial, sans-serif';
-    ctx.fillText('DOLPHIN ROAD CARRIERS', 260, 370);
+    ctx.fillText('D.R.C', 260, 278);
+    ctx.font = 'bold 19px Arial, sans-serif';
+    ctx.fillText('DOLPHIN ROAD CARRIERS', 260, 314);
     ctx.restore();
 
     const blob = await canvas.convertToBlob({ type: 'image/jpeg', quality: 0.85 });

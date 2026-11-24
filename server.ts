@@ -1617,6 +1617,142 @@ app.post('/api/gemini/mis-advice', async (req, res) => {
   }
 });
 
+app.post('/api/gemini/system-doctor', async (req, res) => {
+  try {
+    const { divisionMetrics, formulaFixesApplied, remainingAnomalies, runtimeErrors, activeFy } = req.body as {
+      divisionMetrics?: Record<string, unknown>;
+      formulaFixesApplied?: string[];
+      remainingAnomalies?: string[];
+      runtimeErrors?: Array<{ message?: string; source?: string; at?: number }>;
+      activeFy?: string;
+    };
+
+    const ai = getGeminiClient();
+    const response = await ai.models.generateContent({
+      model: 'gemini-4-hydrogen',
+      contents: [
+        `Dolphin Road Carriers ERP — System Doctor Diagnostic Context (${activeFy || 'FY 2026-27'}):`,
+        `Division Metrics:\n${JSON.stringify(divisionMetrics ?? {}, null, 2)}`,
+        `Deterministic Formula Repairs Applied:\n${JSON.stringify(formulaFixesApplied ?? [], null, 2)}`,
+        `Remaining Accounting / Data Anomalies:\n${JSON.stringify(remainingAnomalies ?? [], null, 2)}`,
+        `Captured Runtime Client Errors:\n${JSON.stringify((runtimeErrors ?? []).slice(-20), null, 2)}`,
+        'Return a structured bilingual English + Bengali (বাংলা) system health audit and actionable fix guide.',
+      ].join('\n\n'),
+      config: {
+        thinkingConfig: { thinkingLevel: ThinkingLevel.HIGH },
+        responseMimeType: 'application/json',
+        responseSchema: {
+          type: Type.OBJECT,
+          properties: {
+            healthScore: { type: Type.NUMBER, description: '0 to 100 overall ERP integrity score' },
+            statusLabel: { type: Type.STRING, description: 'e.g. 100% Error-Free | Auto-Healed | Attention Needed' },
+            summaryEn: { type: Type.STRING },
+            summaryBn: { type: Type.STRING },
+            fixesAppliedEn: { type: Type.ARRAY, items: { type: Type.STRING } },
+            fixesAppliedBn: { type: Type.ARRAY, items: { type: Type.STRING } },
+            recommendationsEn: { type: Type.ARRAY, items: { type: Type.STRING } },
+            recommendationsBn: { type: Type.ARRAY, items: { type: Type.STRING } },
+          },
+          required: [
+            'healthScore',
+            'statusLabel',
+            'summaryEn',
+            'summaryBn',
+            'fixesAppliedEn',
+            'fixesAppliedBn',
+            'recommendationsEn',
+            'recommendationsBn',
+          ],
+        },
+      },
+    });
+
+    const parsed = JSON.parse((response.text ?? '{}').trim());
+    res.json({ data: parsed });
+  } catch (err) {
+    const message = err instanceof Error ? err.message : 'Failed to run Gemini System Doctor';
+    console.error('Gemini System Doctor error:', message);
+    res.status(500).json({ error: message });
+  }
+});
+
+app.post('/api/gemini/ocr-kyc', async (req, res) => {
+  try {
+    const { imageBase64, mimeType, entityRole, tesseractText } = req.body as {
+      imageBase64?: string;
+      mimeType?: string;
+      entityRole?: string;
+      tesseractText?: string;
+    };
+
+    if (!imageBase64 && !tesseractText) {
+      res.status(400).json({ error: 'Provide a KYC document image or OCR text.' });
+      return;
+    }
+
+    const ai = getGeminiClient();
+    const parts: Array<{ text: string } | { inlineData: { mimeType: string; data: string } }> = [];
+
+    if (imageBase64 && mimeType) {
+      parts.push({ inlineData: { mimeType, data: imageBase64 } });
+    }
+
+    parts.push({
+      text: [
+        `Extract Indian Transport KYC & Compliance fields for entity role: ${entityRole || 'Driver/Broker/Owner/Vehicle'}.`,
+        'Document may be Driving License (DL), Aadhaar Card, PAN Card, GST Certificate, Trade License, Truck RC Book, Insurance Policy, Permit, Fitness, Road Tax, PUC, or Bank Passbook/Cancelled Cheque.',
+        'Normalize all dates strictly to YYYY-MM-DD, truckNo uppercase without spaces (e.g. WB51B0800), PAN 10-char uppercase, GSTIN 15-char uppercase, IFSC 11-char uppercase, Aadhaar 12 digits.',
+        tesseractText ? `Tesseract OCR text hint:\n${tesseractText}` : '',
+      ]
+        .filter(Boolean)
+        .join('\n\n'),
+    });
+
+    const response = await ai.models.generateContent({
+      model: 'gemini-4-hydrogen',
+      contents: { parts },
+      config: {
+        thinkingConfig: { thinkingLevel: ThinkingLevel.HIGH },
+        responseMimeType: 'application/json',
+        responseSchema: {
+          type: Type.OBJECT,
+          properties: {
+            name: { type: Type.STRING },
+            phone: { type: Type.STRING },
+            address: { type: Type.STRING },
+            pinCode: { type: Type.STRING },
+            panNo: { type: Type.STRING },
+            gstin: { type: Type.STRING },
+            aadhaarNo: { type: Type.STRING },
+            dlNo: { type: Type.STRING },
+            dlExpiry: { type: Type.STRING },
+            tradeLicenseNo: { type: Type.STRING },
+            bankName: { type: Type.STRING },
+            bankAccountNo: { type: Type.STRING },
+            bankIfsc: { type: Type.STRING },
+            truckNo: { type: Type.STRING },
+            engineNo: { type: Type.STRING },
+            chassisNo: { type: Type.STRING },
+            ownerName: { type: Type.STRING },
+            fitnessExpiry: { type: Type.STRING },
+            insuranceExpiry: { type: Type.STRING },
+            permitExpiry: { type: Type.STRING },
+            roadTaxExpiry: { type: Type.STRING },
+            pucExpiry: { type: Type.STRING },
+          },
+        },
+      },
+    });
+
+    const parsed = JSON.parse((response.text ?? '{}').trim());
+    res.json({ data: parsed });
+  } catch (err) {
+    const message = err instanceof Error ? err.message : 'Failed to parse KYC document';
+    console.error('OCR KYC error:', message);
+    res.status(500).json({ error: message });
+  }
+});
+
 async function startServer() {
   const PORT = Number(process.env.PORT || 3000);
   const isProd = process.env.NODE_ENV === 'production';

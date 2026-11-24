@@ -1376,16 +1376,21 @@ export const GstFilingHubModule: React.FC<GstFilingHubModuleProps> = ({
                 </label>
                 <div className="inline-flex items-center gap-1.5">
                   <span className="font-bold text-slate-600">ITC Slab %:</span>
-                  <select
-                    value={itcRatePct}
-                    onChange={(e) => setItcRatePct(Number(e.target.value))}
-                    className="px-2 py-1 rounded border border-slate-300 font-bold text-xs bg-white"
-                  >
-                    <option value={18}>18% Standard</option>
-                    <option value={12}>12% Transport/Machinery</option>
-                    <option value={5}>5% Basic</option>
-                    <option value={0}>0% Exempt / None</option>
-                  </select>
+                  <div className="w-44">
+                    <SearchableSelect
+                      ariaLabel="ITC Slab Percentage"
+                      value={String(itcRatePct)}
+                      onChange={(val) => setItcRatePct(Number(val))}
+                      sortAlphabetically={false}
+                      options={[
+                        { value: '18', label: '18% Standard' },
+                        { value: '12', label: '12% Transport/Machinery' },
+                        { value: '5', label: '5% Basic' },
+                        { value: '0', label: '0% Exempt / None' },
+                      ]}
+                      buttonClassName="!py-1 !text-xs !font-bold"
+                    />
+                  </div>
                 </div>
               </div>
             </div>

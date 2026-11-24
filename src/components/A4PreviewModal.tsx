@@ -13,9 +13,10 @@ import {
 import { GeneratedPdfResult } from '../lib/pdfEngine';
 import { PdfOrientation } from '../lib/pdfBuilders';
 import { sharePdfDirect } from '../lib/shareUtils';
-import { isLogisticsDriveFolder } from '../lib/driveBackup';
+import { isLogisticsDriveFolder, isPdfVaultFolder } from '../lib/driveBackup';
 import { OFFICIAL_PARTY_EMAIL } from '../lib/firebase';
 import { AnyDriveFolderName, BillCopyCount, CompanySettings, Party } from '../types/erp';
+import { SearchableSelect } from './SearchableSelect';
 
 interface A4PreviewModalProps {
   pdf: GeneratedPdfResult | null;
@@ -107,7 +108,9 @@ export const A4PreviewModal: React.FC<A4PreviewModalProps> = ({
       await onSaveToDrive(pdf, driveFolder);
       const rootLabel = isLogisticsDriveFolder(driveFolder)
         ? 'DOLPHIN_LOGISTICS_DIVISION_BACKUP'
-        : 'DOLPHIN_ROAD_CARRIERS_MASTER';
+        : isPdfVaultFolder(driveFolder)
+          ? 'DOLPHIN_ROAD_CARRIERS_MASTER / PDF_VAULT'
+          : 'DOLPHIN_ROAD_CARRIERS_MASTER';
       setUploadMsg(`Saved to Google Drive / ${rootLabel} / ${driveFolder} (${pdf.sizeKB} KB)`);
     } catch (err) {
       setUploadMsg(err instanceof Error ? err.message : 'Drive upload failed');
@@ -162,18 +165,22 @@ export const A4PreviewModal: React.FC<A4PreviewModalProps> = ({
           </div>
           <div className="flex flex-wrap items-center gap-1.5 sm:gap-2 shrink-0">
             {pdf.rebuildWithCopyCount && onReplacePdf && (
-              <select
-                aria-label="Bill Copy Selector"
-                disabled={switchingCopies}
-                value={pdf.copyCount || 1}
-                onChange={(e) => void handleCopyCountChange(Number(e.target.value) as BillCopyCount)}
-                className="px-2.5 py-1.5 rounded-lg bg-white text-[#0D47A1] text-[11px] font-bold border border-blue-200 focus:outline-none cursor-pointer"
-              >
-                <option value={1}>1 Copy (Original)</option>
-                <option value={2}>2 Copies (Original + Office)</option>
-                <option value={3}>3 Copies (Orig + Transp + Office)</option>
-                <option value={4}>4 Copies (All)</option>
-              </select>
+              <div className="w-44">
+                <SearchableSelect
+                  ariaLabel="Bill Copy Selector"
+                  disabled={switchingCopies}
+                  value={String(pdf.copyCount || 1)}
+                  onChange={(val) => void handleCopyCountChange(Number(val) as BillCopyCount)}
+                  sortAlphabetically={false}
+                  options={[
+                    { value: '1', label: '1 Copy (Original)' },
+                    { value: '2', label: '2 Copies (Original + Office)' },
+                    { value: '3', label: '3 Copies (Orig + Transp + Office)' },
+                    { value: '4', label: '4 Copies (All)' },
+                  ]}
+                  buttonClassName="!py-1.5 !bg-white !text-[#0D47A1] !text-[11px] !font-bold !border-blue-200"
+                />
+              </div>
             )}
 
             {pdf.rebuildWithOrientation && onReplacePdf && (
@@ -227,7 +234,7 @@ export const A4PreviewModal: React.FC<A4PreviewModalProps> = ({
               type="button"
               onClick={() => void handleShareWhatsApp()}
               className="inline-flex items-center gap-1.5 px-3 py-1.5 rounded-lg bg-green-600 hover:bg-green-700 text-white text-xs font-semibold transition-colors whitespace-nowrap cursor-pointer"
-              title="Share PDF directly on WhatsApp"
+              title="Share pure binary .pdf file directly on WhatsApp"
             >
               <MessageCircle className="w-3.5 h-3.5" />
               WhatsApp PDF
@@ -236,7 +243,7 @@ export const A4PreviewModal: React.FC<A4PreviewModalProps> = ({
               type="button"
               onClick={() => void handleShareEmail()}
               className="inline-flex items-center gap-1.5 px-3 py-1.5 rounded-lg bg-sky-600 hover:bg-sky-700 text-white text-xs font-semibold transition-colors whitespace-nowrap cursor-pointer"
-              title="Share PDF via Email"
+              title="Share pure binary .pdf file via Email"
             >
               <Mail className="w-3.5 h-3.5" />
               Email PDF

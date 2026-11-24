@@ -632,3 +632,127 @@ export async function scanPODDocument(
     compressedDataUrl: dataUrl,
   };
 }
+
+export interface ScannedKYCResult {
+  name?: string;
+  phone?: string;
+  address?: string;
+  pinCode?: string;
+  panNo?: string;
+  gstin?: string;
+  aadhaarNo?: string;
+  dlNo?: string;
+  dlExpiry?: string;
+  tradeLicenseNo?: string;
+  bankName?: string;
+  bankAccountNo?: string;
+  bankIfsc?: string;
+  truckNo?: string;
+  engineNo?: string;
+  chassisNo?: string;
+  ownerName?: string;
+  fitnessExpiry?: string;
+  insuranceExpiry?: string;
+  permitExpiry?: string;
+  roadTaxExpiry?: string;
+  pucExpiry?: string;
+  rawTesseractText?: string;
+  dataUrl?: string;
+}
+
+function normalizeDdMmYyyyToIso(raw: string): string {
+  const m = raw.match(/(\d{2})[\/\-](\d{2})[\/\-](\d{4})/);
+  if (!m) return '';
+  return `${m[3]}-${m[2]}-${m[1]}`;
+}
+
+function fallbackRegexParseKYC(rawText: string): ScannedKYCResult {
+  const gstMatch = rawText.match(/\b\d{2}[A-Z]{5}\d{4}[A-Z][1-9A-Z]Z[0-9A-Z]\b/i);
+  const panMatch = rawText.match(/\b[A-Z]{5}\d{4}[A-Z]\b/i);
+  const aadhaarMatch = rawText.match(/\b\d{4}[\s\-]?\d{4}[\s\-]?\d{4}\b/);
+  const ifscMatch = rawText.match(/\b[A-Z]{4}0[A-Z0-9]{6}\b/i);
+  const phoneMatch = rawText.match(/(?:\+?91[\s\-]?)?([6-9]\d{9})\b/);
+  const pinMatch = rawText.match(/\b[1-8]\d{5}\b/);
+  const rcMatch = rawText.match(/\b[A-Z]{2}\s*\d{1,2}\s*[A-Z]{1,3}\s*\d{3,4}\b/i);
+  const dlMatch = rawText.match(/\b[A-Z]{2}[\s\-]?\d{2}[\s\-]?\d{4,11}\b/i);
+  const acctMatch = rawText.match(/(?:a\/c|acc(?:ount)?(?:\s*no)?)\s*[:\-]?\s*(\d{9,18})/i);
+  const expiryLine = rawText.match(/(?:valid\s*(?:till|upto)|expiry|exp)\s*[:\-]?\s*(\d{2}[\/\-]\d{2}[\/\-]\d{4})/i);
+
+  return {
+    gstin: gstMatch ? gstMatch[0].toUpperCase() : '',
+    panNo: panMatch ? panMatch[0].toUpperCase() : '',
+    aadhaarNo: aadhaarMatch ? aadhaarMatch[0].replace(/\D/g, '') : '',
+    bankIfsc: ifscMatch ? ifscMatch[0].toUpperCase() : '',
+    bankAccountNo: acctMatch ? acctMatch[1] : '',
+    phone: phoneMatch ? phoneMatch[1] : '',
+    pinCode: pinMatch ? pinMatch[0] : '',
+    truckNo: rcMatch ? rcMatch[0].replace(/\s+/g, '').toUpperCase() : '',
+    dlNo: dlMatch ? dlMatch[0].replace(/\s+/g, '').toUpperCase() : '',
+    dlExpiry: expiryLine ? normalizeDdMmYyyyToIso(expiryLine[1]) : '',
+    rawTesseractText: rawText,
+  };
+}
+
+export async function extractKycFieldsFromDocument(params: {
+  fileOrDataUrl: File | string;
+  entityRole: 'Driver' | 'Broker' | 'Lorry Owner' | 'Vehicle';
+  onStatus?: (msg: string) => void;
+}): Promise<ScannedKYCResult> {
+  let dataUrl = '';
+  let base64 = '';
+  let mimeType = 'image/jpeg';
+
+  if (typeof params.fileOrDataUrl === 'string') {
+    dataUrl = params.fileOrDataUrl;
+    base64 = dataUrl.split(',')[1] || '';
+  } else {
+    params.onStatus?.('Normalizing & compressing KYC scan...');
+    const res = await autoRotateAndCompressImage(params.fileOrDataUrl, 1600, 0.84);
+    dataUrl = res.dataUrl;
+    base64 = res.base64;
+    mimeType = res.mimeType;
+  }
+
+  let rawText = '';
+  try {
+    params.onStatus?.('Running local Tesseract OCR on KYC document...');
+    rawText = await runTesseractOCR(dataUrl);
+  } catch {
+    rawText = '';
+  }
+
+  try {
+    params.onStatus?.(`Extracting ${params.entityRole} KYC fields via AI...`);
+    const resp = await fetch('/api/gemini/ocr-kyc', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({
+        imageBase64: base64,
+        mimeType,
+        entityRole: params.entityRole,
+        tesseractText: rawText,
+      }),
+    });
+    if (resp.ok) {
+      const json = (await resp.json()) as { data?: ScannedKYCResult };
+      if (json.data) {
+        return {
+          ...fallbackRegexParseKYC(rawText),
+          ...Object.fromEntries(
+            Object.entries(json.data).filter(([, v]) => typeof v === 'string' && v.trim() !== '')
+          ),
+          rawTesseractText: rawText,
+          dataUrl,
+        };
+      }
+    }
+  } catch {
+    // Offline fallback below
+  }
+
+  return {
+    ...fallbackRegexParseKYC(rawText),
+    dataUrl,
+  };
+}
+

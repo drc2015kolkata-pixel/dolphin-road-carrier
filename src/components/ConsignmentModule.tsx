@@ -88,6 +88,7 @@ import {
   formatVehicleDetailsLine,
   RichEntityPicker,
 } from './RichEntityPicker';
+import { deleteIdbObject, loadIdbObject, saveIdbObject } from '../lib/indexedDbStore';
 
 interface ConsignmentModuleProps {
   ownerUid: string;
@@ -320,6 +321,8 @@ const ConsignmentModuleInner: React.FC<ConsignmentModuleProps> = ({
   const [saving, setSaving] = useState(false);
   const [search, setSearch] = useState('');
   const debouncedSearch = useDebouncedValue(search, 200);
+  const lrDraftHydratedRef = useRef(false);
+  const FTL_LR_DRAFT_KEY = 'drc_draft_lr_ftl_v1';
 
   // Live Dropdown Master Lists (Firestore synced)
   const branchDropdownOptions = useMemo(() => {
@@ -389,6 +392,114 @@ const ConsignmentModuleInner: React.FC<ConsignmentModuleProps> = ({
       setCnNo(`${branchPrefix}-${147 + consignments.length}/${fyShort}`);
     }
   }, [activeFy, branchPrefix, consignments.length, editingId, fyShort]);
+
+  useEffect(() => {
+    let cancelled = false;
+    void loadIdbObject<Record<string, unknown>>(FTL_LR_DRAFT_KEY).then((draft) => {
+      lrDraftHydratedRef.current = true;
+      if (cancelled || !draft || editingId) return;
+      if (typeof draft.cnNo === 'string' && draft.cnNo.trim()) setCnNo(draft.cnNo);
+      if (typeof draft.cnDate === 'string' && draft.cnDate) setCnDate(draft.cnDate);
+      if (typeof draft.billedAtBranch === 'string' && draft.billedAtBranch) setBilledAtBranch(draft.billedAtBranch);
+      if (typeof draft.billingPartyName === 'string') setBillingPartyName(draft.billingPartyName);
+      if (typeof draft.creditDaysOption === 'string') setCreditDaysOption(draft.creditDaysOption);
+      if (typeof draft.consignorName === 'string') setConsignorName(draft.consignorName);
+      if (typeof draft.consignorAddress === 'string') setConsignorAddress(draft.consignorAddress);
+      if (typeof draft.consignorGstin === 'string') setConsignorGstin(draft.consignorGstin);
+      if (typeof draft.consigneeName === 'string') setConsigneeName(draft.consigneeName);
+      if (typeof draft.consigneeAddress === 'string') setConsigneeAddress(draft.consigneeAddress);
+      if (typeof draft.consigneeGstin === 'string') setConsigneeGstin(draft.consigneeGstin);
+      if (typeof draft.truckNo === 'string') setTruckNo(draft.truckNo);
+      if (typeof draft.fromCity === 'string' && draft.fromCity) setFromCity(draft.fromCity);
+      if (typeof draft.toCity === 'string') setToCity(draft.toCity);
+      if (typeof draft.packages === 'string') setPackages(draft.packages);
+      if (typeof draft.particulars === 'string') setParticulars(draft.particulars);
+      if (typeof draft.nettWeight === 'string') setNettWeight(draft.nettWeight);
+      if (typeof draft.rateMode === 'string') setRateMode(draft.rateMode);
+      if (typeof draft.ratePerUnit === 'string') setRatePerUnit(draft.ratePerUnit);
+      if (typeof draft.totalFreight === 'string') setTotalFreight(draft.totalFreight);
+      if (typeof draft.ewayBillNo === 'string') setEwayBillNo(draft.ewayBillNo);
+      if (typeof draft.driverName === 'string') setDriverName(draft.driverName);
+      if (typeof draft.driverMobile === 'string') setDriverMobile(draft.driverMobile);
+      if (typeof draft.remarks === 'string') setRemarks(draft.remarks);
+      if (draft.billingPartyName || draft.consignorName || draft.toCity || draft.truckNo) {
+        setOcrStatus('Restored unsaved LR / Consignment draft cleanly after refresh.');
+      }
+    });
+    return () => {
+      cancelled = true;
+    };
+  }, []);
+
+  useEffect(() => {
+    if (!lrDraftHydratedRef.current || editingId) return;
+    const hasInput = Boolean(
+      billingPartyName.trim() ||
+        consignorName.trim() ||
+        consigneeName.trim() ||
+        toCity.trim() ||
+        truckNo.trim() ||
+        ewayBillNo.trim() ||
+        Number(totalFreight || 0) > 0
+    );
+    if (!hasInput) return;
+    const timer = window.setTimeout(() => {
+      void saveIdbObject(FTL_LR_DRAFT_KEY, {
+        cnNo,
+        cnDate,
+        billedAtBranch,
+        billingPartyName,
+        creditDaysOption,
+        consignorName,
+        consignorAddress,
+        consignorGstin,
+        consigneeName,
+        consigneeAddress,
+        consigneeGstin,
+        truckNo,
+        fromCity,
+        toCity,
+        packages,
+        particulars,
+        nettWeight,
+        rateMode,
+        ratePerUnit,
+        totalFreight,
+        ewayBillNo,
+        driverName,
+        driverMobile,
+        remarks,
+        savedAt: Date.now(),
+      });
+    }, 350);
+    return () => window.clearTimeout(timer);
+  }, [
+    editingId,
+    cnNo,
+    cnDate,
+    billedAtBranch,
+    billingPartyName,
+    creditDaysOption,
+    consignorName,
+    consignorAddress,
+    consignorGstin,
+    consigneeName,
+    consigneeAddress,
+    consigneeGstin,
+    truckNo,
+    fromCity,
+    toCity,
+    packages,
+    particulars,
+    nettWeight,
+    rateMode,
+    ratePerUnit,
+    totalFreight,
+    ewayBillNo,
+    driverName,
+    driverMobile,
+    remarks,
+  ]);
 
   const indexedCNs = useMemo(() => {
     const sorted = [...consignments].sort((a, b) => (b.cnDate || '').localeCompare(a.cnDate || ''));
@@ -999,6 +1110,7 @@ const ConsignmentModuleInner: React.FC<ConsignmentModuleProps> = ({
     setScannedLrDataUrl('');
     setOcrMissingFields([]);
     setOcrFyMismatch(null);
+    void deleteIdbObject('drc_draft_lr_ftl_v1');
   };
 
   const handleLoadForEdit = (cn: ConsignmentNote) => {
@@ -1344,6 +1456,7 @@ const ConsignmentModuleInner: React.FC<ConsignmentModuleProps> = ({
         ownerUid,
       });
 
+      await deleteIdbObject('drc_draft_lr_ftl_v1');
       resetForm();
       if (andSendToBilling) {
         onSendCnToInvoice({ id, ...payload });

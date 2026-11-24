@@ -11,13 +11,16 @@ import {
   LogisticsInvoice,
   LogisticsManifest,
   Quotation,
+  getLogisticsDivisionFromId,
 } from '../types/erp';
 import {
   amountToIndianWords,
   formatDateDDMMYYYY,
+  formatDateHyphenDDMMYYYY,
   formatINR,
   getDynamicFinancialYear,
   sanitizeFileName,
+  todayISO,
 } from './formatters';
 
 export type PdfOrientation = 'p' | 'l';
@@ -143,6 +146,29 @@ export type PdfTaskPayload =
       pages: string[];
       title: string;
       fileName: string;
+      company: CompanySettings;
+      orientation?: PdfOrientation;
+      assets: PdfAssets;
+    }
+  | {
+      kind: 'podScan';
+      imageDataUrl: string;
+      truckNo: string;
+      cnNo?: string;
+      podDate: string;
+      remarks?: string;
+      partyName?: string;
+      division?: string;
+      company: CompanySettings;
+      orientation?: PdfOrientation;
+      assets: PdfAssets;
+    }
+  | {
+      kind: 'entityKyc';
+      role: 'Driver' | 'Broker' | 'Lorry Owner' | 'Vehicle';
+      recordName: string;
+      fields: Array<{ label: string; value: string }>;
+      attachedImageDataUrl?: string;
       company: CompanySettings;
       orientation?: PdfOrientation;
       assets: PdfAssets;
@@ -323,16 +349,10 @@ function drawTopLeftLogo(doc: jsPDF, assets: PdfAssets | undefined, x: number, y
       );
       return;
     } catch {
-      // Fallback to crisp vector triangle logo below
+      // Fallback to crisp vector Royal Blue Dolphin Ring logo below
     }
   }
-  // Vector triangular DRC fallback inside worker if raster asset unavailable
-  doc.setFillColor(13, 71, 161);
-  doc.triangle(x + w / 2, y + 1, x + 1, y + h - 1, x + w - 1, y + h - 1, 'F');
-  doc.setTextColor(255, 255, 255);
-  doc.setFont('helvetica', 'bold');
-  doc.setFontSize(8);
-  doc.text('DRC', x + w / 2, y + h - 4, { align: 'center' });
+  drawInvoiceCircularRoadLogo(doc, x, y, w, h);
 }
 
 /**
@@ -560,6 +580,12 @@ export function buildPdfArrayBuffer(task: PdfTaskPayload): {
   if (task.kind === 'logisticsInvoice') {
     return buildLogisticsInvoiceDoc(task.invoice, task.company, task.assets, task.orientation || 'p');
   }
+  if (task.kind === 'podScan') {
+    return buildPodScanDoc(task);
+  }
+  if (task.kind === 'entityKyc') {
+    return buildEntityKycDoc(task);
+  }
   if (task.kind === 'appBlueprint') {
     return buildAppFormatBlueprintDoc(task.company, task.assets, task.orientation || 'p');
   }
@@ -650,8 +676,8 @@ function buildInvoiceDoc(
 
     drawOuterBorder();
 
-    // TOP-LEFT Blue-White Circular Road D.R.C Logo inside 8mm outer border
-    drawInvoiceCircularRoadLogo(doc, M + 2.5, M + 2.5, 21, 21);
+    // TOP-LEFT Royal Blue Dolphin Ring + D.R.C Logo inside 8mm outer border
+    drawTopLeftLogo(doc, assets, M + 2.5, M + 2.5, 21, 21);
 
     // TOP-RIGHT HEADER VERIFY QR (Strictly in top-right header corner, never side-by-side with UPI QR)
     const verifyPayload = `DRC|INV|${invoice.invoiceNo || ''}|${invoice.invoiceDate || ''}|${Number(invoice.grandTotal || 0).toFixed(2)}|${invoice.partyGstin || invoice.partyPan || 'NA'}|${company.gstin || ''}`;
@@ -671,10 +697,14 @@ function buildInvoiceDoc(
     doc.text(copyLabel, badgeX + badgeW / 2, badgeY + 3.9, { align: 'center' });
 
     const headerTextMaxW = cw - 26 - 68;
+    const invDivTag =
+      invoice.division && invoice.division !== 'FTL'
+        ? ` (${String(invoice.division).toUpperCase()} DIVISION)`
+        : '';
     doc.setTextColor(15, 76, 129);
     doc.setFont('helvetica', 'bold');
     doc.setFontSize(13.2);
-    doc.text(String(company.companyName || 'DOLPHIN ROAD CARRIER'), M + 26, M + 7);
+    doc.text(`${String(company.companyName || 'DOLPHIN ROAD CARRIER')}${invDivTag}`, M + 26, M + 7);
 
     doc.setTextColor(30, 41, 59);
     doc.setFont('helvetica', 'normal');
@@ -1042,8 +1072,9 @@ function buildInvoiceDoc(
       const annPages = Math.ceil(annexRows.length / ANN_PER_PAGE);
       for (let ap = 0; ap < annPages; ap++) {
         doc.addPage();
+        drawCenteredWatermark(doc, assets, company.companyName || 'DOLPHIN ROAD CARRIER');
         drawOuterBorder();
-        drawInvoiceCircularRoadLogo(doc, M + 2.5, M + 2.5, 19, 19);
+        drawTopLeftLogo(doc, assets, M + 2.5, M + 2.5, 19, 19);
         doc.setTextColor(15, 76, 129);
         doc.setFont('helvetica', 'bold');
         doc.setFontSize(12.5);
@@ -1086,10 +1117,11 @@ function buildInvoiceDoc(
 
   stampAllPageNumbers(doc, 'THIS IS A SYSTEM GENERATED PRINT AUTHORISED BY DOLPHIN ROAD CARRIER.', M, 3.8);
 
+  const billDateTag = formatDateHyphenDDMMYYYY(invoice.invoiceDate || todayISO());
   return {
     buffer: doc.output('arraybuffer'),
-    fileName: `${sanitizeFileName(invoice.partyName)}_${sanitizeFileName(invoice.invoiceNo)}_${copyCount}Copy.pdf`,
-    title: `Tax Invoice - ${invoice.invoiceNo} (${copyCount} ${copyCount === 1 ? 'Copy' : 'Copies'})`,
+    fileName: `${sanitizeFileName(invoice.partyName || 'Party')}_${sanitizeFileName(invoice.invoiceNo || 'Bill')}_${billDateTag}.pdf`,
+    title: `${invoice.docKind || 'Tax Invoice'} - ${invoice.invoiceNo} (${copyCount} ${copyCount === 1 ? 'Copy' : 'Copies'})`,
     orientation,
     copyCount,
   };
@@ -1168,16 +1200,20 @@ function buildLR3CopyDoc(
     doc.setFontSize(7.2);
     doc.setTextColor(30, 41, 59);
     doc.text(`GSTIN : ${company.gstin}   |   PAN : ${company.pan}`, x0 + 3, y0 + 4.5);
+    const divBadge =
+      cn.division && cn.division !== 'FTL'
+        ? `   [${String(cn.division).toUpperCase()} DIVISION]`
+        : '';
     doc.text(
-      `${cn.stockTransfer ? '!! OM SAI RAM !!   [STOCK TRANSFER]' : '!! OM SAI RAM !!'}${cn.division === 'LOGISTICS' ? '   [LOGISTICS DIVISION]' : ''}`,
+      `${cn.stockTransfer ? '!! OM SAI RAM !!   [STOCK TRANSFER]' : '!! OM SAI RAM !!'}${divBadge}`,
       x0 + cw / 2,
       y0 + 4.5,
       { align: 'center' }
     );
     doc.text(`Subhajit Saha · Mob: ${company.phones}`, x0 + cw - 3, y0 + 4.5, { align: 'right' });
 
-    // TOP-LEFT Bilty Yellow-Background Red/Blue Oval Truck "DRC" + "!! OM SAI RAM !!" Logo
-    drawBiltyYellowTruckLogo(doc, x0 + 3, y0 + 7.5, 22, 20);
+    // TOP-LEFT Royal Blue Dolphin Ring + D.R.C Logo (identical across all 4 divisions)
+    drawTopLeftLogo(doc, assets, x0 + 3, y0 + 7.5, 21, 21);
 
     doc.setTextColor(175, 25, 25);
     doc.setFont('helvetica', 'bold');
@@ -1469,6 +1505,7 @@ function buildLR3CopyDoc(
   // Continuation Schedule Page ONLY if extensive multi-item schedule (>4 vehicles / >3 invoices / >3 EWBs)
   if (hasOverflowSchedule) {
     doc.addPage();
+    drawCenteredWatermark(doc, assets, company.companyName || 'DOLPHIN ROAD CARRIER');
     drawTopLeftLogo(doc, assets, SAFE_MARGIN, SAFE_MARGIN, 20, 20);
     doc.setTextColor(15, 76, 129);
     doc.setFont('helvetica', 'bold');
@@ -1503,6 +1540,7 @@ function buildLR3CopyDoc(
     allInvoices.forEach((invRow, i) => {
       if (sy > ph - 36) {
         doc.addPage();
+        drawCenteredWatermark(doc, assets, company.companyName || 'DOLPHIN ROAD CARRIER');
         sy = SAFE_MARGIN + 14;
       }
       doc.text(
@@ -1523,6 +1561,7 @@ function buildLR3CopyDoc(
     allEwbs.forEach((ewbRow, i) => {
       if (sy > ph - 36) {
         doc.addPage();
+        drawCenteredWatermark(doc, assets, company.companyName || 'DOLPHIN ROAD CARRIER');
         sy = SAFE_MARGIN + 14;
       }
       doc.text(
@@ -1538,9 +1577,10 @@ function buildLR3CopyDoc(
 
   stampAllPageNumbers(doc, `Bilty / LR ${cn.cnNo} — Dolphin Road Carrier`);
 
+  const lrDateTag = formatDateHyphenDDMMYYYY(cn.cnDate || todayISO());
   return {
     buffer: doc.output('arraybuffer'),
-    fileName: `LR_${sanitizeFileName(cn.cnNo)}_4Copies.pdf`,
+    fileName: `${sanitizeFileName(cn.consigneeName || cn.billingPartyName || 'Consignee')}_${sanitizeFileName(cn.cnNo || 'LR')}_${lrDateTag}.pdf`,
     title: `Consignment Note (4 Copies) - ${cn.cnNo}`,
     orientation,
   };
@@ -1618,7 +1658,9 @@ function buildQuotationDoc(
   doc.text(quote.validityText || '7 Days', pw - SAFE_MARGIN, SAFE_MARGIN + 62, { align: 'right' });
 
   const rows: Array<[string, string]> = [
-    ...(quote.division === 'LOGISTICS' ? [['Division', 'LOGISTICS DIVISION'] as [string, string]] : []),
+    ...(quote.division && quote.division !== 'FTL'
+      ? [['Division', `${String(quote.division).toUpperCase()} DIVISION`] as [string, string]]
+      : []),
     ['Vehicle Type', quote.vehicleType || '-'],
     ...(quote.goodsType ? [['Goods Type', quote.goodsType] as [string, string]] : []),
     ['Freight', `Rs. ${formatINR(quote.freight || 0)}${quote.rateMode ? ` (${quote.rateMode})` : ''}`],
@@ -1658,6 +1700,7 @@ function buildQuotationDoc(
   ty += 3.5;
   if (ty + 76 > ph - 10) {
     doc.addPage();
+    drawCenteredWatermark(doc, assets, 'D.R.C QUOTATION');
     ty = SAFE_MARGIN + 10;
   }
 
@@ -1875,9 +1918,10 @@ function buildQuotationDoc(
 
   stampAllPageNumbers(doc);
 
+  const quoteDateTag = formatDateHyphenDDMMYYYY(quote.quotationDate || todayISO());
   return {
     buffer: doc.output('arraybuffer'),
-    fileName: `Quotation_${sanitizeFileName(quote.partyName)}_${sanitizeFileName(quote.quotationNo)}.pdf`,
+    fileName: `${sanitizeFileName(quote.partyName || 'Party')}_Quotation_${quoteDateTag}.pdf`,
     title: `Rate Quotation - ${quote.quotationNo}`,
     orientation,
   };
@@ -1885,9 +1929,9 @@ function buildQuotationDoc(
 
 // ============================================================================
 // 4. SECTION 194C DECLARATION
-//    EXACT REQUIREMENT #5:
-//    Display ONLY the Triangular DRC Logo at the TOP-LEFT corner,
-//    STRICTLY NO Company Stamp or Signature at the bottom!
+//    TOP-LEFT Royal Blue Dolphin Ring + D.R.C Logo
+//    Bottom-Left: Place/Date + Embedded Proprietor PAN Card Image
+//    Bottom-Right: Declarant Details (Subhajit Saha Proprietor) + Round Seal & Signature
 // ============================================================================
 
 function buildDeclaration194CDoc(
@@ -1908,18 +1952,22 @@ function buildDeclaration194CDoc(
 
   drawCenteredWatermark(doc, assets, company.companyName || 'DOLPHIN ROAD CARRIER');
 
-  // TOP-LEFT Triangular DRC Logo ONLY
-  drawTopLeftLogo(doc, assets, SAFE_MARGIN, SAFE_MARGIN, 24, 24);
+  // TOP-LEFT Royal Blue Dolphin Ring + D.R.C Logo
+  drawTopLeftLogo(doc, assets, SAFE_MARGIN, SAFE_MARGIN, 23, 23);
 
   doc.setFont('times', 'bolditalic');
   doc.setFontSize(18);
   doc.setTextColor(15, 23, 42);
-  doc.text(company.companyName || 'DOLPHIN ROAD CARRIER', SAFE_MARGIN + 28, SAFE_MARGIN + 8);
+  const divLabel =
+    decl.division && decl.division !== 'FTL'
+      ? ` (${String(decl.division).toUpperCase()} DIVISION)`
+      : '';
+  doc.text(`${company.companyName || 'DOLPHIN ROAD CARRIER'}${divLabel}`, SAFE_MARGIN + 27, SAFE_MARGIN + 8);
 
   doc.setFont('helvetica', 'normal');
   doc.setFontSize(8.5);
-  doc.text(company.address || '', SAFE_MARGIN + 28, SAFE_MARGIN + 13.5);
-  doc.text(`E-mail:- ${company.email || ''}   |   Mob: ${company.phones || ''}`, SAFE_MARGIN + 28, SAFE_MARGIN + 18.5);
+  doc.text(company.address || '', SAFE_MARGIN + 27, SAFE_MARGIN + 13.5);
+  doc.text(`E-mail:- ${company.email || ''}   |   Mob: ${company.phones || ''}`, SAFE_MARGIN + 27, SAFE_MARGIN + 18.5);
 
   doc.setFont('helvetica', 'bold');
   doc.setFontSize(10);
@@ -1981,48 +2029,50 @@ function buildDeclaration194CDoc(
   const footerY = cy + 28;
   doc.setFontSize(9.2);
   doc.text(`Place : ${decl.place || 'Kolkata'}`, SAFE_MARGIN + 2, footerY);
-  doc.text(`Date  : ${formatDateDDMMYYYY(decl.declarationDate)}`, SAFE_MARGIN + 2, footerY + 6);
+  doc.text(`Date  : ${formatDateDDMMYYYY(decl.declarationDate)}`, SAFE_MARGIN + 2, footerY + 5.5);
   doc.setFont('helvetica', 'italic');
   doc.setFontSize(8);
   doc.setTextColor(71, 85, 105);
-  doc.text('Enclosed: Proprietor PAN Card Copy (u/s 194C(6))', SAFE_MARGIN + 2, footerY + 14);
+  doc.text('Enclosed: Proprietor PAN Card Copy (u/s 194C(6))', SAFE_MARGIN + 2, footerY + 11.5);
   doc.setTextColor(15, 23, 42);
 
-  doc.setFont('helvetica', 'bold');
-  doc.setFontSize(9.5);
-  doc.text('DECLARANT DETAILS', pw - SAFE_MARGIN - 30, footerY, { align: 'center' });
-  doc.text('SUBHAJIT SAHA (Proprietor)', pw - SAFE_MARGIN - 30, footerY + 5.5, { align: 'center' });
-  doc.text(`PAN NO : ${company.pan}`, pw - SAFE_MARGIN - 30, footerY + 11, { align: 'center' });
-
-  // Embed Proprietor PAN Card Photo on the RIGHT side under DECLARANT DETAILS
-  const panBoxX = pw - SAFE_MARGIN - 58;
-  const panBoxY = footerY + 14.5;
+  // Embedded Proprietor PAN Card Image on the bottom-left below Place/Date
+  const panBoxX = SAFE_MARGIN + 2;
+  const panBoxY = footerY + 15;
   if (assets.panCropDataUrl) {
     doc.addImage(
       assets.panCropDataUrl,
       getJsPdfImageFormat(assets.panCropDataUrl),
       panBoxX,
       panBoxY,
-      56,
-      34,
+      58,
+      35,
       undefined,
       'FAST'
     );
   } else {
-    doc.rect(panBoxX, panBoxY, 56, 34);
+    doc.rect(panBoxX, panBoxY, 58, 35);
     doc.setFont('helvetica', 'bold');
     doc.setFontSize(8);
-    doc.text('INCOME TAX DEPARTMENT - INDIA', panBoxX + 3, panBoxY + 8);
-    doc.text('SUBHAJIT SAHA', panBoxX + 3, panBoxY + 15);
-    doc.text(`PAN: ${company.pan}`, panBoxX + 3, panBoxY + 22);
+    doc.text('INCOME TAX DEPARTMENT - INDIA', panBoxX + 3, panBoxY + 9);
+    doc.text('SUBHAJIT SAHA', panBoxX + 3, panBoxY + 16);
+    doc.text(`PAN: ${company.pan}`, panBoxX + 3, panBoxY + 23);
   }
-  // STRICT RULE #5: No stamp or digital signature image at the bottom of Section 194C Declaration.
+
+  // Bottom-Right Declarant Details + Proprietor Signature & Round Seal
+  doc.setFont('helvetica', 'bold');
+  doc.setFontSize(9.5);
+  doc.text('DECLARANT DETAILS', pw - SAFE_MARGIN - 32, footerY, { align: 'center' });
+  doc.text('SUBHAJIT SAHA (Proprietor)', pw - SAFE_MARGIN - 32, footerY + 5.5, { align: 'center' });
+  doc.text(`PAN NO : ${company.pan}`, pw - SAFE_MARGIN - 32, footerY + 11, { align: 'center' });
+  drawBottomRightStampAndSign(doc, assets, pw - SAFE_MARGIN - 2, footerY + 18, 34, 21);
 
   stampAllPageNumbers(doc);
 
+  const declDateTag = formatDateHyphenDDMMYYYY(decl.declarationDate || todayISO());
   return {
     buffer: doc.output('arraybuffer'),
-    fileName: `194C_Declaration_${sanitizeFileName(decl.partyName || 'Party')}_${sanitizeFileName(fy)}.pdf`,
+    fileName: `${sanitizeFileName(decl.partyName || 'Party')}_Declaration_${declDateTag}.pdf`,
     title: `Section 194C Declaration - ${decl.partyName || 'Party'}`,
     orientation,
   };
@@ -2630,185 +2680,93 @@ function buildFoxproStatementDoc(
 // 8. LOGISTICS DIVISION PDF GENERATORS (PARCEL DOCKET, LINE-HAUL MANIFEST, INVOICE/CN/DN)
 // ============================================================================
 
+function logisticsDocketToConsignmentNote(
+  docket: LogisticsDocket,
+  company: CompanySettings
+): ConsignmentNote {
+  const div = docket.division || getLogisticsDivisionFromId(docket.id);
+  const taxAmt =
+    Number(docket.cgstAmt || 0) + Number(docket.sgstAmt || 0) + Number(docket.igstAmt || 0);
+  const deliverNote =
+    docket.deliveryMode === 'Door Delivery'
+      ? `${docket.destBranch} (Door Delivery)`
+      : `${docket.destBranch} (Godown Delivery)`;
+  return {
+    id: docket.id,
+    cnNo: docket.docketNo,
+    cnDate: docket.docketDate,
+    financialYear: docket.financialYear,
+    division: div,
+    billedAtBranch: docket.billedAtBranch || docket.originBranch,
+    deliveryOffice: docket.destBranch,
+    deliverAt: deliverNote,
+    billingPartyName: docket.billingPartyName || docket.consignorName,
+    consignorName: docket.consignorName,
+    consignorAddress: docket.consignorAddress,
+    consignorPinCode: docket.consignorPinCode,
+    consignorCountry: docket.consignorCountry,
+    consignorGstin: docket.consignorGstin,
+    consigneeName: docket.consigneeName,
+    consigneeAddress: docket.consigneeAddress,
+    consigneePinCode: docket.consigneePinCode,
+    consigneeCountry: docket.consigneeCountry,
+    consigneeGstin: docket.consigneeGstin,
+    packages: String(docket.packages ?? ''),
+    packageMode: docket.packingType || 'Cartons/Pkg',
+    particulars: docket.goodsDesc,
+    rateMode: docket.rateBasis,
+    ratePerUnit: docket.ratePerUnit,
+    nettWeight: docket.actualWeightKg,
+    grossWeight: docket.actualWeightKg,
+    chargedWeight: docket.chargedWeightKg,
+    loadingCharge: docket.hamaliCharge || 0,
+    unloadingCharge: docket.doorCharge || 0,
+    sttCharge: docket.docketCharge || 0,
+    otherCharge: (docket.fovCharge || 0) + taxAmt,
+    totalFreight: docket.totalAmount,
+    showFreightOnPrint: true,
+    paidAmount: docket.payMode === 'Paid' ? docket.totalAmount : 0,
+    toPayAmount: docket.payMode === 'To-Pay' ? docket.totalAmount : 0,
+    payBasis: docket.payMode,
+    ewayBillNo: docket.ewayBillNo,
+    ewayBillValidUpto: docket.ewayBillValidUpto,
+    ewayPlace: docket.ewayPlace,
+    ewayPinCode: docket.ewayPinCode,
+    valueOfGoods: docket.valueOfGoods,
+    truckNo: docket.manifestNo || 'HUB-DISPATCH',
+    fromCity: docket.originBranch,
+    fromPinCode: docket.originPinCode,
+    fromCountry: docket.originCountry,
+    toCity: docket.destBranch,
+    toPinCode: docket.destPinCode,
+    toCountry: docket.destCountry,
+    deliveryModeCode: docket.deliveryMode === 'Door Delivery' ? 'D' : 'G',
+    gstPaidBy: docket.reverseCharge ? 'Consignee' : 'Transporter',
+    remarks: [
+      docket.stockStage ? `Stage: ${docket.stockStage}` : '',
+      docket.godownRack ? `Rack: ${docket.godownRack}` : '',
+      docket.remarks || '',
+    ]
+      .filter(Boolean)
+      .join(' | '),
+    billed: docket.billed,
+    branchCode: docket.branchCode || docket.originBranch || company.companyName,
+    ownerUid: docket.ownerUid,
+  };
+}
+
 function buildLogisticsDocketDoc(
   docket: LogisticsDocket,
   company: CompanySettings,
   assets: PdfAssets,
   orientation: PdfOrientation = 'l'
 ) {
-  const doc = new jsPDF({
-    orientation: orientation === 'l' ? 'landscape' : 'portrait',
-    unit: 'mm',
-    format: 'a4',
-    compress: true,
-  });
-
-  const M = BILL_MARGIN;
-  const pw = doc.internal.pageSize.getWidth();
-  const ph = doc.internal.pageSize.getHeight();
-  const cw = pw - M * 2;
-  const ch = ph - M * 2;
-
-  drawCenteredWatermark(doc, assets, `${company.companyName || 'DOLPHIN ROAD CARRIER'} - LOGISTICS`);
-  doc.setDrawColor(15, 23, 42);
-  doc.setLineWidth(0.5);
-  doc.rect(M, M, cw, ch);
-
-  drawTopLeftLogo(doc, assets, M + 3, M + 3, 19, 19);
-
-  doc.setFont('helvetica', 'bold');
-  doc.setFontSize(14);
-  doc.setTextColor(13, 71, 161);
-  doc.text(`${company.companyName || 'DOLPHIN ROAD CARRIER'} (EXPRESS LOGISTICS)`, M + 25, M + 8.5);
-  doc.setFont('helvetica', 'normal');
-  doc.setFontSize(7.6);
-  doc.setTextColor(30, 41, 59);
-  doc.text(company.address || '', M + 25, M + 13.2);
-  doc.text(
-    `GSTIN: ${company.gstin}   |   PAN: ${company.pan}   |   Ph: ${company.phones}`,
-    M + 25,
-    M + 17.5
+  return buildLR3CopyDoc(
+    logisticsDocketToConsignmentNote(docket, company),
+    company,
+    assets,
+    orientation
   );
-
-  // Top-right badge & Verification QR
-  const qrPayload = `DRC|DOCKET|${docket.docketNo}|${docket.docketDate}|${docket.originBranch}->${docket.destBranch}|PKGS:${docket.packages}|WT:${docket.chargedWeightKg}|TOT:${Number(docket.totalAmount || 0).toFixed(2)}|${docket.payMode}`;
-  drawVectorVerificationQr(doc, qrPayload, pw - M - 20, M + 3, 17, 'VERIFY QR');
-
-  doc.setFillColor(13, 71, 161);
-  doc.rect(M, M + 24, cw, 7.5, 'F');
-  doc.setFont('helvetica', 'bold');
-  doc.setFontSize(10);
-  doc.setTextColor(255, 255, 255);
-  doc.text(
-    `PARCEL DOCKET / CONSIGNMENT NOTE : ${docket.docketNo}   [${docket.payMode.toUpperCase()} · ${docket.deliveryMode.toUpperCase()}]`,
-    pw / 2,
-    M + 29,
-    { align: 'center' }
-  );
-
-  let y = M + 34;
-  doc.setTextColor(15, 23, 42);
-  const halfW = cw / 2;
-
-  // Meta Strip
-  doc.setLineWidth(0.3);
-  doc.rect(M, y, cw, 11);
-  doc.line(M + cw * 0.25, y, M + cw * 0.25, y + 11);
-  doc.line(M + cw * 0.5, y, M + cw * 0.5, y + 11);
-  doc.line(M + cw * 0.75, y, M + cw * 0.75, y + 11);
-
-  doc.setFont('helvetica', 'bold');
-  doc.setFontSize(7.4);
-  doc.text('Docket Date & FY', M + 2, y + 4);
-  doc.text('Origin -> Destination Hub', M + cw * 0.25 + 2, y + 4);
-  doc.text('E-Way Bill / Goods Value', M + cw * 0.5 + 2, y + 4);
-  doc.text('Godown Stage / Rack', M + cw * 0.75 + 2, y + 4);
-
-  doc.setFont('helvetica', 'normal');
-  doc.setFontSize(8);
-  doc.text(`${formatDateDDMMYYYY(docket.docketDate)} (${docket.financialYear || '-'})`, M + 2, y + 8.8);
-  doc.text(`${docket.originBranch} -> ${docket.destBranch}`, M + cw * 0.25 + 2, y + 8.8);
-  doc.text(
-    `${docket.ewayBillNo || 'N/A'} (Rs. ${formatINR(docket.valueOfGoods || 0)})`,
-    M + cw * 0.5 + 2,
-    y + 8.8
-  );
-  doc.text(`${docket.stockStage} ${docket.godownRack ? `[${docket.godownRack}]` : ''}`, M + cw * 0.75 + 2, y + 8.8);
-
-  y += 13;
-
-  // Consignor / Consignee Box
-  const partyH = 25;
-  doc.rect(M, y, halfW, partyH);
-  doc.rect(M + halfW, y, halfW, partyH);
-  doc.setFont('helvetica', 'bold');
-  doc.setFontSize(7.6);
-  doc.text('CONSIGNOR (SENDER)', M + 2.5, y + 4.5);
-  doc.text('CONSIGNEE (RECEIVER)', M + halfW + 2.5, y + 4.5);
-
-  doc.setFontSize(8.8);
-  doc.text(String(docket.consignorName || '-').slice(0, 48), M + 2.5, y + 10);
-  doc.text(String(docket.consigneeName || '-').slice(0, 48), M + halfW + 2.5, y + 10);
-
-  doc.setFont('helvetica', 'normal');
-  doc.setFontSize(7.3);
-  doc.text(doc.splitTextToSize(docket.consignorAddress || '-', halfW - 5).slice(0, 2), M + 2.5, y + 14.5);
-  doc.text(doc.splitTextToSize(docket.consigneeAddress || '-', halfW - 5).slice(0, 2), M + halfW + 2.5, y + 14.5);
-  doc.text(`GSTIN: ${docket.consignorGstin || 'URD'}`, M + 2.5, y + 22.8);
-  doc.text(`GSTIN: ${docket.consigneeGstin || 'URD'}`, M + halfW + 2.5, y + 22.8);
-
-  y += partyH + 3;
-
-  // Parcel Details + Freight Breakup
-  const leftW = cw * 0.62;
-  const rightW = cw - leftW;
-  const detailH = 44;
-  doc.rect(M, y, leftW, detailH);
-  doc.rect(M + leftW, y, rightW, detailH);
-
-  doc.setFillColor(241, 245, 249);
-  doc.rect(M, y, leftW, 6.5, 'FD');
-  doc.rect(M + leftW, y, rightW, 6.5, 'FD');
-  doc.setFont('helvetica', 'bold');
-  doc.setFontSize(7.6);
-  doc.text('PARCEL & WEIGHT PARTICULARS', M + 2.5, y + 4.5);
-  doc.text('FREIGHT & CHARGES BREAKUP (INR)', M + leftW + 2.5, y + 4.5);
-
-  doc.setFont('helvetica', 'normal');
-  doc.setFontSize(8);
-  doc.text(`Packages      : ${docket.packages} (${docket.packingType || 'Cartons/Pkg'})`, M + 3, y + 12.5);
-  doc.text(`Description   : ${String(docket.goodsDesc || '-').slice(0, 52)}`, M + 3, y + 18.5);
-  doc.text(`Actual Weight : ${Number(docket.actualWeightKg || 0).toFixed(2)} Kg`, M + 3, y + 24.5);
-  doc.text(`Charged Wt.   : ${Number(docket.chargedWeightKg || 0).toFixed(2)} Kg`, M + 3, y + 30.5);
-  doc.text(`Rate Basis    : ${docket.rateBasis} @ Rs. ${formatINR(docket.ratePerUnit || 0)}`, M + 3, y + 36.5);
-  if (docket.manifestNo) {
-    doc.text(`Line-Haul Manifest: ${docket.manifestNo}`, M + 3, y + 41.5);
-  }
-
-  const rxLabel = M + leftW + 3;
-  const rxVal = M + cw - 3;
-  const chargeLines: Array<[string, string, boolean?]> = [
-    ['Base Freight', formatINR(docket.baseFreight)],
-    ['Docket + Hamali + FOV', formatINR(Number(docket.docketCharge || 0) + Number(docket.hamaliCharge || 0) + Number(docket.fovCharge || 0))],
-    ['Door Delivery Charge', formatINR(docket.doorCharge || 0)],
-    [`GST (${Number(docket.gstRate || 0)}%)${docket.reverseCharge ? ' [RCM]' : ''}`, formatINR(Number(docket.cgstAmt || 0) + Number(docket.sgstAmt || 0) + Number(docket.igstAmt || 0))],
-    ['TOTAL DOCKET AMOUNT', `Rs. ${formatINR(docket.totalAmount)}`, true],
-  ];
-  chargeLines.forEach(([lbl, val, isBold], idx) => {
-    const cyLine = y + 12.5 + idx * 6.8;
-    doc.setFont('helvetica', isBold ? 'bold' : 'normal');
-    doc.setFontSize(isBold ? 8.8 : 7.8);
-    doc.text(lbl, rxLabel, cyLine);
-    doc.text(val, rxVal, cyLine, { align: 'right' });
-  });
-
-  y += detailH + 3.5;
-
-  doc.setFont('helvetica', 'bold');
-  doc.setFontSize(7.8);
-  doc.text(`Amount in Words: ${amountToIndianWords(docket.totalAmount)}`, M + 2, y + 3);
-  if (docket.remarks) {
-    doc.setFont('helvetica', 'normal');
-    doc.setFontSize(7.2);
-    doc.text(`Remarks: ${docket.remarks}`, M + 2, y + 8.5);
-  }
-  doc.setFont('helvetica', 'normal');
-  doc.setFontSize(7);
-  doc.text(
-    'Receiver Signature & Stamp (Goods received in sound condition)',
-    M + 2,
-    ph - M - 8
-  );
-
-  drawBottomRightStampAndSign(doc, assets, pw - M - 2, ph - M - 24, 27, 15);
-  stampAllPageNumbers(doc, `EXPRESS PARCEL DOCKET — ${docket.docketNo}`, M, 3.8);
-
-  return {
-    buffer: doc.output('arraybuffer'),
-    fileName: `Logistics_Docket_${sanitizeFileName(docket.docketNo)}.pdf`,
-    title: `Parcel Docket - ${docket.docketNo}`,
-    orientation,
-  };
 }
 
 function buildLogisticsManifestDoc(
@@ -2964,12 +2922,92 @@ function buildLogisticsManifestDoc(
   };
 }
 
+function logisticsInvoiceToInvoice(
+  invoice: LogisticsInvoice,
+  company: CompanySettings
+): Invoice {
+  const div = invoice.division || getLogisticsDivisionFromId(invoice.id);
+  const totalTax =
+    Number(invoice.cgstAmt || 0) + Number(invoice.sgstAmt || 0) + Number(invoice.igstAmt || 0);
+  return {
+    id: invoice.id,
+    billId: invoice.docNo,
+    invoiceNo: invoice.docNo,
+    invoiceDate: invoice.docDate,
+    financialYear: invoice.financialYear,
+    division: div,
+    docKind: invoice.docType,
+    againstInvoiceNo: invoice.linkedDocNo,
+    finalized: true,
+    partyName: invoice.partyName,
+    partyAddress: invoice.partyAddress,
+    partyGstin: invoice.partyGstin,
+    partyPan: invoice.partyPan,
+    billingCountry: 'India',
+    sac: invoice.sac || company.hsn || '996791',
+    reverseCharge: Boolean(invoice.reverseCharge),
+    interstate: Boolean(invoice.interstate),
+    gstPaidBy: invoice.reverseCharge ? 'Consignee' : 'Transporter',
+    gstRate: invoice.gstRate,
+    cgstAmt: invoice.cgstAmt,
+    sgstAmt: invoice.sgstAmt,
+    igstAmt: invoice.igstAmt,
+    totalTax,
+    freightCharges: invoice.taxableAmount,
+    grossBillAmount: invoice.grandTotal,
+    grandTotal: invoice.grandTotal,
+    paidAmount: invoice.paidAmount,
+    status: invoice.status,
+    remarks: invoice.remarks,
+    selectedBankId: invoice.selectedBankId,
+    branchCode: invoice.branchCode,
+    copyCount: 1,
+    consignmentRows: (invoice.docketRows || []).map((r) => ({
+      cnNo: r.docketNo,
+      cnDate: r.docketDate,
+      vehicle: '-',
+      from: r.originBranch,
+      to: r.destBranch,
+      weight: r.weightKg,
+      packages: String(r.packages ?? ''),
+      rateType: 'Fixed',
+      ratePerMt: 0,
+      freight: r.freightAmt,
+      description: r.goodsDesc,
+    })),
+    ownerUid: invoice.ownerUid,
+  };
+}
+
 function buildLogisticsInvoiceDoc(
   invoice: LogisticsInvoice,
   company: CompanySettings,
   assets: PdfAssets,
   orientation: PdfOrientation = 'p'
 ) {
+  return buildInvoiceDoc(
+    logisticsInvoiceToInvoice(invoice, company),
+    company,
+    true,
+    assets,
+    orientation,
+    1
+  );
+}
+
+function buildPodScanDoc(params: {
+  imageDataUrl: string;
+  truckNo: string;
+  cnNo?: string;
+  podDate: string;
+  remarks?: string;
+  partyName?: string;
+  division?: string;
+  company: CompanySettings;
+  orientation?: PdfOrientation;
+  assets: PdfAssets;
+}) {
+  const orientation: PdfOrientation = params.orientation || 'p';
   const doc = new jsPDF({
     orientation: orientation === 'l' ? 'landscape' : 'portrait',
     unit: 'mm',
@@ -2983,173 +3021,221 @@ function buildLogisticsInvoiceDoc(
   const cw = pw - M * 2;
   const ch = ph - M * 2;
 
-  const docHeading = invoice.docType.toUpperCase();
-  const bank = resolveInvoiceBankAccount(company, invoice.selectedBankId);
-  const upiHandle = bank.upiId || company.upiId || 'dolphinroadcarrier@pnb';
-  const upiUri = `upi://pay?pa=${encodeURIComponent(upiHandle)}&pn=${encodeURIComponent(company.companyName)}&am=${Number(invoice.grandTotal || 0).toFixed(2)}&cu=INR&tn=${encodeURIComponent(invoice.docNo)}`;
-
-  const drawHeader = () => {
-    drawCenteredWatermark(doc, assets, `${company.companyName} - LOGISTICS`);
-    doc.setDrawColor(15, 23, 42);
-    doc.setLineWidth(0.5);
-    doc.rect(M, M, cw, ch);
-    drawInvoiceCircularRoadLogo(doc, M + 2.5, M + 2, 18, 18);
-
-    doc.setFont('helvetica', 'bold');
-    doc.setFontSize(13.5);
-    doc.setTextColor(13, 71, 161);
-    doc.text(company.companyName || 'DOLPHIN ROAD CARRIER', M + 23, M + 7.5);
-    doc.setFont('helvetica', 'normal');
-    doc.setFontSize(7.4);
-    doc.setTextColor(30, 41, 59);
-    doc.text(company.address || '', M + 23, M + 12);
-    doc.text(
-      `GSTIN: ${company.gstin}   |   PAN: ${company.pan}   |   SAC: ${invoice.sac || company.hsn || '996791'}`,
-      M + 23,
-      M + 16.5
-    );
-
-    const qrVerify = `DRC|LOGI-${docHeading}|${invoice.docNo}|${invoice.docDate}|${invoice.partyName}|TOT:${Number(invoice.grandTotal || 0).toFixed(2)}`;
-    drawVectorVerificationQr(doc, qrVerify, pw - M - 18.5, M + 2, 15.5, 'VERIFY QR');
-
-    doc.setFillColor(
-      invoice.docType === 'Credit Note' ? 180 : invoice.docType === 'Debit Note' ? 124 : 13,
-      invoice.docType === 'Credit Note' ? 83 : invoice.docType === 'Debit Note' ? 58 : 71,
-      invoice.docType === 'Credit Note' ? 9 : invoice.docType === 'Debit Note' ? 237 : 161
-    );
-    doc.rect(M, M + 22, cw, 7.2, 'F');
-    doc.setFont('helvetica', 'bold');
-    doc.setFontSize(10);
-    doc.setTextColor(255, 255, 255);
-    doc.text(
-      `${docHeading} — ${invoice.docNo}   |   DATE: ${formatDateDDMMYYYY(invoice.docDate)}`,
-      pw / 2,
-      M + 27,
-      { align: 'center' }
-    );
-
-    const pY = M + 30.5;
-    doc.setTextColor(15, 23, 42);
-    doc.setLineWidth(0.3);
-    doc.rect(M, pY, cw, 20);
-    doc.setFont('helvetica', 'bold');
-    doc.setFontSize(8.2);
-    doc.text(`Billed To: ${invoice.partyName}`, M + 2.5, pY + 5);
-    doc.setFont('helvetica', 'normal');
-    doc.setFontSize(7.4);
-    doc.text(`Address : ${invoice.partyAddress || '-'}`, M + 2.5, pY + 10);
-    doc.text(
-      `GSTIN : ${invoice.partyGstin || 'UNREGISTERED'}   |   PAN : ${invoice.partyPan || '-'}${invoice.linkedDocNo ? `   |   Ref Inv: ${invoice.linkedDocNo}` : ''}`,
-      M + 2.5,
-      pY + 15
-    );
-
-    const hdrY = pY + 21.5;
-    const hdrH = 7;
-    const colEdges = [0, 0.06, 0.24, 0.44, 0.68, 0.77, 0.86, 1.0];
-    const colX = (i: number) => M + cw * colEdges[i];
-    doc.setFillColor(226, 232, 240);
-    doc.rect(M, hdrY, cw, hdrH, 'FD');
-    for (let i = 1; i < colEdges.length - 1; i++) {
-      doc.line(colX(i), hdrY, colX(i), hdrY + hdrH);
-    }
-    doc.setFont('helvetica', 'bold');
-    doc.setFontSize(6.9);
-    const hdrLabels = ['S.NO', 'DOCKET NO / DATE', 'ROUTE', 'GOODS DESCRIPTION', 'PKGS', 'WT (KG)', 'AMOUNT (INR)'];
-    hdrLabels.forEach((lbl, i) => {
-      doc.text(lbl, colX(i) + 1.5, hdrY + 4.7);
-    });
-
-    return { curY: hdrY + hdrH, colEdges, colX };
-  };
-
-  let { curY, colEdges, colX } = drawHeader();
-  const maxY = ph - M - 48;
-  const rowH = 7.2;
-
-  (invoice.docketRows || []).forEach((row, idx) => {
-    if (curY + rowH > maxY) {
-      doc.addPage();
-      ({ curY, colEdges, colX } = drawHeader());
-    }
-    if (idx % 2 === 1) {
-      doc.setFillColor(248, 250, 252);
-      doc.rect(M, curY, cw, rowH, 'F');
-    }
-    doc.setDrawColor(203, 213, 225);
-    doc.setLineWidth(0.2);
-    doc.line(M, curY + rowH, M + cw, curY + rowH);
-    for (let i = 1; i < colEdges.length - 1; i++) {
-      doc.line(colX(i), curY, colX(i), curY + rowH);
-    }
-    doc.setFont('helvetica', 'normal');
-    doc.setFontSize(7.1);
-    doc.setTextColor(15, 23, 42);
-    doc.text(`${idx + 1}`, colX(0) + 2, curY + 4.8);
-    doc.text(`${row.docketNo} (${formatDateDDMMYYYY(row.docketDate)})`, colX(1) + 1.5, curY + 4.8);
-    doc.text(`${row.originBranch} -> ${row.destBranch}`, colX(2) + 1.5, curY + 4.8);
-    doc.text(String(row.goodsDesc || '-').slice(0, 28), colX(3) + 1.5, curY + 4.8);
-    doc.text(`${row.packages}`, colX(5) - 1.5, curY + 4.8, { align: 'right' });
-    doc.text(`${Number(row.weightKg || 0).toFixed(1)}`, colX(6) - 1.5, curY + 4.8, { align: 'right' });
-    doc.setFont('helvetica', 'bold');
-    doc.text(formatINR(row.freightAmt), colX(7) - 1.5, curY + 4.8, { align: 'right' });
-    curY += rowH;
-  });
-
-  if (curY + 45 > ph - M) {
-    doc.addPage();
-    ({ curY, colEdges, colX } = drawHeader());
-  }
-
-  curY += 3;
-  // GST & Totals + Bank QR + Stamp
-  const leftBoxW = cw * 0.56;
-  const rightBoxW = cw - leftBoxW;
-  const footH = 38;
+  drawCenteredWatermark(doc, params.assets, params.company.companyName || 'DOLPHIN ROAD CARRIER');
   doc.setDrawColor(15, 23, 42);
-  doc.setLineWidth(0.35);
-  doc.rect(M, curY, leftBoxW, footH);
-  doc.rect(M + leftBoxW, curY, rightBoxW, footH);
+  doc.setLineWidth(0.55);
+  doc.rect(M, M, cw, ch);
 
-  drawVectorUpiQr(doc, upiUri, M + 2.5, curY + 2.5, 17);
+  drawTopLeftLogo(doc, params.assets, M + 2.5, M + 2.5, 20, 20);
   doc.setFont('helvetica', 'bold');
-  doc.setFontSize(7.5);
-  doc.text(`Bank: ${bank.bankName}`, M + 23, curY + 6);
+  doc.setFontSize(13.5);
+  doc.setTextColor(13, 71, 161);
+  const divLabel =
+    params.division && params.division !== 'FTL'
+      ? ` (${String(params.division).toUpperCase()} DIVISION)`
+      : '';
+  doc.text(`${params.company.companyName || 'DOLPHIN ROAD CARRIER'}${divLabel}`, M + 25, M + 8);
   doc.setFont('helvetica', 'normal');
-  doc.setFontSize(7.1);
-  doc.text(`A/C: ${bank.accountNo} | IFSC: ${bank.ifsc}`, M + 23, curY + 11);
-  doc.text(`Words: ${amountToIndianWords(invoice.grandTotal).slice(0, 56)}`, M + 23, curY + 16.5);
+  doc.setFontSize(7.5);
+  doc.setTextColor(30, 41, 59);
+  doc.text(params.company.address || '', M + 25, M + 13);
+  doc.text(`GSTIN: ${params.company.gstin}   |   PH: ${params.company.phones}`, M + 25, M + 17.5);
+
+  doc.setFillColor(13, 71, 161);
+  doc.rect(M, M + 24, cw, 7.5, 'F');
+  doc.setFont('helvetica', 'bold');
+  doc.setFontSize(10);
+  doc.setTextColor(255, 255, 255);
   doc.text(
-    invoice.reverseCharge ? 'GST RCM: Tax payable by recipient under RCM.' : `GST Rate: ${invoice.gstRate}% (Forward Charge)`,
-    M + 2.5,
-    curY + 33
+    `PROOF OF DELIVERY (POD) SCAN — VEHICLE: ${(params.truckNo || 'N/A').toUpperCase()}`,
+    pw / 2,
+    M + 29,
+    { align: 'center' }
   );
 
-  const rxL = M + leftBoxW + 3;
-  const rxR = M + cw - 3;
-  doc.setFontSize(7.8);
-  doc.text('Taxable Freight Amount', rxL, curY + 6.5);
-  doc.text(formatINR(invoice.taxableAmount), rxR, curY + 6.5, { align: 'right' });
-  doc.text(`CGST`, rxL, curY + 11.5);
-  doc.text(formatINR(invoice.cgstAmt), rxR, curY + 11.5, { align: 'right' });
-  doc.text(`SGST`, rxL, curY + 16.5);
-  doc.text(formatINR(invoice.sgstAmt), rxR, curY + 16.5, { align: 'right' });
-  doc.text(`IGST`, rxL, curY + 21.5);
-  doc.text(formatINR(invoice.igstAmt), rxR, curY + 21.5, { align: 'right' });
+  const metaY = M + 33.5;
+  doc.setTextColor(15, 23, 42);
+  doc.setDrawColor(100, 116, 139);
+  doc.setLineWidth(0.3);
+  doc.rect(M, metaY, cw, 14);
   doc.setFont('helvetica', 'bold');
-  doc.setFontSize(9.2);
-  doc.text(`GRAND TOTAL (${docHeading})`, rxL, curY + 29);
-  doc.text(`Rs. ${formatINR(invoice.grandTotal)}`, rxR, curY + 29, { align: 'right' });
+  doc.setFontSize(8.2);
+  doc.text(`Truck / Lorry No: ${params.truckNo || '-'}`, M + 3, metaY + 5);
+  doc.text(`C/N / LR No: ${params.cnNo || '-'}`, M + cw * 0.38, metaY + 5);
+  doc.text(`POD Date: ${formatDateDDMMYYYY(params.podDate)}`, M + cw - 3, metaY + 5, {
+    align: 'right',
+  });
+  doc.setFont('helvetica', 'normal');
+  doc.setFontSize(7.8);
+  doc.text(`Party: ${params.partyName || '-'}`, M + 3, metaY + 10.5);
+  doc.text(`Remarks: ${String(params.remarks || 'Signed & Delivered').slice(0, 62)}`, M + cw * 0.38, metaY + 10.5);
 
-  if (curY + footH + 22 <= ph - M) {
-    drawBottomRightStampAndSign(doc, assets, pw - M - 2, curY + footH + 3, 25, 14);
+  const imgBoxY = metaY + 16.5;
+  const imgBoxH = ph - M - 30 - imgBoxY;
+  const imgBoxW = cw - 6;
+  doc.setDrawColor(203, 213, 225);
+  doc.rect(M + 3, imgBoxY, imgBoxW, imgBoxH);
+
+  if (params.imageDataUrl) {
+    try {
+      doc.addImage(
+        params.imageDataUrl,
+        getJsPdfImageFormat(params.imageDataUrl),
+        M + 5,
+        imgBoxY + 2,
+        imgBoxW - 4,
+        imgBoxH - 4,
+        undefined,
+        'FAST'
+      );
+    } catch {
+      doc.setFont('helvetica', 'italic');
+      doc.text('POD Image Attachment Embedded', pw / 2, imgBoxY + imgBoxH / 2, { align: 'center' });
+    }
   }
-  stampAllPageNumbers(doc, `LOGISTICS ${docHeading} — ${invoice.docNo}`, M, 3.8);
+
+  drawBottomRightStampAndSign(doc, params.assets, pw - M - 2, ph - M - 24, 28, 17);
+  stampAllPageNumbers(doc, `POD_${sanitizeFileName(params.truckNo || 'Truck')} — ${params.company.companyName}`, M, 3.8);
+
+  const podDateTag = formatDateHyphenDDMMYYYY(params.podDate || todayISO());
+  return {
+    buffer: doc.output('arraybuffer'),
+    fileName: `POD_${sanitizeFileName(params.truckNo || params.cnNo || 'Truck')}_${podDateTag}.pdf`,
+    title: `POD Scan - ${params.truckNo || params.cnNo || 'Truck'}`,
+    orientation,
+  };
+}
+
+function buildEntityKycDoc(params: {
+  role: 'Driver' | 'Broker' | 'Lorry Owner' | 'Vehicle';
+  recordName: string;
+  fields: Array<{ label: string; value: string }>;
+  attachedImageDataUrl?: string;
+  company: CompanySettings;
+  orientation?: PdfOrientation;
+  assets: PdfAssets;
+}) {
+  const orientation: PdfOrientation = params.orientation || 'p';
+  const doc = new jsPDF({
+    orientation: orientation === 'l' ? 'landscape' : 'portrait',
+    unit: 'mm',
+    format: 'a4',
+    compress: true,
+  });
+
+  const M = BILL_MARGIN;
+  const pw = doc.internal.pageSize.getWidth();
+  const ph = doc.internal.pageSize.getHeight();
+  const cw = pw - M * 2;
+  const ch = ph - M * 2;
+
+  drawCenteredWatermark(doc, params.assets, params.company.companyName || 'DOLPHIN ROAD CARRIER');
+  doc.setDrawColor(15, 23, 42);
+  doc.setLineWidth(0.55);
+  doc.rect(M, M, cw, ch);
+
+  drawTopLeftLogo(doc, params.assets, M + 2.5, M + 2.5, 20, 20);
+  doc.setFont('helvetica', 'bold');
+  doc.setFontSize(13.5);
+  doc.setTextColor(13, 71, 161);
+  doc.text(params.company.companyName || 'DOLPHIN ROAD CARRIER', M + 25, M + 8);
+  doc.setFont('helvetica', 'normal');
+  doc.setFontSize(7.5);
+  doc.setTextColor(30, 41, 59);
+  doc.text(params.company.address || '', M + 25, M + 13);
+  doc.text(
+    `GSTIN: ${params.company.gstin || '19DOTPS3540M1ZZ'}   |   PAN: ${params.company.pan || 'DOTPS3540M'}   |   PH: ${params.company.phones}`,
+    M + 25,
+    M + 17.5
+  );
+
+  doc.setFillColor(13, 71, 161);
+  doc.rect(M, M + 24, cw, 8, 'F');
+  doc.setFont('helvetica', 'bold');
+  doc.setFontSize(10.5);
+  doc.setTextColor(255, 255, 255);
+  doc.text(
+    `${params.role.toUpperCase()} KYC & COMPLIANCE PROFILE — ${(params.recordName || 'RECORD').toUpperCase()}`,
+    pw / 2,
+    M + 29.5,
+    { align: 'center' }
+  );
+
+  let y = M + 36;
+  const rowH = 8.2;
+  doc.setDrawColor(203, 213, 225);
+  doc.setLineWidth(0.25);
+
+  const colW = cw / 2;
+  const rows = params.fields || [];
+  for (let i = 0; i < rows.length; i += 2) {
+    if (y + rowH > ph - M - 36) {
+      doc.addPage();
+      drawCenteredWatermark(doc, params.assets, params.company.companyName || 'DOLPHIN ROAD CARRIER');
+      doc.setDrawColor(15, 23, 42);
+      doc.rect(M, M, cw, ch);
+      y = M + 10;
+    }
+    const left = rows[i];
+    const right = rows[i + 1];
+
+    doc.setFillColor(i % 4 === 0 ? 248 : 255, 250, 252);
+    doc.rect(M, y, colW, rowH, 'FD');
+    doc.setFont('helvetica', 'bold');
+    doc.setFontSize(7.2);
+    doc.setTextColor(71, 85, 105);
+    doc.text(left.label, M + 3, y + 3.2);
+    doc.setFont('helvetica', 'bold');
+    doc.setFontSize(8.2);
+    doc.setTextColor(15, 23, 42);
+    doc.text(String(left.value || '-').slice(0, 48), M + 3, y + 6.9);
+
+    if (right) {
+      doc.setFillColor(i % 4 === 0 ? 248 : 255, 250, 252);
+      doc.rect(M + colW, y, colW, rowH, 'FD');
+      doc.setFont('helvetica', 'bold');
+      doc.setFontSize(7.2);
+      doc.setTextColor(71, 85, 105);
+      doc.text(right.label, M + colW + 3, y + 3.2);
+      doc.setFont('helvetica', 'bold');
+      doc.setFontSize(8.2);
+      doc.setTextColor(15, 23, 42);
+      doc.text(String(right.value || '-').slice(0, 48), M + colW + 3, y + 6.9);
+    }
+    y += rowH;
+  }
+
+  if (params.attachedImageDataUrl && y + 48 < ph - M - 26) {
+    const imgBoxW = Math.min(cw - 12, 115);
+    const imgBoxH = Math.min(58, ph - M - 30 - y);
+    doc.setDrawColor(148, 163, 184);
+    doc.rect(M + 6, y + 3, imgBoxW, imgBoxH);
+    try {
+      doc.addImage(
+        params.attachedImageDataUrl,
+        getJsPdfImageFormat(params.attachedImageDataUrl),
+        M + 8,
+        y + 4.5,
+        imgBoxW - 4,
+        imgBoxH - 3,
+        undefined,
+        'FAST'
+      );
+    } catch {
+      // Ignore invalid attached thumbnail
+    }
+  }
+
+  drawBottomRightStampAndSign(doc, params.assets, pw - M - 2, ph - M - 24, 28, 17);
+  const roleTag = sanitizeFileName(params.role.replace(/\s+/g, '_'));
+  const nameTag = sanitizeFileName(params.recordName || 'Record');
+  const fileName = `${nameTag}_${roleTag}_KYC.pdf`;
+  stampAllPageNumbers(doc, `${fileName} — Verified on ${formatDateDDMMYYYY(todayISO())}`, M, 3.8);
 
   return {
     buffer: doc.output('arraybuffer'),
-    fileName: `Logistics_${sanitizeFileName(invoice.docType)}_${sanitizeFileName(invoice.docNo)}.pdf`,
-    title: `${invoice.docType} - ${invoice.docNo}`,
+    fileName,
+    title: `${params.role} KYC Profile — ${params.recordName}`,
     orientation,
   };
 }

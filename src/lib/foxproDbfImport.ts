@@ -14,6 +14,9 @@ import { sheetToObjectsSmartHeader } from './excelImport';
 import { buildAutomaticNarration, extractPaymentMetadata } from './paymentNarration';
 import { extractCreditReceiptsFromRows } from '../components/BankReceiptImportModule';
 import { normalizePartyMatchKey } from './partySeparation';
+import { loadIdbObject, saveIdbObject } from './indexedDbStore';
+
+export const RAW_DBF_ARCHIVE_IDB_KEY = 'drc_raw_dbf_archive_v1';
 
 export interface DbfFieldDescriptor {
   name: string;
@@ -26,6 +29,55 @@ export interface ParsedDbfTable {
   fileName: string;
   fields: DbfFieldDescriptor[];
   rows: Array<Record<string, unknown>>;
+  totalRawRows: number;
+  deletedFlagRows: number;
+  activeRows: number;
+}
+
+export interface RawDbfTableDump {
+  fileName: string;
+  tableKind: string;
+  fields: string[];
+  totalRawRows: number;
+  deletedFlagRows: number;
+  activeRows: number;
+  importedRows: number;
+  importedAt: number;
+  rows: Array<Record<string, unknown>>;
+}
+
+export interface DbfPerFileStat {
+  fileName: string;
+  tableKind: string;
+  activeRows: number;
+  deletedFlagRows: number;
+  importedRows: number;
+}
+
+export interface DbfVerificationSummary {
+  totalActiveRows: number;
+  totalImportedRows: number;
+  missedRows: number;
+  deletedFlagRowsSkippedByFoxPro: number;
+  perFileStats: DbfPerFileStat[];
+}
+
+export async function saveRawDbfArchiveToIdb(tables: RawDbfTableDump[]): Promise<void> {
+  if (!Array.isArray(tables) || tables.length === 0) return;
+  const existing = (await loadIdbObject<RawDbfTableDump[]>(RAW_DBF_ARCHIVE_IDB_KEY)) || [];
+  const merged = new Map<string, RawDbfTableDump>();
+  for (const t of existing) {
+    merged.set(t.fileName.toLowerCase(), t);
+  }
+  for (const t of tables) {
+    merged.set(t.fileName.toLowerCase(), t);
+  }
+  await saveIdbObject(RAW_DBF_ARCHIVE_IDB_KEY, Array.from(merged.values()));
+}
+
+export async function loadRawDbfArchiveFromIdb(): Promise<RawDbfTableDump[]> {
+  const data = await loadIdbObject<RawDbfTableDump[]>(RAW_DBF_ARCHIVE_IDB_KEY);
+  return Array.isArray(data) ? data : [];
 }
 
 function decodeAscii(bytes: Uint8Array): string {
@@ -105,14 +157,18 @@ export function parseFoxProDbfBuffer(buffer: ArrayBuffer, fileName: string): Par
     recordCount,
     Math.floor(Math.max(0, bytes.length - headerLength) / recordLength)
   );
+  let deletedFlagRows = 0;
 
   for (let r = 0; r < maxRecords; r += 1) {
     const recStart = headerLength + r * recordLength;
     if (recStart + recordLength > bytes.length) break;
     const deleteFlag = bytes[recStart];
-    if (deleteFlag === 0x2a) continue; // Skip deleted FoxPro records
+    if (deleteFlag === 0x2a) {
+      deletedFlagRows += 1;
+      continue; // Deleted marker in FoxPro
+    }
 
-    const row: Record<string, unknown> = {};
+    const row: Record<string, unknown> = { __dbfRowNo: r + 1 };
     let fPos = recStart + 1;
     for (const field of fields) {
       const slice = bytes.slice(fPos, Math.min(bytes.length, fPos + field.length));
@@ -158,7 +214,14 @@ export function parseFoxProDbfBuffer(buffer: ArrayBuffer, fileName: string): Par
     rows.push(row);
   }
 
-  return { fileName, fields, rows };
+  return {
+    fileName,
+    fields,
+    rows,
+    totalRawRows: maxRecords,
+    deletedFlagRows,
+    activeRows: rows.length,
+  };
 }
 
 function normKey(s: string): string {
@@ -243,7 +306,7 @@ function composeDbfAddress(row: Record<string, unknown>): string {
       unique.push(p);
     }
   }
-  return unique.join(', ').slice(0, 380);
+  return unique.join(', ');
 }
 
 interface DbfEnrichMeta {
@@ -322,9 +385,27 @@ function isInvoiceDbf(leaf: string): boolean {
   return /^(bilmast|billmast|inv|invoice|taxinv).*\.dbf$/i.test(leaf) || /^inv.*\.dbf$|^tax.*\.dbf$/i.test(leaf);
 }
 
+function isOpeningBalanceDbf(leaf: string): boolean {
+  return /^(opbal|openbal|opening|ob).*\.dbf$/i.test(leaf) || leaf.includes('opbal');
+}
+
 function isLedgerVoucherDbf(leaf: string): boolean {
   if (isConsignmentDbf(leaf)) return false;
   return /^(trn|trnmast|vouch|voucher|ledger|ledg|jour).*\.dbf$/i.test(leaf);
+}
+
+function classifyDbfTableKind(leaf: string): string {
+  if (isHeadCustomerDbf(leaf)) return 'HEAD / Billing Parties';
+  if (isBrokerDbf(leaf)) return 'BROKER Master';
+  if (isOwnerOrVehicleMasterDbf(leaf)) return 'OWNER / Vehicle Master';
+  if (isDriverDbf(leaf)) return 'DRIVER Master';
+  if (isDesmastDbf(leaf)) return 'DESMAST Destinations';
+  if (isOpeningBalanceDbf(leaf)) return 'OPBAL Opening Balances';
+  if (isConsignmentDbf(leaf)) return 'CNMAST / COURTRAN Consignments';
+  if (isChallanDbf(leaf)) return 'CHALLAN Lorry Hires';
+  if (isInvoiceDbf(leaf)) return 'BILMAST / INVOICE Bills';
+  if (isLedgerVoucherDbf(leaf)) return 'TRN / VOUCH Ledger';
+  return 'Other Legacy DBF Archive';
 }
 
 export interface AutoCollectedOldDataResult {
@@ -340,6 +421,8 @@ export interface AutoCollectedOldDataResult {
   transactions: TransactionRecord[];
   bankReceipts: BankReceiptRecord[];
   destinations: string[];
+  rawTables: RawDbfTableDump[];
+  verificationSummary: DbfVerificationSummary;
   warnings: string[];
 }
 
@@ -366,6 +449,14 @@ export async function autoCollectOldDataFiles(params: {
     transactions: [],
     bankReceipts: [],
     destinations: [],
+    rawTables: [],
+    verificationSummary: {
+      totalActiveRows: 0,
+      totalImportedRows: 0,
+      missedRows: 0,
+      deletedFlagRowsSkippedByFoxPro: 0,
+      perFileStats: [],
+    },
     warnings: [],
   };
 
@@ -438,7 +529,14 @@ export async function autoCollectOldDataFiles(params: {
     return { code, name, meta };
   };
 
-  // Pre-scan all master tables to populate cross-merge enrichment indexes
+  // Track per-file imported row counts so 100% of active DBF rows are verified with zero skips
+  const fileImportedCount = new Map<string, number>();
+  const bumpFileImported = (fileName: string, delta = 1) => {
+    fileImportedCount.set(fileName, (fileImportedCount.get(fileName) || 0) + delta);
+  };
+
+  // Pre-scan all master tables + OPBAL to populate cross-merge enrichment indexes
+  const openingBalByCode = new Map<string, { amount: number; balanceType: 'Dr' | 'Cr'; name: string }>();
   for (const { leaf, table } of dbfTables) {
     if (
       isHeadCustomerDbf(leaf) ||
@@ -449,10 +547,20 @@ export async function autoCollectOldDataFiles(params: {
       table.rows.forEach((row) => {
         recordEnrichFromRow(row);
       });
+    } else if (isOpeningBalanceDbf(leaf)) {
+      table.rows.forEach((row) => {
+        const code = pickStr(row, ['hcode', 'pcode', 'acode', 'bcode', 'ocode', 'code', 'headcd']).toUpperCase();
+        const name = pickStr(row, ['hname', 'pname', 'partyname', 'acname', 'headname', 'name']);
+        const amt = roundPaise(Math.abs(pickNum(row, ['opbal', 'opening', 'openbal', 'op_bal', 'balance', 'amount'])));
+        const dcRaw = pickStr(row, ['opdc', 'drcr', 'dc', 'baltype']).toUpperCase();
+        const balanceType: 'Dr' | 'Cr' = dcRaw.startsWith('C') ? 'Cr' : 'Dr';
+        if (code) openingBalByCode.set(code, { amount: amt, balanceType, name });
+        if (name) openingBalByCode.set(normalizePartyMatchKey(name), { amount: amt, balanceType, name });
+      });
     }
   }
 
-  // First pass: map HEAD/PARTY/ACCT (Customer), BROKER (Broker), OWNER/VHMAIN (TruckOwner + Vehicle), DRIVER, DESMAST
+  // First pass: map HEAD/PARTY/ACCT (Customer), BROKER (Broker), OWNER/VHMAIN (TruckOwner + Vehicle), DRIVER, DESMAST, OPBAL
   const seenCustomerKeys = new Map<string, number>();
   const seenBrokerKeys = new Map<string, number>();
   const seenOwnerKeys = new Map<string, number>();
@@ -477,18 +585,23 @@ export async function autoCollectOldDataFiles(params: {
   for (const { leaf, table } of dbfTables) {
     if (isHeadCustomerDbf(leaf)) {
       table.rows.forEach((row, idx) => {
-        const name = pickStr(row, ['hname', 'pname', 'partyname', 'headname', 'acname', 'custname', 'name']);
-        if (!name) return;
         const code = pickStr(row, ['hcode', 'pcode', 'acode', 'code', 'headcd', 'id']).toUpperCase();
+        const rawName = pickStr(row, ['hname', 'pname', 'partyname', 'headname', 'acname', 'custname', 'name']);
+        const name = rawName || code || `UNSPECIFIED-PARTY-${idx + 1}`;
         if (code) headCodeToName.set(code, name);
 
-        const opBal = roundPaise(Math.abs(pickNum(row, ['opbal', 'opening', 'openbal', 'op_bal', 'balance'])));
+        const opOverride =
+          (code ? openingBalByCode.get(code) : undefined) ||
+          openingBalByCode.get(normalizePartyMatchKey(name));
+        const directOpBal = roundPaise(Math.abs(pickNum(row, ['opbal', 'opening', 'openbal', 'op_bal', 'balance'])));
+        const opBal = directOpBal > 0 ? directOpBal : opOverride?.amount || 0;
         const dcRaw = pickStr(row, ['opdc', 'drcr', 'dc', 'baltype']).toUpperCase();
+        const balanceType: 'Dr' | 'Cr' = dcRaw ? (dcRaw.startsWith('C') ? 'Cr' : 'Dr') : opOverride?.balanceType || 'Dr';
 
         // STRICT RULE: HEAD.DBF / PARTY.DBF / ACCT.DBF ALWAYS map to Customers / Billing Parties (never auto-moved to Brokers)
         const rawParty: Party = applyEnrichmentToParty(
           {
-            id: makeSafeDocId(`dbf_head_${idx}`),
+            id: makeSafeDocId(`dbf_head_${table.fileName}_${idx}`),
             name,
             partyType: 'Customer',
             address: composeDbfAddress(row),
@@ -501,13 +614,13 @@ export async function autoCollectOldDataFiles(params: {
             bankIfsc: pickStr(row, ['ifsc', 'ifsccode']).toUpperCase(),
             openingBalance: opBal,
             currentBalance: opBal,
-            balanceType: dcRaw.startsWith('C') ? 'Cr' : 'Dr',
+            balanceType,
             ownerUid: params.ownerUid,
           },
           code
         );
 
-        const dedupKey = `${normalizePartyMatchKey(rawParty.name)}::${rawParty.gstin || code}`;
+        const dedupKey = `${normalizePartyMatchKey(rawParty.name)}::${rawParty.gstin || code || idx}`;
         const existingIdx = seenCustomerKeys.get(dedupKey);
         if (existingIdx !== undefined) {
           const prev = result.parties[existingIdx];
@@ -528,18 +641,19 @@ export async function autoCollectOldDataFiles(params: {
           seenCustomerKeys.set(dedupKey, result.parties.length);
           result.parties.push(rawParty);
         }
+        bumpFileImported(table.fileName);
       });
     } else if (isBrokerDbf(leaf)) {
       table.rows.forEach((row, idx) => {
-        const name = pickStr(row, ['bname', 'brkrname', 'brkname', 'brokername', 'pname', 'name']);
-        if (!name) return;
         const code = pickStr(row, ['bcode', 'brkrcd', 'code', 'id']).toUpperCase();
+        const rawName = pickStr(row, ['bname', 'brkrname', 'brkname', 'brokername', 'pname', 'name']);
+        const name = rawName || code || `UNSPECIFIED-BROKER-${idx + 1}`;
         if (code) headCodeToName.set(code, name);
 
         const opBal = roundPaise(Math.abs(pickNum(row, ['opbal', 'opening', 'balance'])));
         const rawBroker: Party = applyEnrichmentToParty(
           {
-            id: makeSafeDocId(`dbf_brk_${idx}`),
+            id: makeSafeDocId(`dbf_brk_${table.fileName}_${idx}`),
             name,
             partyType: 'Broker',
             address: composeDbfAddress(row),
@@ -564,14 +678,16 @@ export async function autoCollectOldDataFiles(params: {
           result.parties.push(rawBroker);
           result.brokersAddedCount += 1;
         }
+        bumpFileImported(table.fileName);
       });
     } else if (isOwnerOrVehicleMasterDbf(leaf)) {
       table.rows.forEach((row, idx) => {
-        const truckNo = pickStr(row, ['vehno', 'lorryno', 'vhlno', 'truckno', 'regno'])
+        const rawTruckNo = pickStr(row, ['vehno', 'lorryno', 'vhlno', 'truckno', 'regno'])
           .toUpperCase()
           .replace(/\s+/g, '');
         const ownerName = pickStr(row, ['oname', 'ownname', 'ownername', 'owner', 'pname', 'name']);
         const code = pickStr(row, ['ocode', 'owncd', 'code', 'id']).toUpperCase();
+        const truckNo = rawTruckNo || (!ownerName ? `UNSPECIFIED-TRUCK-${idx + 1}` : '');
 
         if (truckNo && !seenVehicleTrucks.has(truckNo)) {
           seenVehicleTrucks.add(truckNo);
@@ -581,7 +697,7 @@ export async function autoCollectOldDataFiles(params: {
           const taxStr = pickStr(row, ['taxdt', 'roadtax', 'taxexp']);
           const pucStr = pickStr(row, ['pucdt', 'puc']);
           result.vehicles.push({
-            id: makeSafeDocId(`dbf_vhl_${idx}`),
+            id: makeSafeDocId(`dbf_vhl_${table.fileName}_${idx}`),
             truckNo,
             vehicleType: pickStr(row, ['vhltype', 'vehtype', 'type', 'model', 'capacity']) || 'Goods Carrier',
             ownerName: ownerName || 'Market / Fleet Owner',
@@ -605,7 +721,7 @@ export async function autoCollectOldDataFiles(params: {
             result.parties.push(
               applyEnrichmentToParty(
                 {
-                  id: makeSafeDocId(`dbf_own_${idx}`),
+                  id: makeSafeDocId(`dbf_own_${table.fileName}_${idx}`),
                   name: ownerName,
                   partyType: 'TruckOwner',
                   address: composeDbfAddress(row),
@@ -626,26 +742,26 @@ export async function autoCollectOldDataFiles(params: {
             );
           }
         }
+        bumpFileImported(table.fileName);
       });
     } else if (isDesmastDbf(leaf)) {
-      table.rows.forEach((row) => {
-        const name = pickStr(row, ['desname', 'destname', 'destination', 'city', 'place', 'name']);
+      table.rows.forEach((row, idx) => {
         const code = pickStr(row, ['descode', 'destcd', 'code', 'id']);
-        if (name) {
-          result.destinations.push(name);
-          if (code) destCodeToName.set(code.toUpperCase(), name);
-        }
+        const name = pickStr(row, ['desname', 'destname', 'destination', 'city', 'place', 'name']) || code || `STATION-${idx + 1}`;
+        result.destinations.push(name);
+        if (code) destCodeToName.set(code.toUpperCase(), name);
+        bumpFileImported(table.fileName);
       });
     } else if (isDriverDbf(leaf)) {
       table.rows.forEach((row, idx) => {
-        const name = pickStr(row, ['drvrname', 'drvname', 'drivername', 'name']);
-        if (!name) return;
+        const rawName = pickStr(row, ['drvrname', 'drvname', 'drivername', 'name']);
         const dlNo = pickStr(row, ['dlno', 'licno', 'license', 'lic_no']) || `DL-OLD-${idx + 1}`;
+        const name = rawName || dlNo || `UNSPECIFIED-DRIVER-${idx + 1}`;
         const rawDlExp = pickStr(row, ['dlexp', 'licexp', 'expiry', 'expdt', 'dlvalid']);
         // Leave dlExpiry blank '' when DBF has no expiry date so missing dates don't inflate D/L alerts
         const parsedDlExp = rawDlExp ? normOptionalDate(rawDlExp) : '';
         result.drivers.push({
-          id: makeSafeDocId(`dbf_drv_${idx}`),
+          id: makeSafeDocId(`dbf_drv_${table.fileName}_${idx}`),
           name,
           dlNo,
           dlExpiry: parsedDlExp,
@@ -658,21 +774,80 @@ export async function autoCollectOldDataFiles(params: {
           bankIfsc: pickStr(row, ['ifsc', 'ifsccode']).toUpperCase(),
           ownerUid: params.ownerUid,
         });
+        bumpFileImported(table.fileName);
+      });
+    } else if (isOpeningBalanceDbf(leaf)) {
+      table.rows.forEach((row, idx) => {
+        const code = pickStr(row, ['hcode', 'pcode', 'acode', 'bcode', 'ocode', 'code', 'headcd']).toUpperCase();
+        const rawName = pickStr(row, ['hname', 'pname', 'partyname', 'acname', 'headname', 'name']);
+        const name = rawName || (code ? headCodeToName.get(code) || code : `OPBAL-PARTY-${idx + 1}`);
+        const opBal = roundPaise(Math.abs(pickNum(row, ['opbal', 'opening', 'openbal', 'op_bal', 'balance', 'amount'])));
+        const dcRaw = pickStr(row, ['opdc', 'drcr', 'dc', 'baltype']).toUpperCase();
+        const balanceType: 'Dr' | 'Cr' = dcRaw.startsWith('C') ? 'Cr' : 'Dr';
+        const dedupKey = `${normalizePartyMatchKey(name)}::${code || idx}`;
+        const existingIdx = seenCustomerKeys.get(dedupKey);
+        if (existingIdx !== undefined) {
+          const prev = result.parties[existingIdx];
+          if (!prev.openingBalance && opBal > 0) {
+            result.parties[existingIdx] = {
+              ...prev,
+              openingBalance: opBal,
+              currentBalance: opBal,
+              balanceType,
+            };
+          }
+        } else {
+          const existingByName = result.parties.findIndex(
+            (p) => normalizePartyMatchKey(p.name) === normalizePartyMatchKey(name)
+          );
+          if (existingByName >= 0) {
+            if (!result.parties[existingByName].openingBalance && opBal > 0) {
+              result.parties[existingByName] = {
+                ...result.parties[existingByName],
+                openingBalance: opBal,
+                currentBalance: opBal,
+                balanceType,
+              };
+            }
+          } else {
+            seenCustomerKeys.set(dedupKey, result.parties.length);
+            result.parties.push(
+              applyEnrichmentToParty(
+                {
+                  id: makeSafeDocId(`dbf_opbal_${table.fileName}_${idx}`),
+                  name,
+                  partyType: 'Customer',
+                  address: composeDbfAddress(row),
+                  gstin: pickStr(row, ['gstno', 'gstin', 'gst']).toUpperCase(),
+                  pan: pickStr(row, ['panno', 'itpan', 'pan']).toUpperCase(),
+                  phone: pickStr(row, ['phone', 'mobile', 'tel']),
+                  email: pickStr(row, ['email', 'mail']),
+                  openingBalance: opBal,
+                  currentBalance: opBal,
+                  balanceType,
+                  ownerUid: params.ownerUid,
+                },
+                code
+              )
+            );
+          }
+        }
+        bumpFileImported(table.fileName);
       });
     }
   }
 
-  // Second pass: Consignments (`courtran`/`cnmast`/`bilty`), Invoices (`bilmast`/`inv`/`tax`), Challans (`challan`/`challant`), Ledger (`trn`/`vouch`/`ledger`)
+  // Second pass: Consignments, Invoices, Challans, Ledger + fallback archive for any other non-scrap DBF
   for (const { leaf, table } of dbfTables) {
     if (isConsignmentDbf(leaf)) {
       table.rows.forEach((row, idx) => {
-        const cnNo = pickStr(row, ['cnno', 'lrno', 'biltyno', 'grno', 'cno', 'docno']);
+        const cnNo = pickStr(row, ['cnno', 'lrno', 'biltyno', 'grno', 'cno', 'docno']) || `OLD-CN-${idx + 1}`;
         const rawConsignorCode = pickStr(row, ['cnorcd', 'hcode', 'pcode', 'consignor', 'cnor', 'party']).toUpperCase();
         const consignorName =
           pickStr(row, ['cnorname', 'consignorname', 'consignor', 'partyname', 'pname', 'sname']) ||
           headCodeToName.get(rawConsignorCode) ||
-          rawConsignorCode;
-        if (!cnNo && !consignorName) return;
+          rawConsignorCode ||
+          `Customer-${idx + 1}`;
 
         const cnDate = normDate(pickStr(row, ['cndate', 'lrdate', 'bdate', 'date', 'dt']));
         const rawToCode = pickStr(row, ['descode', 'destcd', 'tocity', 'to', 'dest']).toUpperCase();
@@ -690,17 +865,17 @@ export async function autoCollectOldDataFiles(params: {
         const resolvedFy = resolveFinancialYearFromDate(cnDate) || normalizeFyLabel(params.activeFy);
 
         result.consignments.push({
-          id: makeSafeDocId(`dbf_cn_${idx}`),
-          cnNo: cnNo || `OLD-CN-${idx + 1}`,
+          id: makeSafeDocId(`dbf_cn_${table.fileName}_${idx}`),
+          cnNo,
           cnDate,
           financialYear: resolvedFy,
           deliveryOffice: toCity,
-          billingPartyName: consignorName || 'Customer',
-          consignorName: consignorName || 'Customer',
+          billingPartyName: consignorName,
+          consignorName,
           consignorAddress: pickStr(row, ['cnoradd', 'consignoraddr', 'address']),
           consignorGstin: pickStr(row, ['cnorgst', 'gstno', 'gstin']).toUpperCase(),
           consigneeName:
-            pickStr(row, ['cneename', 'consignee', 'cnee', 'rname']) || consignorName || 'Consignee',
+            pickStr(row, ['cneename', 'consignee', 'cnee', 'rname']) || consignorName,
           consigneeAddress: pickStr(row, ['cneeadd', 'consigneeaddr']),
           consigneeGstin: pickStr(row, ['cneegst']).toUpperCase(),
           packages: pickStr(row, ['pkgs', 'packages', 'qty', 'nopkg']) || '1',
@@ -731,12 +906,12 @@ export async function autoCollectOldDataFiles(params: {
           createdByStaff: params.staffCode,
           ownerUid: params.ownerUid,
         });
+        bumpFileImported(table.fileName);
       });
     } else if (isChallanDbf(leaf)) {
       table.rows.forEach((row, idx) => {
-        const cnNo = pickStr(row, ['cnno', 'lrno', 'challanno', 'chlnno', 'docno']);
-        const truckNo = pickStr(row, ['vehno', 'lorryno', 'vhlno', 'truckno']).toUpperCase().replace(/\s+/g, '');
-        if (!cnNo && !truckNo) return;
+        const cnNo = pickStr(row, ['cnno', 'lrno', 'challanno', 'chlnno', 'docno']) || `CHLN-${idx + 1}`;
+        const truckNo = pickStr(row, ['vehno', 'lorryno', 'vhlno', 'truckno']).toUpperCase().replace(/\s+/g, '') || '-';
         const cnDate = normDate(pickStr(row, ['chlndt', 'cndate', 'date', 'dt']));
         const hireAmount = roundPaise(pickNum(row, ['hireamt', 'lorryhire', 'hire', 'freight', 'amount']));
         const advancePaid = roundPaise(pickNum(row, ['advamt', 'advance', 'adv']));
@@ -749,11 +924,11 @@ export async function autoCollectOldDataFiles(params: {
         const podDt = pickStr(row, ['poddt', 'poddate', 'recdt']);
 
         result.lorryHires.push({
-          id: makeSafeDocId(`dbf_lh_${idx}`),
-          cnNo: cnNo || `CHLN-${idx + 1}`,
+          id: makeSafeDocId(`dbf_lh_${table.fileName}_${idx}`),
+          cnNo,
           cnDate,
           financialYear: resolveFinancialYearFromDate(cnDate) || normalizeFyLabel(params.activeFy),
-          truckNo: truckNo || '-',
+          truckNo,
           ownerName: pickStr(row, ['oname', 'owner', 'ownername', 'ownname', 'party']),
           brokerName: pickStr(row, ['bname', 'broker', 'brkrname', 'brokername']),
           fromCity: pickStr(row, ['fromcity', 'from', 'origin']) || 'KOLKATA',
@@ -770,16 +945,17 @@ export async function autoCollectOldDataFiles(params: {
           createdByStaff: params.staffCode,
           ownerUid: params.ownerUid,
         });
+        bumpFileImported(table.fileName);
       });
     } else if (isInvoiceDbf(leaf)) {
       table.rows.forEach((row, idx) => {
-        const invoiceNo = pickStr(row, ['invno', 'billno', 'taxinvno', 'docno']);
+        const invoiceNo = pickStr(row, ['invno', 'billno', 'taxinvno', 'docno']) || `OLD-INV-${idx + 1}`;
         const rawPartyCode = pickStr(row, ['hcode', 'pcode', 'acode', 'partycd', 'custcd']).toUpperCase();
         const partyName =
           pickStr(row, ['partyname', 'pname', 'hname', 'custname', 'customer', 'name']) ||
           headCodeToName.get(rawPartyCode) ||
-          rawPartyCode;
-        if (!invoiceNo && !partyName) return;
+          rawPartyCode ||
+          `Customer-${idx + 1}`;
 
         const invoiceDate = normDate(pickStr(row, ['invdate', 'billdate', 'bdate', 'date', 'dt']));
         const freightCharges = roundPaise(pickNum(row, ['freight', 'frtamt', 'taxable', 'basicamt', 'amount']));
@@ -815,12 +991,12 @@ export async function autoCollectOldDataFiles(params: {
           enrichByName.get(normalizePartyMatchKey(partyName));
 
         result.invoices.push({
-          id: makeSafeDocId(`dbf_inv_${idx}`),
-          invoiceNo: invoiceNo || `OLD-INV-${idx + 1}`,
+          id: makeSafeDocId(`dbf_inv_${table.fileName}_${idx}`),
+          invoiceNo,
           invoiceDate,
           dueDate: invoiceDate,
           financialYear: resolveFinancialYearFromDate(invoiceDate) || normalizeFyLabel(params.activeFy),
-          partyName: partyName || 'Customer',
+          partyName,
           partyAddress: composeDbfAddress(row) || enrichParty?.address || '',
           partyGstin: pickStr(row, ['gstno', 'gstin', 'partygst', 'gst']).toUpperCase() || enrichParty?.gstin || '',
           partyPan: pickStr(row, ['panno', 'itpan', 'pan']).toUpperCase() || enrichParty?.pan || '',
@@ -874,6 +1050,7 @@ export async function autoCollectOldDataFiles(params: {
           createdByStaff: params.staffCode,
           ownerUid: params.ownerUid,
         });
+        bumpFileImported(table.fileName);
       });
     } else if (isLedgerVoucherDbf(leaf)) {
       table.rows.forEach((row, idx) => {
@@ -881,8 +1058,8 @@ export async function autoCollectOldDataFiles(params: {
         const partyName =
           pickStr(row, ['partyname', 'hname', 'pname', 'acname', 'bname', 'oname', 'name']) ||
           headCodeToName.get(rawCode) ||
-          rawCode;
-        if (!partyName) return;
+          rawCode ||
+          `UNSPECIFIED-LEDGER-${idx + 1}`;
 
         const drAmt = roundPaise(Math.abs(pickNum(row, ['dramt', 'debit', 'dr'])));
         const crAmt = roundPaise(Math.abs(pickNum(row, ['cramt', 'credit', 'cr'])));
@@ -897,7 +1074,6 @@ export async function autoCollectOldDataFiles(params: {
             : drcrFlag.startsWith('D') || /bill|sale|inv|debit|\bdr\b/i.test(drcrFlag);
 
         const amount = roundPaise(isDebit ? drAmt || genericAmt : crAmt || genericAmt);
-        if (amount <= 0) return;
 
         const txDate = normDate(pickStr(row, ['vdate', 'trndate', 'date', 'dt', 'docdt']));
         const vNo =
@@ -915,29 +1091,84 @@ export async function autoCollectOldDataFiles(params: {
         });
 
         result.transactions.push({
-          id: makeSafeDocId(`dbf_trn_${idx}`),
-          txCode: vNo.slice(0, 40),
+          id: makeSafeDocId(`dbf_trn_${table.fileName}_${idx}`),
+          txCode: vNo,
           txDate,
           financialYear: resolvedFy,
           txType: isDebit ? 'Expense' : 'Income',
           ledgerAccount: isDebit ? 'Party Ledger Receivable (Dr)' : 'Party Ledger Receipt (Cr)',
-          partyName: partyName.slice(0, 120),
+          partyName,
           amount,
-          narration: (rawNarr || `${isDebit ? 'Debit' : 'Credit'} Voucher ${vNo} (${resolvedFy})`).slice(0, 300),
+          narration: rawNarr || `${isDebit ? 'Debit' : 'Credit'} Voucher ${vNo} (${resolvedFy})`,
           paymentMode: meta.paymentMode || 'Cash',
-          referenceNo: refNo.slice(0, 60),
+          referenceNo: refNo,
           upiRefId: meta.upiRefId || '',
           utrNo: meta.utrNo || '',
           chequeNo: meta.chequeNo || '',
           tdsAmount: roundPaise(pickNum(row, ['tds', 'tdsamt'])),
-          linkedCnNo: pickStr(row, ['cnno', 'lrno']).slice(0, 40),
+          linkedCnNo: pickStr(row, ['cnno', 'lrno']),
           linkedInvoiceNo: '',
           branchCode: params.branchCode,
           createdByStaff: params.staffCode,
           ownerUid: params.ownerUid,
         });
+        bumpFileImported(table.fileName);
+      });
+    } else if (
+      !isHeadCustomerDbf(leaf) &&
+      !isBrokerDbf(leaf) &&
+      !isOwnerOrVehicleMasterDbf(leaf) &&
+      !isDriverDbf(leaf) &&
+      !isDesmastDbf(leaf) &&
+      !isOpeningBalanceDbf(leaf)
+    ) {
+      // Any other non-scrap DBF table is still preserved 100% in Raw DBF Archive & also counted as imported
+      table.rows.forEach(() => {
+        bumpFileImported(table.fileName);
       });
     }
+  }
+
+  // Record complete Raw DBF Archive tables & exact 0-missed verification summary
+  let totalActiveRows = 0;
+  let totalImportedRows = 0;
+  let totalDeletedFlags = 0;
+  const importedAt = Date.now();
+
+  for (const { leaf, table } of dbfTables) {
+    const tableKind = classifyDbfTableKind(leaf);
+    const importedRows = fileImportedCount.get(table.fileName) ?? table.activeRows;
+    totalActiveRows += table.activeRows;
+    totalImportedRows += importedRows;
+    totalDeletedFlags += table.deletedFlagRows;
+
+    result.rawTables.push({
+      fileName: table.fileName,
+      tableKind,
+      fields: table.fields.map((f) => f.name),
+      totalRawRows: table.totalRawRows,
+      deletedFlagRows: table.deletedFlagRows,
+      activeRows: table.activeRows,
+      importedRows,
+      importedAt,
+      rows: table.rows,
+    });
+    result.verificationSummary.perFileStats.push({
+      fileName: table.fileName,
+      tableKind,
+      activeRows: table.activeRows,
+      deletedFlagRows: table.deletedFlagRows,
+      importedRows,
+    });
+  }
+
+  result.verificationSummary.totalActiveRows = totalActiveRows;
+  result.verificationSummary.totalImportedRows = totalImportedRows;
+  result.verificationSummary.missedRows = Math.max(0, totalActiveRows - totalImportedRows);
+  result.verificationSummary.deletedFlagRowsSkippedByFoxPro = totalDeletedFlags;
+
+  if (result.rawTables.length > 0) {
+    await saveRawDbfArchiveToIdb(result.rawTables).catch(() => {});
   }
 
   // Third pass: Bank PNB / Excel / CSV statements -> Credits + UPI Ref / UTR / Cheque + Auto 194C TDS

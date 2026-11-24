@@ -593,3 +593,102 @@ export function acknowledgeNewDeviceAlert(deviceId?: string): void {
   }
 }
 
+export const MASTER_ADMIN_PROTECTED_EMAIL = 'drc.2015kolkata@gmail.com';
+const MASTER_AUTHORIZED_DEVICES_KEY = 'drc_master_authorized_hardware_v1';
+
+export interface AuthorizedHardwareDevice {
+  deviceId: string;
+  deviceLabel: string;
+  platform: string;
+  authorizedAt: number;
+  authorizedEmail: string;
+  operatorLabel: string;
+}
+
+export function getAuthorizedHardwareDevices(): AuthorizedHardwareDevice[] {
+  try {
+    const raw = localStorage.getItem(MASTER_AUTHORIZED_DEVICES_KEY);
+    if (!raw) return [];
+    const parsed = JSON.parse(raw);
+    return Array.isArray(parsed) ? (parsed as AuthorizedHardwareDevice[]) : [];
+  } catch {
+    return [];
+  }
+}
+
+export function isCurrentDeviceAuthorizedForMasterEmail(email?: string | null): boolean {
+  const normEmail = String(email || '').trim().toLowerCase();
+  if (normEmail !== MASTER_ADMIN_PROTECTED_EMAIL) {
+    return true; // Only lock Master Admin Gmail hardware; branch staff bypass smoothly
+  }
+  const currentId = getOrCreateCurrentDeviceId();
+  const list = getAuthorizedHardwareDevices();
+  // Bootstrap first-ever Master Admin workstation automatically; block any subsequent unrecognized device until PIN + 2FA OTP
+  if (list.length === 0) {
+    const { label, platform } = getBrowserDeviceLabel();
+    const initial: AuthorizedHardwareDevice = {
+      deviceId: currentId,
+      deviceLabel: label,
+      platform,
+      authorizedAt: Date.now(),
+      authorizedEmail: MASTER_ADMIN_PROTECTED_EMAIL,
+      operatorLabel: 'Primary Master Workstation',
+    };
+    try {
+      localStorage.setItem(MASTER_AUTHORIZED_DEVICES_KEY, JSON.stringify([initial]));
+    } catch {
+      // Ignore
+    }
+    return true;
+  }
+  return list.some((d) => d.deviceId === currentId);
+}
+
+export function authorizeCurrentDeviceWithPinAndOtp(params: {
+  pin: string;
+  otp: string;
+  operatorLabel: string;
+  fallbackAdminPassword?: string;
+}): { authorized: boolean; error?: string } {
+  const res = unlockBackupVaultWithPinAndOtp({
+    pin: params.pin,
+    otp: params.otp,
+    fallbackAdminPassword: params.fallbackAdminPassword,
+  });
+  if (!res.unlocked) {
+    return { authorized: false, error: res.error };
+  }
+  const currentId = getOrCreateCurrentDeviceId();
+  const { label, platform } = getBrowserDeviceLabel();
+  const list = getAuthorizedHardwareDevices().filter((d) => d.deviceId !== currentId);
+  const next: AuthorizedHardwareDevice[] = [
+    ...list,
+    {
+      deviceId: currentId,
+      deviceLabel: label,
+      platform,
+      authorizedAt: Date.now(),
+      authorizedEmail: MASTER_ADMIN_PROTECTED_EMAIL,
+      operatorLabel: params.operatorLabel || 'Master Admin',
+    },
+  ];
+  try {
+    localStorage.setItem(MASTER_AUTHORIZED_DEVICES_KEY, JSON.stringify(next));
+    acknowledgeNewDeviceAlert(currentId);
+  } catch {
+    // Ignore
+  }
+  return { authorized: true };
+}
+
+export function revokeAuthorizedHardwareDevice(deviceId: string): AuthorizedHardwareDevice[] {
+  const next = getAuthorizedHardwareDevices().filter((d) => d.deviceId !== deviceId);
+  try {
+    localStorage.setItem(MASTER_AUTHORIZED_DEVICES_KEY, JSON.stringify(next));
+  } catch {
+    // Ignore
+  }
+  return next;
+}
+
+

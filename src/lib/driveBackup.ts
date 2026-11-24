@@ -1,4 +1,4 @@
-import { AnyDriveFolderName, DriveFolderName, LogisticsDriveFolderName } from '../types/erp';
+import { AnyDriveFolderName, BusinessMode, DriveFolderName, LogisticsDriveFolderName, PdfVaultFolder } from '../types/erp';
 import { isAuthorizedBackupDriveEmail, MASTER_ADMIN_EMAIL } from './firebase';
 import { isBlockedDangerousFileName } from './gstinValidator';
 
@@ -396,6 +396,20 @@ const LOGISTICS_FOLDER_SET = new Set<string>(LOGISTICS_DRIVE_FOLDERS);
 
 export function isLogisticsDriveFolder(folder: AnyDriveFolderName): folder is LogisticsDriveFolderName {
   return LOGISTICS_FOLDER_SET.has(folder);
+}
+
+export const PDF_VAULT_DRIVE_FOLDERS: PdfVaultFolder[] = [
+  '1. LR_Copy_PDFs',
+  '2. Tax_Invoice_PDFs',
+  '3. Quotation_PDFs',
+  '4. Declaration_PDFs',
+  '5. POD_Scans_PDFs',
+];
+
+const PDF_VAULT_FOLDER_SET = new Set<string>(PDF_VAULT_DRIVE_FOLDERS);
+
+export function isPdfVaultFolder(folder: AnyDriveFolderName): folder is PdfVaultFolder {
+  return PDF_VAULT_FOLDER_SET.has(folder);
 }
 
 export const ESSENTIAL_DRIVE_MASTER_FILES = [
@@ -1514,4 +1528,65 @@ export async function syncAutoBackupBundleToDrive(params: {
     mergedWithRemote,
     syncedAt: new Date().toISOString(),
   };
+}
+
+export async function uploadPdfToDivisionVaultFolder(params: {
+  accessToken: string;
+  division: BusinessMode;
+  folderName: PdfVaultFolder;
+  fileName: string;
+  blob: Blob;
+  overwriteIfExists?: boolean;
+  connectedEmail?: string | null;
+}): Promise<{ id: string; name: string; webViewLink?: string }> {
+  const {
+    accessToken,
+    division,
+    folderName,
+    fileName,
+    blob,
+    overwriteIfExists = true,
+    connectedEmail,
+  } = params;
+  assertAuthorizedBackupAccount(connectedEmail);
+  assertSafeDriveFileName(fileName);
+
+  const rootId = await findOrCreateFolder(ROOT_FOLDER_NAME, accessToken);
+  const divisionFolderId = await findOrCreateFolder(`${division}_PDF_VAULT`, accessToken, rootId);
+  const targetFolderId = await findOrCreateFolder(folderName, accessToken, divisionFolderId);
+
+  const existingId = overwriteIfExists
+    ? await findFileInFolder(fileName, targetFolderId, accessToken)
+    : null;
+
+  const boundary = 'drc_vault_pdf_' + Date.now();
+  const mimeType = 'application/pdf';
+  const metadata = existingId
+    ? { name: fileName, mimeType }
+    : { name: fileName, mimeType, parents: [targetFolderId] };
+
+  const arrayBuffer = await blob.arrayBuffer();
+  const base64Body = uint8ArrayToBase64(new Uint8Array(arrayBuffer));
+
+  const multipartBody =
+    `--${boundary}\r\n` +
+    `Content-Type: application/json; charset=UTF-8\r\n\r\n` +
+    `${JSON.stringify(metadata)}\r\n` +
+    `--${boundary}\r\n` +
+    `Content-Type: ${mimeType}\r\n` +
+    `Content-Transfer-Encoding: base64\r\n\r\n` +
+    `${base64Body}\r\n` +
+    `--${boundary}--`;
+
+  const url = existingId
+    ? `https://www.googleapis.com/upload/drive/v3/files/${existingId}?uploadType=multipart&fields=id,name,webViewLink`
+    : `https://www.googleapis.com/upload/drive/v3/files?uploadType=multipart&fields=id,name,webViewLink`;
+
+  const res = await driveFetch(url, accessToken, {
+    method: existingId ? 'PATCH' : 'POST',
+    headers: { 'Content-Type': `multipart/related; boundary=${boundary}` },
+    body: multipartBody,
+  });
+
+  return (await res.json()) as { id: string; name: string; webViewLink?: string };
 }

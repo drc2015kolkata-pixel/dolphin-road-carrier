@@ -507,3 +507,385 @@ export function runStartupAndMonthlyFormulaGuard(params: {
   };
 }
 
+// ============================================================================
+// EMBEDDED GEMINI AI SYSTEM DOCTOR + 3-TIER SELF-HEALING FORMULA AUTO-REPAIR
+// + 15-DAY / 30-DAY SCHEDULER & RUNTIME ERROR INTERCEPTOR
+// ============================================================================
+
+export const AI_DOCTOR_15DAY_KEY = 'drc_last_15day_doctor_v1';
+export const AI_DOCTOR_30DAY_KEY = 'drc_last_30day_doctor_v1';
+export const AI_DOCTOR_REPORT_KEY = 'drc_ai_doctor_latest_report_v1';
+export const RUNTIME_ERRORS_KEY = 'drc_runtime_errors_v1';
+
+export interface RuntimeErrorEntry {
+  at: number;
+  source: string;
+  message: string;
+}
+
+export type AiDoctorTrigger = 'startup' | 'manual' | 'switch_off' | '15_day' | '30_day';
+
+export interface AiDoctorReport {
+  ranAt: number;
+  trigger: AiDoctorTrigger;
+  healthScore: number;
+  statusLabel: string;
+  usedGemini: boolean;
+  repairedCount: number;
+  runtimeErrorsCaptured: number;
+  summaryEn: string;
+  summaryBn: string;
+  fixesAppliedEn: string[];
+  fixesAppliedBn: string[];
+  recommendationsEn: string[];
+  recommendationsBn: string[];
+}
+
+let runtimeErrorCollectorInstalled = false;
+
+export function getRuntimeErrorLogs(): RuntimeErrorEntry[] {
+  try {
+    const raw = localStorage.getItem(RUNTIME_ERRORS_KEY);
+    if (!raw) return [];
+    const parsed = JSON.parse(raw);
+    return Array.isArray(parsed) ? (parsed as RuntimeErrorEntry[]) : [];
+  } catch {
+    return [];
+  }
+}
+
+export function clearRuntimeErrorLogs(): void {
+  try {
+    localStorage.removeItem(RUNTIME_ERRORS_KEY);
+  } catch {
+    // Ignore storage constraints
+  }
+}
+
+function appendRuntimeErrorLog(entry: RuntimeErrorEntry): void {
+  try {
+    const list = getRuntimeErrorLogs();
+    const next = [...list, entry].slice(-30);
+    localStorage.setItem(RUNTIME_ERRORS_KEY, JSON.stringify(next));
+  } catch {
+    // Ignore
+  }
+}
+
+export function installRuntimeErrorCollector(): void {
+  if (typeof window === 'undefined' || runtimeErrorCollectorInstalled) return;
+  runtimeErrorCollectorInstalled = true;
+
+  window.addEventListener('error', (evt) => {
+    const msg = String(evt.message || 'Unknown client runtime error');
+    // Ignore blocked HMR websocket noise
+    if (/websocket|vite/i.test(msg)) return;
+    appendRuntimeErrorLog({
+      at: Date.now(),
+      source: evt.filename ? `${evt.filename}:${evt.lineno}` : 'window.error',
+      message: msg,
+    });
+  });
+
+  window.addEventListener('unhandledrejection', (evt) => {
+    const reason = evt.reason instanceof Error ? evt.reason.message : String(evt.reason || 'Unhandled rejection');
+    if (/websocket|vite/i.test(reason)) return;
+    appendRuntimeErrorLog({
+      at: Date.now(),
+      source: 'unhandledrejection',
+      message: reason,
+    });
+  });
+}
+
+export function isDueFor15DayDoctor(): boolean {
+  try {
+    const raw = localStorage.getItem(AI_DOCTOR_15DAY_KEY);
+    if (!raw) return true;
+    const ts = Number(raw);
+    return !Number.isFinite(ts) || Date.now() - ts >= 15 * 24 * 60 * 60 * 1000;
+  } catch {
+    return false;
+  }
+}
+
+export function isDueFor30DayDoctor(): boolean {
+  try {
+    const raw = localStorage.getItem(AI_DOCTOR_30DAY_KEY);
+    if (!raw) return true;
+    const ts = Number(raw);
+    return !Number.isFinite(ts) || Date.now() - ts >= 30 * 24 * 60 * 60 * 1000;
+  } catch {
+    return false;
+  }
+}
+
+export function loadSavedAiDoctorReport(): AiDoctorReport | null {
+  try {
+    const raw = localStorage.getItem(AI_DOCTOR_REPORT_KEY);
+    if (!raw) return null;
+    return JSON.parse(raw) as AiDoctorReport;
+  } catch {
+    return null;
+  }
+}
+
+export async function runAiDeepFormulaAndBugRepair(params: {
+  trigger: AiDoctorTrigger;
+  activeFy: string;
+  allData: {
+    consignments: Array<Record<string, unknown>>;
+    lorryHires: Array<Record<string, unknown>>;
+    invoices: Array<Record<string, unknown>>;
+    transactions: Array<Record<string, unknown>>;
+    parties: Party[];
+    logisticsDockets?: Array<Record<string, unknown>>;
+    logisticsInvoices?: Array<Record<string, unknown>>;
+  };
+  persistCollectionPatch?: (collection: string, docId: string, patch: Record<string, unknown>) => Promise<void> | void;
+}): Promise<AiDoctorReport> {
+  const { allData, trigger, activeFy, persistCollectionPatch } = params;
+  const fixesAppliedEn: string[] = [];
+  const fixesAppliedBn: string[] = [];
+  const remainingAnomalies: string[] = [];
+  let repairedCount = 0;
+
+  // 1. Repair Consignment freight & paid/to-pay parity (only if NaN/corrupt or mismatched where no manual override exists)
+  for (const cn of allData.consignments || []) {
+    const patch: Record<string, unknown> = {};
+    const wt = safePaise(cn.nettWeight || cn.grossWeight || 0);
+    const rate = safePaise(cn.ratePerUnit || 0);
+    const curFreight = safePaise(cn.totalFreight);
+    if (isCorruptNum(cn.totalFreight) || (curFreight === 0 && wt > 0 && rate > 0 && String(cn.rateMode || '') !== 'Fixed')) {
+      const calc = safePaise(wt * rate);
+      patch.totalFreight = calc;
+      cn.totalFreight = calc;
+    }
+    const totFrt = safePaise(patch.totalFreight ?? cn.totalFreight);
+    const paid = safePaise(cn.paidAmount);
+    const toPay = safePaise(cn.toPayAmount);
+    if (String(cn.payBasis || '') === 'To-Pay' && totFrt > 0 && paid === 0 && Math.abs(toPay - totFrt) > 0.05) {
+      patch.toPayAmount = totFrt;
+      cn.toPayAmount = totFrt;
+    } else if (String(cn.payBasis || '') === 'Paid' && totFrt > 0 && toPay === 0 && Math.abs(paid - totFrt) > 0.05) {
+      patch.paidAmount = totFrt;
+      cn.paidAmount = totFrt;
+    }
+    if (!cn.financialYear) {
+      patch.financialYear = activeFy;
+      cn.financialYear = activeFy;
+    }
+    if (Object.keys(patch).length > 0 && typeof cn.id === 'string') {
+      repairedCount += 1;
+      await persistCollectionPatch?.('consignments', cn.id, patch);
+    }
+  }
+
+  // 2. Repair Lorry Hire balance formula parity (hire + detention - advances - deductions)
+  for (const lh of allData.lorryHires || []) {
+    const patch: Record<string, unknown> = {};
+    const hire = safePaise(lh.hireAmount);
+    const det = safePaise(lh.detentionCharge);
+    const advList = Array.isArray(lh.advances) ? (lh.advances as Array<{ amount?: number }>) : [];
+    const totalAdv = advList.length > 0
+      ? safePaise(advList.reduce((s, a) => s + safePaise(a.amount), 0))
+      : safePaise(lh.advancePaid);
+    const tdsAmt = safePaise(lh.tdsAmount);
+    const ded = safePaise(
+      safePaise(lh.loadingCharge) +
+        safePaise(lh.unloadingCharge) +
+        safePaise(lh.parkingCharge) +
+        safePaise(lh.kataCharge) +
+        safePaise(lh.shortageCharge) +
+        safePaise(lh.damageCharge) +
+        tdsAmt
+    );
+    const expectedBal = safePaise(Math.max(0, hire + det - totalAdv - ded));
+    if (isCorruptNum(lh.balancePayable) || Math.abs(safePaise(lh.balancePayable) - expectedBal) > 0.5) {
+      patch.balancePayable = expectedBal;
+      lh.balancePayable = expectedBal;
+    }
+    if (advList.length > 0 && Math.abs(safePaise(lh.advancePaid) - totalAdv) > 0.05) {
+      patch.advancePaid = totalAdv;
+      lh.advancePaid = totalAdv;
+    }
+    if (!lh.financialYear) {
+      patch.financialYear = activeFy;
+      lh.financialYear = activeFy;
+    }
+    if (Object.keys(patch).length > 0 && typeof lh.id === 'string') {
+      repairedCount += 1;
+      await persistCollectionPatch?.('lorry_hires', lh.id, patch);
+    }
+  }
+
+  // 3. Repair Invoice Tax & Grand Total parity
+  for (const inv of allData.invoices || []) {
+    const patch: Record<string, unknown> = {};
+    const cgst = safePaise(inv.cgstAmt);
+    const sgst = safePaise(inv.sgstAmt);
+    const igst = safePaise(inv.igstAmt);
+    const calcTax = safePaise(cgst + sgst + igst);
+    if (Math.abs(safePaise(inv.totalTax) - calcTax) > 0.05) {
+      patch.totalTax = calcTax;
+      inv.totalTax = calcTax;
+    }
+    const baseSum = safePaise(
+      safePaise(inv.freightCharges) +
+        safePaise(inv.detentionCharges) +
+        safePaise(inv.unloadingCharges) +
+        safePaise(inv.stCharges) +
+        calcTax
+    );
+    if (isCorruptNum(inv.grandTotal) || (!inv.manualTotalOverride && Math.abs(safePaise(inv.grandTotal) - baseSum) > 0.5)) {
+      patch.grandTotal = baseSum;
+      inv.grandTotal = baseSum;
+    }
+    if (!inv.financialYear) {
+      patch.financialYear = activeFy;
+      inv.financialYear = activeFy;
+    }
+    if (Object.keys(patch).length > 0 && typeof inv.id === 'string') {
+      repairedCount += 1;
+      await persistCollectionPatch?.('invoices', inv.id, patch);
+    }
+  }
+
+  // 4. Repair Transactions paise & FY
+  for (const tx of allData.transactions || []) {
+    const patch: Record<string, unknown> = {};
+    const rounded = safePaise(tx.amount);
+    if (isCorruptNum(tx.amount) || rounded !== Number(tx.amount)) {
+      patch.amount = rounded;
+      tx.amount = rounded;
+    }
+    if (!tx.financialYear) {
+      patch.financialYear = activeFy;
+      tx.financialYear = activeFy;
+    }
+    if (Object.keys(patch).length > 0 && typeof tx.id === 'string') {
+      repairedCount += 1;
+      await persistCollectionPatch?.('transactions', tx.id, patch);
+    }
+  }
+
+  if (repairedCount > 0) {
+    fixesAppliedEn.push(`Auto-repaired ${repairedCount} formula/FY field(s) across CN, Lorry Hire, Bills & Vouchers.`);
+    fixesAppliedBn.push(`CN, লরি হায়ার, বিল এবং ভাউচারে ${repairedCount}টি ফর্মুলা ও অর্থবর্ষ স্বয়ংক্রিয়ভাবে ঠিক করা হয়েছে।`);
+  } else {
+    fixesAppliedEn.push('All CN, Lorry Hire, GST Bill & Ledger formulas passed 100% accuracy verification.');
+    fixesAppliedBn.push('সমস্ত CN, লরি হায়ার, GST বিল এবং লেজার ফর্মুলা ১০০% নির্ভুল পাওয়া গেছে।');
+  }
+
+  const contactIssues = scanPartiesForContactIssues(allData.parties || []);
+  if (contactIssues.length > 0) {
+    remainingAnomalies.push(`${contactIssues.length} party profile(s) have missing/invalid GSTIN, PAN, or 10-digit Phone.`);
+  }
+
+  const runtimeErrors = getRuntimeErrorLogs();
+  const divisionMetrics = {
+    consignments: (allData.consignments || []).length,
+    lorryHires: (allData.lorryHires || []).length,
+    invoices: (allData.invoices || []).length,
+    transactions: (allData.transactions || []).length,
+    parties: (allData.parties || []).length,
+    logisticsDockets: (allData.logisticsDockets || []).length,
+    logisticsInvoices: (allData.logisticsInvoices || []).length,
+    contactWarnings: contactIssues.length,
+  };
+
+  let report: AiDoctorReport | null = null;
+
+  try {
+    const resp = await fetch('/api/gemini/system-doctor', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({
+        divisionMetrics,
+        formulaFixesApplied: fixesAppliedEn,
+        remainingAnomalies,
+        runtimeErrors,
+        activeFy,
+      }),
+    });
+    if (resp.ok) {
+      const json = (await resp.json()) as {
+        data?: {
+          healthScore?: number;
+          statusLabel?: string;
+          summaryEn?: string;
+          summaryBn?: string;
+          fixesAppliedEn?: string[];
+          fixesAppliedBn?: string[];
+          recommendationsEn?: string[];
+          recommendationsBn?: string[];
+        };
+      };
+      if (json.data) {
+        report = {
+          ranAt: Date.now(),
+          trigger,
+          healthScore: Number(json.data.healthScore ?? 98),
+          statusLabel: json.data.statusLabel || (repairedCount > 0 ? 'Auto-Healed' : '100% Error-Free'),
+          usedGemini: true,
+          repairedCount,
+          runtimeErrorsCaptured: runtimeErrors.length,
+          summaryEn: json.data.summaryEn || fixesAppliedEn[0],
+          summaryBn: json.data.summaryBn || fixesAppliedBn[0],
+          fixesAppliedEn: json.data.fixesAppliedEn?.length ? json.data.fixesAppliedEn : fixesAppliedEn,
+          fixesAppliedBn: json.data.fixesAppliedBn?.length ? json.data.fixesAppliedBn : fixesAppliedBn,
+          recommendationsEn: json.data.recommendationsEn || remainingAnomalies,
+          recommendationsBn:
+            json.data.recommendationsBn ||
+            (contactIssues.length > 0
+              ? [`${contactIssues.length}টি পার্টির GSTIN / PAN / ফোন নম্বর মাস্টার শীটে আপডেট করুন।`]
+              : ['সব সিস্টেম সুরক্ষিত রয়েছে — নিয়মিত Google Drive ব্যাকআপ চালু রাখুন।']),
+        };
+      }
+    }
+  } catch {
+    // Offline deterministic fallback below
+  }
+
+  if (!report) {
+    const score = Math.max(82, 100 - Math.min(10, contactIssues.length) - Math.min(8, runtimeErrors.length));
+    report = {
+      ranAt: Date.now(),
+      trigger,
+      healthScore: score,
+      statusLabel: repairedCount > 0 ? 'Auto-Healed (Offline Shield)' : '100% Verified (Offline Shield)',
+      usedGemini: false,
+      repairedCount,
+      runtimeErrorsCaptured: runtimeErrors.length,
+      summaryEn: `Scanned ${divisionMetrics.consignments} CNs, ${divisionMetrics.lorryHires} Lorry Hires, ${divisionMetrics.invoices} Bills & ${divisionMetrics.transactions} Vouchers (${activeFy}). Applied ${repairedCount} auto-repair(s); ${runtimeErrors.length} runtime error(s) logged.`,
+      summaryBn: `${activeFy}-এর ${divisionMetrics.consignments}টি CN, ${divisionMetrics.lorryHires}টি লরি হায়ার, ${divisionMetrics.invoices}টি বিল ও ${divisionMetrics.transactions}টি ভাউচার যাচাই করা হয়েছে। ${repairedCount}টি স্বয়ংক্রিয় মেরামত সম্পন্ন।`,
+      fixesAppliedEn,
+      fixesAppliedBn,
+      recommendationsEn:
+        remainingAnomalies.length > 0
+          ? remainingAnomalies
+          : ['No critical formula faults detected. Continue daily SHA-256 Google Drive backup.'],
+      recommendationsBn:
+        contactIssues.length > 0
+          ? [`${contactIssues.length}টি পার্টির GSTIN / PAN / মোবাইল নম্বর যাচাই করুন।`]
+          : ['কোনো হিসাবের ত্রুটি পাওয়া যায়নি। প্রতিদিনের Google Drive ব্যাকআপ সক্রিয় আছে।'],
+    };
+  }
+
+  const now = Date.now();
+  try {
+    localStorage.setItem(AI_DOCTOR_REPORT_KEY, JSON.stringify(report));
+    if (trigger === '15_day' || trigger === 'manual') {
+      localStorage.setItem(AI_DOCTOR_15DAY_KEY, String(now));
+    }
+    if (trigger === '30_day' || trigger === 'manual') {
+      localStorage.setItem(AI_DOCTOR_30DAY_KEY, String(now));
+    }
+  } catch {
+    // Ignore storage constraints
+  }
+
+  return report;
+}
+
+

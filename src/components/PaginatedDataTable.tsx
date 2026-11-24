@@ -1,5 +1,6 @@
 import React, { useEffect, useMemo, useState } from 'react';
 import { ChevronLeft, ChevronRight, ChevronsLeft, ChevronsRight } from 'lucide-react';
+import { SearchableSelect } from './SearchableSelect';
 
 export interface TableColumn<T> {
   key: string;
@@ -134,21 +135,22 @@ function PaginatedDataTableInner<T>({
             of <strong className="font-mono-num text-slate-800">{totalRows}</strong> rows
           </span>
           <span className="text-slate-300">|</span>
-          <label className="inline-flex items-center gap-1">
+          <div className="inline-flex items-center gap-1.5">
             <span>Rows/page:</span>
-            <select
-              value={pageSize}
-              onChange={(e) => {
-                setPageSize(Number(e.target.value));
+            <SearchableSelect
+              ariaLabel="Rows per page"
+              value={String(pageSize)}
+              onChange={(val) => {
+                setPageSize(Number(val) || 50);
                 setPage(1);
               }}
-              className="px-1.5 py-0.5 rounded border border-slate-300 bg-white font-mono-num text-slate-800"
-            >
-              <option value={25}>25</option>
-              <option value={50}>50</option>
-              <option value={100}>100</option>
-            </select>
-          </label>
+              sortAlphabetically={false}
+              pinEmptyOptionFirst={false}
+              options={['25', '50', '100']}
+              className="w-20"
+              buttonClassName="!py-0.5 !px-2 !text-[11px] font-mono-num"
+            />
+          </div>
         </div>
 
         <div className="flex items-center gap-1">

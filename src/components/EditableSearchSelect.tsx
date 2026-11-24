@@ -1,5 +1,6 @@
 import React, { useEffect, useMemo, useRef, useState } from 'react';
 import { Check, ChevronDown, Edit2, Plus, Search, Trash2, X } from 'lucide-react';
+import { SearchableSelect } from './SearchableSelect';
 
 interface YesNoSelectProps {
   value: boolean;
@@ -17,11 +18,8 @@ export const YesNoSelect: React.FC<YesNoSelectProps> = ({
   className = '',
 }) => {
   return (
-    <select
+    <div
       id={id}
-      aria-label={ariaLabel}
-      value={value ? 'Yes' : 'No'}
-      onChange={(e) => onChange(e.target.value === 'Yes')}
       onKeyDown={(e) => {
         const k = e.key.toLowerCase();
         if (k === 'y') {
@@ -33,15 +31,22 @@ export const YesNoSelect: React.FC<YesNoSelectProps> = ({
         }
       }}
       title="Press Y for Yes or N for No"
-      className={`px-2 py-1 rounded border text-xs font-bold cursor-pointer focus:outline-none focus:ring-2 focus:ring-blue-500 ${
-        value
-          ? 'border-emerald-400 bg-emerald-50 text-emerald-800'
-          : 'border-slate-300 bg-white text-slate-700'
-      } ${className}`}
+      className={className}
     >
-      <option value="No">No</option>
-      <option value="Yes">Yes</option>
-    </select>
+      <SearchableSelect
+        ariaLabel={ariaLabel}
+        value={value ? 'Yes' : 'No'}
+        onChange={(next) => onChange(next === 'Yes')}
+        sortAlphabetically={false}
+        pinEmptyOptionFirst={false}
+        options={['No', 'Yes']}
+        buttonClassName={`!py-1 !text-xs !font-bold ${
+          value
+            ? '!border-emerald-400 !bg-emerald-50 !text-emerald-800'
+            : '!border-slate-300 !bg-white !text-slate-700'
+        }`}
+      />
+    </div>
   );
 };
 

@@ -2,11 +2,14 @@ import React, { useEffect, useMemo, useRef, useState } from 'react';
 import {
   AlertTriangle,
   ArrowRightLeft,
+  Bot,
   Building2,
   CheckCircle2,
   CloudDownload,
   CloudUpload,
   Copy,
+  Cpu,
+  Database,
   Download,
   Edit3,
   Eye,
@@ -25,6 +28,7 @@ import {
   RotateCcw,
   Save,
   Search,
+  ShieldAlert,
   ShieldCheck,
   Smartphone,
   Sparkles,
@@ -95,14 +99,23 @@ import {
 import {
   AutoCollectedOldDataResult,
   autoCollectOldDataFiles,
+  DbfVerificationSummary,
+  loadRawDbfArchiveFromIdb,
+  RawDbfTableDump,
 } from '../lib/foxproDbfImport';
 import {
   analyzeAndSeparateMisclassifiedParties,
   restoreHeadPartiesToBillingCustomers,
 } from '../lib/partySeparation';
 import {
+  AI_DOCTOR_15DAY_KEY,
+  AI_DOCTOR_30DAY_KEY,
+  AiDoctorReport,
+  clearRuntimeErrorLogs,
   getLast90DayMaintenanceTimestamp,
+  getRuntimeErrorLogs,
   getStoredAdminPin,
+  loadSavedAiDoctorReport,
   runSystemAutoFixAndClean,
   saveAdminPin,
   verifyAdminPin,
@@ -119,12 +132,17 @@ import {
   upsertDocument,
 } from '../lib/firestoreStore';
 import {
+  authorizeCurrentDeviceWithPinAndOtp,
+  AuthorizedHardwareDevice,
   DeviceTrustCheckResult,
   getActiveTwoFactorOtpChallenge,
+  getAuthorizedHardwareDevices,
   hasLiveCompanyData,
   isBackupVaultUnlocked,
   issueTwoFactorOtpChallenge,
   lockBackupVault,
+  MASTER_ADMIN_PROTECTED_EMAIL,
+  revokeAuthorizedHardwareDevice,
   TwoFactorOtpChallenge,
   unlockBackupVaultWithPinAndOtp,
 } from '../lib/securityShield';
@@ -169,6 +187,7 @@ import { DEFAULT_BHOLE_BABA_IMAGE, DEFAULT_KHATU_SHYAM_IMAGE } from '../lib/sacr
 import { useDebouncedValue } from '../hooks/useDebounce';
 import { PaginatedDataTable, TableColumn } from './PaginatedDataTable';
 import { SearchableSelect } from './SearchableSelect';
+import { PdfStoreVaultPanel } from './PdfStoreVaultPanel';
 
 interface BackupSettingsModuleProps {
   mode: 'backup' | 'settings';
@@ -213,6 +232,9 @@ interface BackupSettingsModuleProps {
     message?: string;
   };
   deviceTrust?: DeviceTrustCheckResult | null;
+  aiDoctorReport?: AiDoctorReport | null;
+  runningAiDoctor?: boolean;
+  onRunAiDoctor?: () => Promise<void>;
   onAcknowledgeNewDevice?: () => void;
   onManualSyncNow?: () => Promise<void>;
   onSwitchGmail: () => Promise<void>;
@@ -258,6 +280,9 @@ const BackupSettingsModuleInner: React.FC<BackupSettingsModuleProps> = ({
   logisticsData,
   autoBackupInfo,
   deviceTrust,
+  aiDoctorReport,
+  runningAiDoctor = false,
+  onRunAiDoctor,
   onAcknowledgeNewDevice,
   onManualSyncNow,
   onSwitchGmail,
@@ -300,6 +325,31 @@ const BackupSettingsModuleInner: React.FC<BackupSettingsModuleProps> = ({
   const [cleaningParties, setCleaningParties] = useState(false);
   const [copiedDomain, setCopiedDomain] = useState(false);
   const oauthDomain = useMemo(() => getOAuthDomainStatus(), []);
+
+  // Persisted 0-Missed DBF Verification Counter & Raw Archive Viewer
+  const [dbfVerification, setDbfVerification] = useState<DbfVerificationSummary | null>(() => {
+    try {
+      const raw = localStorage.getItem('drc_last_dbf_verify_v1');
+      return raw ? (JSON.parse(raw) as DbfVerificationSummary) : null;
+    } catch {
+      return null;
+    }
+  });
+  const [rawArchiveOpen, setRawArchiveOpen] = useState(false);
+  const [rawArchiveTables, setRawArchiveTables] = useState<RawDbfTableDump[]>([]);
+  const [rawArchiveSelectedTable, setRawArchiveSelectedTable] = useState('');
+  const [rawArchiveSearch, setRawArchiveSearch] = useState('');
+  const [rawArchivePage, setRawArchivePage] = useState(1);
+
+  // Embedded Gemini AI Doctor & Hardware Device Lock State
+  const [runtimeLogCount, setRuntimeLogCount] = useState(() => getRuntimeErrorLogs().length);
+  const [authorizedDevices, setAuthorizedDevices] = useState<AuthorizedHardwareDevice[]>(() =>
+    getAuthorizedHardwareDevices()
+  );
+  const [hwPinInput, setHwPinInput] = useState('');
+  const [hwOtpInput, setHwOtpInput] = useState('');
+  const [hwOtpChallenge, setHwOtpChallenge] = useState<TwoFactorOtpChallenge | null>(null);
+  const [hwMsg, setHwMsg] = useState<string | null>(null);
 
   // Master Admin ID & Password Management
   const [adminCurrentPwd, setAdminCurrentPwd] = useState('');
@@ -741,11 +791,19 @@ const BackupSettingsModuleInner: React.FC<BackupSettingsModuleProps> = ({
         existingInvoices: allData.invoices,
       });
       setAutoCollectResult(res);
+      if (res.verificationSummary) {
+        setDbfVerification(res.verificationSummary);
+        try {
+          localStorage.setItem('drc_last_dbf_verify_v1', JSON.stringify(res.verificationSummary));
+        } catch {
+          // Ignore storage quota issues
+        }
+      }
       if (res.processedFiles.length === 0) {
         setDriveError('No .DBF or Bank PNB Excel (.xlsx/.xls/.csv) files found in the selected folder/files.');
       } else {
         setDriveStatus(
-          `Auto-Collect scanned ${res.processedFiles.length} data file(s) & skipped ${res.ignoredScrapFiles.length} scrap file(s): Ready to import ${res.parties.length} Parties/Owners/Brokers, ${res.consignments.length} CN/Bilty, ${res.invoices.length} Bills, ${res.lorryHires.length} Challans, ${res.transactions.length} Ledger Vouchers, ${res.bankReceipts.length} PNB Receipts.`
+          `Auto-Collect scanned ${res.processedFiles.length} data file(s) & skipped ${res.ignoredScrapFiles.length} scrap file(s): Imported ${res.verificationSummary.totalImportedRows} / ${res.verificationSummary.totalActiveRows} Total DBF Rows (${res.verificationSummary.missedRows} Missed).`
         );
       }
     } catch (err) {
@@ -805,7 +863,7 @@ const BackupSettingsModuleInner: React.FC<BackupSettingsModuleProps> = ({
       }
       playVerifiedBeep();
       setDriveStatus(
-        `One-Click Auto-Collect Complete: Imported ${totalImported} legacy FoxPro/PNB record(s) + ${autoCollectResult.destinations.length} Destination(s) into Firestore & Local Cache (${autoCollectResult.ignoredScrapFiles.length} scrap file(s) excluded).`
+        `One-Click Auto-Collect Complete: ✅ Imported ${autoCollectResult.verificationSummary.totalImportedRows} / ${autoCollectResult.verificationSummary.totalActiveRows} Total DBF Rows — ${autoCollectResult.verificationSummary.missedRows} Missed (${totalImported} Firestore records synced).`
       );
       setAutoCollectResult(null);
     } catch (err) {
@@ -815,11 +873,24 @@ const BackupSettingsModuleInner: React.FC<BackupSettingsModuleProps> = ({
     }
   };
 
+  const handleOpenRawArchiveViewer = async () => {
+    const tables = await loadRawDbfArchiveFromIdb();
+    setRawArchiveTables(tables);
+    setRawArchiveSelectedTable(tables[0]?.fileName || '');
+    setRawArchiveSearch('');
+    setRawArchivePage(1);
+    setRawArchiveOpen(true);
+  };
+
   const handleRestoreHeadParties = async () => {
     setCleaningParties(true);
     setDriveError(null);
     try {
-      const { restoredParties, restoredCount } = restoreHeadPartiesToBillingCustomers(allData.parties);
+      const { restoredParties, restoredCount } = restoreHeadPartiesToBillingCustomers(
+        allData.parties,
+        allData.consignments,
+        allData.invoices
+      );
       if (restoredCount === 0) {
         const billingCount = allData.parties.filter(
           (p) => p.partyType === 'Customer' || p.partyType === 'Consignor' || p.partyType === 'Consignee'
@@ -2045,7 +2116,15 @@ const BackupSettingsModuleInner: React.FC<BackupSettingsModuleProps> = ({
                   <Users className="w-3.5 h-3.5" />
                   {cleaningParties
                     ? 'Working...'
-                    : '👥 Restore All HEAD Parties to Billing Customers'}
+                    : '👥 Move All HEAD Parties to Billing Customers'}
+                </button>
+                <button
+                  type="button"
+                  onClick={() => void handleOpenRawArchiveViewer()}
+                  className="inline-flex items-center gap-1.5 px-3 py-1.5 rounded-lg bg-slate-800 hover:bg-slate-900 text-white text-xs font-extrabold cursor-pointer whitespace-nowrap"
+                >
+                  <Database className="w-3.5 h-3.5 text-amber-300" />
+                  📋 Raw DBF Archive Viewer
                 </button>
                 <button
                   type="button"
@@ -2058,6 +2137,27 @@ const BackupSettingsModuleInner: React.FC<BackupSettingsModuleProps> = ({
                 </button>
               </div>
             </div>
+
+            {dbfVerification && (
+              <div className="px-4 py-2 bg-blue-50/80 border-b border-blue-200 flex flex-wrap items-center justify-between gap-2 text-xs">
+                <span className="font-extrabold text-blue-950 font-mono-num">
+                  ✅ Imported {dbfVerification.totalImportedRows} / {dbfVerification.totalActiveRows} Total DBF Rows — {dbfVerification.missedRows} Missed
+                  {dbfVerification.deletedFlagRowsSkippedByFoxPro > 0
+                    ? ` (${dbfVerification.deletedFlagRowsSkippedByFoxPro} FoxPro *deleted records excluded)`
+                    : ''}
+                </span>
+                <div className="flex flex-wrap gap-1.5">
+                  {dbfVerification.perFileStats.map((fs) => (
+                    <span
+                      key={fs.fileName}
+                      className="px-2 py-0.5 rounded bg-white border border-blue-200 text-[10px] font-mono-num font-bold text-slate-800"
+                    >
+                      {fs.fileName}: {fs.importedRows}/{fs.activeRows}
+                    </span>
+                  ))}
+                </div>
+              </div>
+            )}
 
             {autoCollectResult && (
               <div className="p-4 space-y-3 bg-blue-50/40 text-xs">
@@ -2502,6 +2602,16 @@ const BackupSettingsModuleInner: React.FC<BackupSettingsModuleProps> = ({
               </table>
             </div>
           )}
+          <PdfStoreVaultPanel
+            company={company}
+            parties={allData.parties}
+            logisticsParties={logisticsData?.parties}
+            defaultDivision="ALL"
+            driveAccessToken={driveAccessToken}
+            connectedEmail={connectedEmail}
+            onConnectDrive={onSwitchGmail}
+            onPreviewPdf={onPreviewPdf}
+          />
         </div>
       )}
 
@@ -2741,6 +2851,238 @@ const BackupSettingsModuleInner: React.FC<BackupSettingsModuleProps> = ({
                 </div>
               </form>
             )}
+          </div>
+
+          {/* Embedded Gemini AI System Doctor (Startup, Switch Off, 15-Day & 30-Day Deep Formula Auto-Repair) */}
+          {(() => {
+            const report = aiDoctorReport || loadSavedAiDoctorReport();
+            const last15 = Number(localStorage.getItem(AI_DOCTOR_15DAY_KEY) || 0);
+            const last30 = Number(localStorage.getItem(AI_DOCTOR_30DAY_KEY) || 0);
+            return (
+              <div className="bg-white rounded-xl border border-indigo-200 shadow-sm overflow-hidden">
+                <div className="bg-gradient-to-r from-[#1E1B4B] via-[#312E81] to-[#1D4ED8] text-white px-4 py-2.5 flex flex-wrap items-center justify-between gap-2">
+                  <div className="flex items-center gap-2 text-sm font-bold">
+                    <Bot className="w-4 h-4 text-amber-300" />
+                    <span>Embedded Gemini AI System Doctor &amp; 15/30-Day Formula Auto-Repair</span>
+                  </div>
+                  <div className="flex items-center gap-2">
+                    <span className="px-2 py-0.5 rounded bg-white/15 text-[11px] font-mono-num font-bold">
+                      {report ? `Health: ${report.healthScore}/100 · ${report.statusLabel}` : 'Ready to Scan'}
+                    </span>
+                    <button
+                      type="button"
+                      disabled={runningAiDoctor || !onRunAiDoctor}
+                      onClick={() => void onRunAiDoctor?.()}
+                      className="inline-flex items-center gap-1.5 px-3 py-1.5 rounded-lg bg-amber-400 hover:bg-amber-300 text-slate-950 text-xs font-extrabold cursor-pointer disabled:opacity-60"
+                    >
+                      <Sparkles className="w-3.5 h-3.5" />
+                      {runningAiDoctor ? 'Running AI Doctor...' : '🤖 Run AI Deep Formula & Bug Auto-Repair'}
+                    </button>
+                  </div>
+                </div>
+                <div className="p-4 space-y-3 text-xs">
+                  <div className="flex flex-wrap items-center justify-between gap-2 bg-slate-50 border border-slate-200 rounded-lg px-3 py-2">
+                    <div className="flex flex-wrap items-center gap-3 font-mono-num text-[11px] text-slate-700">
+                      <span>
+                        15-Day Cycle:{' '}
+                        <strong>{last15 ? new Date(last15).toLocaleDateString('en-IN') : 'Due Now'}</strong>
+                      </span>
+                      <span>
+                        30-Day Deep Cycle:{' '}
+                        <strong>{last30 ? new Date(last30).toLocaleDateString('en-IN') : 'Due Now'}</strong>
+                      </span>
+                      <span>
+                        Runtime Errors Logged:{' '}
+                        <strong className={runtimeLogCount > 0 ? 'text-red-700' : 'text-emerald-700'}>
+                          {runtimeLogCount}
+                        </strong>
+                      </span>
+                    </div>
+                    {runtimeLogCount > 0 && (
+                      <button
+                        type="button"
+                        onClick={() => {
+                          clearRuntimeErrorLogs();
+                          setRuntimeLogCount(0);
+                          playVerifiedBeep();
+                        }}
+                        className="px-2.5 py-1 rounded border border-slate-300 bg-white hover:bg-slate-100 text-[11px] font-bold cursor-pointer"
+                      >
+                        Clear Runtime Error Logs
+                      </button>
+                    )}
+                  </div>
+
+                  {report ? (
+                    <div className="grid grid-cols-1 md:grid-cols-2 gap-3">
+                      <div className="p-3 rounded-lg bg-blue-50/70 border border-blue-200 space-y-1.5">
+                        <div className="flex items-center justify-between">
+                          <span className="font-extrabold text-blue-950">English Diagnostic Report</span>
+                          <span className="text-[10px] font-mono-num text-blue-800">
+                            {new Date(report.ranAt).toLocaleString('en-IN')} · {report.trigger}
+                          </span>
+                        </div>
+                        <p className="text-slate-800 font-medium">{report.summaryEn}</p>
+                        <ul className="list-disc pl-4 text-[11px] text-emerald-900 space-y-0.5">
+                          {report.fixesAppliedEn.map((fx, i) => (
+                            <li key={i}>{fx}</li>
+                          ))}
+                        </ul>
+                        {report.recommendationsEn.length > 0 && (
+                          <p className="text-[11px] text-amber-900 font-semibold">
+                            Note: {report.recommendationsEn.join(' ')}
+                          </p>
+                        )}
+                      </div>
+                      <div className="p-3 rounded-lg bg-emerald-50/70 border border-emerald-200 space-y-1.5">
+                        <div className="flex items-center justify-between">
+                          <span className="font-extrabold text-emerald-950">বাংলা সিস্টেম রিপোর্ট</span>
+                          <span className="text-[10px] font-mono-num text-emerald-800">
+                            {report.usedGemini ? 'Gemini AI Active' : 'Offline Guard'}
+                          </span>
+                        </div>
+                        <p className="text-slate-800 font-medium">{report.summaryBn}</p>
+                        <ul className="list-disc pl-4 text-[11px] text-emerald-900 space-y-0.5">
+                          {report.fixesAppliedBn.map((fx, i) => (
+                            <li key={i}>{fx}</li>
+                          ))}
+                        </ul>
+                        {report.recommendationsBn.length > 0 && (
+                          <p className="text-[11px] text-amber-900 font-semibold">
+                            পরামর্শ: {report.recommendationsBn.join(' ')}
+                          </p>
+                        )}
+                      </div>
+                    </div>
+                  ) : (
+                    <p className="text-slate-600">
+                      Click <strong>Run AI Deep Formula &amp; Bug Auto-Repair</strong> to audit every CN, Lorry Hire, GST Bill &amp; Ledger formula and generate a bilingual diagnostic report.
+                    </p>
+                  )}
+                </div>
+              </div>
+            );
+          })()}
+
+          {/* Authorized Hardware Lock Manager (Strict Lock on drc.2015kolkata@gmail.com) */}
+          <div className="bg-white rounded-xl border border-amber-300 shadow-sm overflow-hidden">
+            <div className="bg-gradient-to-r from-amber-700 to-orange-700 text-white px-4 py-2.5 flex flex-wrap items-center justify-between gap-2">
+              <div className="flex items-center gap-2 text-sm font-bold">
+                <Cpu className="w-4 h-4 text-amber-200" />
+                <span>Hardware Device Lock ({MASTER_ADMIN_PROTECTED_EMAIL})</span>
+              </div>
+              <span className="text-[11px] text-amber-100">
+                Staff User IDs bypass hardware lock; unrecognized Master Admin devices require PIN + 2FA OTP
+              </span>
+            </div>
+            <div className="p-4 space-y-3 text-xs">
+              <div className="flex flex-wrap items-center justify-between gap-2">
+                <span className="font-bold text-slate-800">
+                  Authorized Master Workstations ({authorizedDevices.length})
+                </span>
+                <button
+                  type="button"
+                  onClick={() => {
+                    setHwMsg(null);
+                    setHwOtpChallenge(issueTwoFactorOtpChallenge('Authorize Current Workstation'));
+                  }}
+                  className="inline-flex items-center gap-1.5 px-3 py-1.5 rounded-lg bg-slate-900 hover:bg-slate-800 text-white font-bold cursor-pointer"
+                >
+                  <ShieldCheck className="w-3.5 h-3.5 text-emerald-400" />
+                  Authorize / Re-Verify This Hardware
+                </button>
+              </div>
+
+              {hwOtpChallenge && (
+                <form
+                  onSubmit={(e) => {
+                    e.preventDefault();
+                    const res = authorizeCurrentDeviceWithPinAndOtp({
+                      pin: hwPinInput,
+                      otp: hwOtpInput,
+                      operatorLabel: adminUserId || 'Master Admin',
+                    });
+                    if (!res.authorized) {
+                      playAlertBeep();
+                      setHwMsg(res.error || 'Hardware authorization failed.');
+                      return;
+                    }
+                    playVerifiedBeep();
+                    setAuthorizedDevices(getAuthorizedHardwareDevices());
+                    setHwOtpChallenge(null);
+                    setHwPinInput('');
+                    setHwOtpInput('');
+                    setHwMsg('Current hardware device authorized cleanly for Master Admin.');
+                  }}
+                  className="p-3 rounded-lg bg-amber-50 border border-amber-300 flex flex-wrap items-center gap-2"
+                >
+                  <span className="font-bold text-amber-950">
+                    OTP: <strong className="font-mono-num px-1.5 py-0.5 rounded bg-amber-900 text-amber-100">{hwOtpChallenge.code}</strong>
+                  </span>
+                  <input
+                    type="password"
+                    required
+                    value={hwPinInput}
+                    onChange={(e) => setHwPinInput(e.target.value)}
+                    placeholder="Admin PIN"
+                    className="w-28 px-2.5 py-1 rounded border border-amber-400 bg-white font-mono-num"
+                  />
+                  <input
+                    type="text"
+                    required
+                    maxLength={6}
+                    value={hwOtpInput}
+                    onChange={(e) => setHwOtpInput(e.target.value.replace(/\D/g, ''))}
+                    placeholder="6-digit OTP"
+                    className="w-28 px-2.5 py-1 rounded border border-amber-400 bg-white font-mono-num"
+                  />
+                  <button
+                    type="submit"
+                    className="px-3 py-1 rounded bg-emerald-700 hover:bg-emerald-800 text-white font-bold cursor-pointer"
+                  >
+                    Approve Device
+                  </button>
+                </form>
+              )}
+
+              {hwMsg && (
+                <p className="text-[11px] font-bold text-blue-900 bg-blue-50 border border-blue-200 rounded px-2.5 py-1.5">
+                  {hwMsg}
+                </p>
+              )}
+
+              <div className="divide-y divide-slate-200 border border-slate-200 rounded-lg overflow-hidden">
+                {authorizedDevices.length === 0 ? (
+                  <div className="p-3 text-slate-500">
+                    Current workstation will auto-register on primary Master Admin session.
+                  </div>
+                ) : (
+                  authorizedDevices.map((dev) => (
+                    <div key={dev.deviceId} className="px-3 py-2 flex flex-wrap items-center justify-between gap-2 bg-white">
+                      <div>
+                        <div className="font-bold text-slate-900">
+                          {dev.deviceLabel} <span className="text-slate-500 font-normal">({dev.platform})</span>
+                        </div>
+                        <div className="text-[11px] text-slate-500 font-mono-num">
+                          ID: {dev.deviceId} · Authorized {new Date(dev.authorizedAt).toLocaleString('en-IN')}
+                        </div>
+                      </div>
+                      <button
+                        type="button"
+                        onClick={() => {
+                          setAuthorizedDevices(revokeAuthorizedHardwareDevice(dev.deviceId));
+                          setHwMsg(`Revoked device ${dev.deviceLabel}.`);
+                        }}
+                        className="inline-flex items-center gap-1 px-2.5 py-1 rounded bg-red-50 hover:bg-red-100 text-red-700 font-bold cursor-pointer"
+                      >
+                        <Trash2 className="w-3 h-3" />
+                        Revoke
+                      </button>
+                    </div>
+                  ))
+                )}
+              </div>
+            </div>
           </div>
 
           {/* Master Admin Credentials Management (User Management) */}
@@ -4211,6 +4553,142 @@ const BackupSettingsModuleInner: React.FC<BackupSettingsModuleProps> = ({
           </div>
         </div>
       )}
+
+      {/* Raw DBF Archive Viewer Modal (Zero-Loss Last 2 Years FoxPro Tables) */}
+      {rawArchiveOpen && (() => {
+        const currentTable =
+          rawArchiveTables.find((t) => t.fileName === rawArchiveSelectedTable) || rawArchiveTables[0];
+        const q = rawArchiveSearch.trim().toLowerCase();
+        const filteredRows = currentTable
+          ? q
+            ? currentTable.rows.filter((r) => JSON.stringify(r).toLowerCase().includes(q))
+            : currentTable.rows
+          : [];
+        const pageSize = 50;
+        const totalPages = Math.max(1, Math.ceil(filteredRows.length / pageSize));
+        const safePage = Math.min(rawArchivePage, totalPages);
+        const pageRows = filteredRows.slice((safePage - 1) * pageSize, safePage * pageSize);
+
+        return (
+          <div className="fixed inset-0 z-50 flex items-center justify-center bg-slate-900/65 p-3 sm:p-5">
+            <div className="w-full max-w-6xl max-h-[90vh] flex flex-col bg-white rounded-xl border border-slate-300 shadow-2xl overflow-hidden text-xs">
+              <div className="bg-slate-900 text-white px-4 py-3 flex flex-wrap items-center justify-between gap-2">
+                <div className="flex items-center gap-2">
+                  <Database className="w-4 h-4 text-amber-300 shrink-0" />
+                  <div>
+                    <h3 className="text-sm font-extrabold">
+                      Raw FoxPro (.DBF) Zero-Loss Archive Viewer
+                    </h3>
+                    <p className="text-[11px] text-slate-300">
+                      100% Untruncated Columns Preserved in IndexedDB ({rawArchiveTables.length} table(s))
+                    </p>
+                  </div>
+                </div>
+                <button
+                  type="button"
+                  onClick={() => setRawArchiveOpen(false)}
+                  className="px-3 py-1 rounded bg-white/15 hover:bg-white/25 text-white font-bold cursor-pointer"
+                >
+                  Close
+                </button>
+              </div>
+
+              {rawArchiveTables.length === 0 ? (
+                <div className="p-8 text-center text-slate-600">
+                  No `.DBF` archive stored yet. Use <strong>Auto-Collect Old Data</strong> to scan your legacy FoxPro folder.
+                </div>
+              ) : (
+                <>
+                  <div className="p-3 bg-slate-50 border-b border-slate-200 flex flex-wrap items-center justify-between gap-2">
+                    <div className="min-w-[240px]">
+                      <SearchableSelect
+                        ariaLabel="Select DBF Table"
+                        value={currentTable?.fileName || ''}
+                        onChange={(val) => {
+                          setRawArchiveSelectedTable(val);
+                          setRawArchivePage(1);
+                        }}
+                        options={rawArchiveTables.map((t) => ({
+                          value: t.fileName,
+                          label: `${t.fileName} (${t.activeRows} rows · ${t.tableKind})`,
+                        }))}
+                        triggerClassName="!py-1.5 !font-mono-num !font-bold"
+                      />
+                    </div>
+                    <div className="relative flex-1 min-w-[200px] max-w-sm">
+                      <Search className="w-3.5 h-3.5 text-slate-400 absolute left-2.5 top-2" />
+                      <input
+                        type="text"
+                        value={rawArchiveSearch}
+                        onChange={(e) => {
+                          setRawArchiveSearch(e.target.value);
+                          setRawArchivePage(1);
+                        }}
+                        placeholder="Search any field or text in table..."
+                        className="w-full pl-8 pr-3 py-1.5 rounded border border-slate-300 bg-white"
+                      />
+                    </div>
+                    <div className="text-[11px] font-mono-num font-bold text-slate-700">
+                      Showing {filteredRows.length} active rows (Page {safePage}/{totalPages})
+                    </div>
+                  </div>
+
+                  <div className="flex-1 overflow-auto">
+                    <table className="w-full text-[11px] text-left border-collapse">
+                      <thead className="bg-slate-100 text-slate-800 sticky top-0 z-10">
+                        <tr>
+                          <th className="px-2 py-1.5 border-b border-r border-slate-200 font-mono-num">#</th>
+                          {(currentTable?.fields || []).map((f) => (
+                            <th key={f} className="px-2 py-1.5 border-b border-r border-slate-200 font-mono-num whitespace-nowrap">
+                              {f}
+                            </th>
+                          ))}
+                        </tr>
+                      </thead>
+                      <tbody className="divide-y divide-slate-100">
+                        {pageRows.map((row, idx) => (
+                          <tr key={idx} className="hover:bg-blue-50/40">
+                            <td className="px-2 py-1 border-r border-slate-100 font-mono-num text-slate-400">
+                              {(safePage - 1) * pageSize + idx + 1}
+                            </td>
+                            {(currentTable?.fields || []).map((f) => (
+                              <td key={f} className="px-2 py-1 border-r border-slate-100 font-mono-num whitespace-nowrap">
+                                {String(row[f] ?? '')}
+                              </td>
+                            ))}
+                          </tr>
+                        ))}
+                      </tbody>
+                    </table>
+                  </div>
+
+                  <div className="px-4 py-2 bg-slate-50 border-t border-slate-200 flex items-center justify-between">
+                    <button
+                      type="button"
+                      disabled={safePage <= 1}
+                      onClick={() => setRawArchivePage((p) => Math.max(1, p - 1))}
+                      className="px-3 py-1 rounded border border-slate-300 bg-white disabled:opacity-40 font-bold cursor-pointer"
+                    >
+                      Previous 50
+                    </button>
+                    <span className="font-mono-num font-bold text-slate-700">
+                      Page {safePage} of {totalPages}
+                    </span>
+                    <button
+                      type="button"
+                      disabled={safePage >= totalPages}
+                      onClick={() => setRawArchivePage((p) => Math.min(totalPages, p + 1))}
+                      className="px-3 py-1 rounded border border-slate-300 bg-white disabled:opacity-40 font-bold cursor-pointer"
+                    >
+                      Next 50
+                    </button>
+                  </div>
+                </>
+              )}
+            </div>
+          </div>
+        );
+      })()}
     </div>
   );
 };

@@ -6,6 +6,7 @@ import {
   SupportedCountry,
   validatePinForCountry,
 } from '../lib/postalPinLookup';
+import { SearchableSelect } from './SearchableSelect';
 
 export const SUPPORTED_POSTAL_COUNTRIES: SupportedCountry[] = [
   'India',
@@ -113,17 +114,20 @@ export const PinCountryInputs: React.FC<PinCountryInputsProps> = ({
         >
           Country
         </label>
-        <select
+        <SearchableSelect
+          ariaLabel={`${labelPrefix} Country`}
           disabled={disabled}
           value={country}
-          onChange={(e) => onCountryChange(e.target.value as SupportedCountry)}
-          className="w-full px-2 py-1 rounded border border-slate-300 bg-white text-xs font-bold text-slate-800"
-        >
-          <option value="India">India (6d)</option>
-          <option value="Bangladesh">Bangladesh (4d)</option>
-          <option value="Nepal">Nepal (5d)</option>
-          <option value="Bhutan">Bhutan (5d)</option>
-        </select>
+          onChange={(val) => onCountryChange(val as SupportedCountry)}
+          sortAlphabetically={false}
+          options={[
+            { value: 'India', label: 'India (6d)' },
+            { value: 'Bangladesh', label: 'Bangladesh (4d)' },
+            { value: 'Nepal', label: 'Nepal (5d)' },
+            { value: 'Bhutan', label: 'Bhutan (5d)' },
+          ]}
+          buttonClassName="!py-1 !text-xs !font-bold !text-slate-800"
+        />
       </div>
     </div>
   );

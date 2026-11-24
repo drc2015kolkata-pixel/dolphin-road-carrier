@@ -231,7 +231,7 @@ export interface ConsignmentNote {
   cnNo: string;
   cnDate: string;
   financialYear?: string;
-  division?: 'FTL' | 'LOGISTICS' | string;
+  division?: 'FTL' | 'LOGISTICS' | 'PTL' | 'COURIER' | string;
   branchShort?: string;
   lastCnNo?: string;
   refCnNo?: string;
@@ -366,7 +366,7 @@ export interface Invoice {
   invoiceDate: string;
   dueDate?: string;
   financialYear?: string;
-  division?: 'FTL' | 'LOGISTICS' | string;
+  division?: 'FTL' | 'LOGISTICS' | 'PTL' | 'COURIER' | string;
   billedByCode?: 'B' | 'P' | string;
   billedAtBranch?: string;
   poWorkOrderNo?: string;
@@ -406,6 +406,7 @@ export interface Invoice {
   advanceMode?: string;
   fullPaymentMode?: string;
   grandTotal: number;
+  manualTotalOverride?: boolean;
   paidAmount: number;
   status: 'Unpaid' | 'Partial' | 'Paid';
   remarks?: string;
@@ -428,7 +429,7 @@ export interface Quotation {
   quotationNo: string;
   quotationDate: string;
   financialYear?: string;
-  division?: 'FTL' | 'LOGISTICS' | string;
+  division?: 'FTL' | 'LOGISTICS' | 'PTL' | 'COURIER' | string;
   partyName: string;
   partyAddress?: string;
   partyGstin?: string;
@@ -479,7 +480,7 @@ export interface LorryHire {
   cnNo: string;
   cnDate?: string;
   financialYear?: string;
-  division?: 'FTL' | 'LOGISTICS' | string;
+  division?: 'FTL' | 'LOGISTICS' | 'PTL' | 'COURIER' | string;
   truckNo: string;
   ownerName?: string;
   brokerName?: string;
@@ -565,6 +566,7 @@ export interface TransactionRecord {
 
 export interface Declaration194C {
   id: string;
+  division?: 'FTL' | 'LOGISTICS' | 'PTL' | 'COURIER' | string;
   partyName: string;
   partyAddress?: string;
   partyGstin?: string;
@@ -897,6 +899,7 @@ export type LogisticsWorkspaceTabId =
   | 'masters'
   | 'billing'
   | 'ledgers'
+  | 'pdfVault'
   | 'backup';
 
 export type DriveFolderName =
@@ -908,6 +911,13 @@ export type DriveFolderName =
   | 'Reports_Ledgers'
   | 'Bank_Statements';
 
+export type PdfVaultFolder =
+  | '1. LR_Copy_PDFs'
+  | '2. Tax_Invoice_PDFs'
+  | '3. Quotation_PDFs'
+  | '4. Declaration_PDFs'
+  | '5. POD_Scans_PDFs';
+
 export type LogisticsDriveFolderName =
   | 'Docket_LR'
   | 'LineHaul_Manifests'
@@ -915,7 +925,7 @@ export type LogisticsDriveFolderName =
   | 'Godown_POD_Scans'
   | 'Logistics_Ledgers';
 
-export type AnyDriveFolderName = DriveFolderName | LogisticsDriveFolderName;
+export type AnyDriveFolderName = DriveFolderName | LogisticsDriveFolderName | PdfVaultFolder;
 
 export interface LogisticsParty {
   id: string;
@@ -981,6 +991,7 @@ export type LogisticsStockStage =
 
 export interface LogisticsDocket {
   id: string;
+  division?: LogisticsDivisionCode | string;
   docketNo: string;
   docketDate: string;
   financialYear?: string;
@@ -1046,6 +1057,7 @@ export interface LogisticsDocket {
 
 export interface LogisticsManifest {
   id: string;
+  division?: LogisticsDivisionCode | string;
   manifestNo: string;
   manifestDate: string;
   financialYear?: string;
@@ -1086,6 +1098,7 @@ export interface LogisticsInvoiceDocketRow {
 
 export interface LogisticsInvoice {
   id: string;
+  division?: LogisticsDivisionCode | string;
   docType: 'Tax Invoice' | 'Credit Note' | 'Debit Note';
   docNo: string;
   docDate: string;

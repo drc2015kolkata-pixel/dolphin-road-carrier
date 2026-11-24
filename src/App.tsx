@@ -103,6 +103,7 @@ import {
   loginWithCredentials,
   resetAdminToDefaultAndLogin,
   subscribeCollection,
+  upsertDocument,
   upsertStaffPresence,
   verifySessionPasswordInstant,
 } from './lib/firestoreStore';
@@ -118,12 +119,14 @@ import {
 import {
   getDailySnapshotFileName,
   isLogisticsDriveFolder,
+  isPdfVaultFolder,
   resetDriveSyncSessionCache,
   runDailyDrive8FileCleanup,
   sealBackupPayloadWithSha256,
   syncAutoBackupBundleToDrive,
   uploadBlobToDriveFolder,
   uploadLogisticsBlobToDriveFolder,
+  uploadPdfToDivisionVaultFolder,
 } from './lib/driveBackup';
 import {
   GeneratedPdfResult,
@@ -138,9 +141,16 @@ import {
   subscribeOfflineSyncStatus,
 } from './lib/offlineSyncQueue';
 import {
+  AiDoctorReport,
+  AiDoctorTrigger,
   FormulaHealthReport,
+  installRuntimeErrorCollector,
+  isDueFor15DayDoctor,
+  isDueFor30DayDoctor,
+  loadSavedAiDoctorReport,
   registerManagedBlobUrl,
   revokeThermalMemoryCooledUrls,
+  runAiDeepFormulaAndBugRepair,
   runDailyLocalJunkCleanup,
   runStartupAndMonthlyFormulaGuard,
   runSystemAutoFixAndClean,
@@ -166,6 +176,7 @@ import {
 import { playAlertBeep, playVerifiedBeep } from './lib/audioFeedback';
 import {
   acknowledgeNewDeviceAlert,
+  authorizeCurrentDeviceWithPinAndOtp,
   checkAndRegisterCurrentDevice,
   DeviceTrustCheckResult,
   dispatchBackgroundNotification,
@@ -173,10 +184,12 @@ import {
   getPhoneAlarmPermissionState,
   installScreenCaptureShield,
   isBackupVaultUnlocked,
+  isCurrentDeviceAuthorizedForMasterEmail,
   isScreenShieldTemporarilyUnlocked,
   issueTwoFactorOtpChallenge,
   lockBackupVault,
   lockScreenShieldImmediately,
+  MASTER_ADMIN_PROTECTED_EMAIL,
   requestPhoneAlarmPermission,
   TwoFactorOtpChallenge,
   unlockBackupVaultWithPinAndOtp,
@@ -498,6 +511,29 @@ export default function App() {
     onConfirm: () => {},
   });
 
+  const [aiDoctorReport, setAiDoctorReport] = useState<AiDoctorReport | null>(() =>
+    loadSavedAiDoctorReport()
+  );
+  const [runningAiDoctor, setRunningAiDoctor] = useState(false);
+  const aiDoctorStartupRanRef = useRef(false);
+  const [hardwareLockState, setHardwareLockState] = useState<{
+    locked: boolean;
+    pin: string;
+    otp: string;
+    challenge: TwoFactorOtpChallenge | null;
+    error: string | null;
+  }>({
+    locked: false,
+    pin: '',
+    otp: '',
+    challenge: null,
+    error: null,
+  });
+
+  useEffect(() => {
+    installRuntimeErrorCollector();
+  }, []);
+
   const isOnline = useOnlineStatus();
   const { isInstallable, isInstalled, isIOS, install } = usePWAInstall();
 
@@ -683,11 +719,12 @@ export default function App() {
     return Boolean(erpSession.isMasterAdmin);
   }, [erpSession, activeStaffSession]);
 
-  // New-Device Login Detection & Immediate Security Alert Shield
+  // New-Device Login Detection + Strict Hardware Lock for drc.2015kolkata@gmail.com
   useEffect(() => {
     if (!erpSession) {
       setDeviceTrust(null);
       setNewDeviceBannerDismissed(false);
+      setHardwareLockState({ locked: false, pin: '', otp: '', challenge: null, error: null });
       return;
     }
     const trustRes = checkAndRegisterCurrentDevice({
@@ -698,6 +735,24 @@ export default function App() {
     if (trustRes.isNewDevice) {
       setNewDeviceBannerDismissed(false);
       playAlertBeep();
+    }
+    const checkMasterHardware =
+      (!activeStaffSession && erpSession.isMasterAdmin) ||
+      (connectedEmail || '').toLowerCase() === MASTER_ADMIN_PROTECTED_EMAIL;
+    if (checkMasterHardware && !isCurrentDeviceAuthorizedForMasterEmail(MASTER_ADMIN_PROTECTED_EMAIL)) {
+      const challenge = issueTwoFactorOtpChallenge(
+        `Authorize New Hardware for ${MASTER_ADMIN_PROTECTED_EMAIL}`
+      );
+      setHardwareLockState({
+        locked: true,
+        pin: '',
+        otp: '',
+        challenge,
+        error: null,
+      });
+      playAlertBeep();
+    } else {
+      setHardwareLockState((prev) => (prev.locked ? { ...prev, locked: false } : prev));
     }
   }, [erpSession, activeStaffSession, connectedEmail]);
 
@@ -802,6 +857,54 @@ export default function App() {
       // Ignore storage quota issues
     }
   }, []);
+
+  const triggerAiDoctor = useCallback(
+    async (trigger: AiDoctorTrigger) => {
+      setRunningAiDoctor(true);
+      try {
+        const rep = await runAiDeepFormulaAndBugRepair({
+          trigger,
+          activeFy,
+          allData: {
+            consignments: consignments as unknown as Array<Record<string, unknown>>,
+            lorryHires: lorryHires as unknown as Array<Record<string, unknown>>,
+            invoices: invoices as unknown as Array<Record<string, unknown>>,
+            transactions: transactions as unknown as Array<Record<string, unknown>>,
+            parties,
+            logisticsDockets: logisticsDockets as unknown as Array<Record<string, unknown>>,
+            logisticsInvoices: logisticsInvoices as unknown as Array<Record<string, unknown>>,
+          },
+          persistCollectionPatch: async (collection, docId, patch) => {
+            await upsertDocument(collection, docId, patch, false);
+          },
+        });
+        setAiDoctorReport(rep);
+        if (trigger === 'manual') {
+          playVerifiedBeep();
+        }
+        return rep;
+      } finally {
+        setRunningAiDoctor(false);
+      }
+    },
+    [activeFy, consignments, lorryHires, invoices, transactions, parties, logisticsDockets, logisticsInvoices]
+  );
+
+  // Automatic Startup / 15-Day / 30-Day Embedded Gemini AI System Doctor
+  useEffect(() => {
+    if (!erpSession || aiDoctorStartupRanRef.current) return;
+    if (consignments.length + lorryHires.length + invoices.length + parties.length === 0) return;
+    aiDoctorStartupRanRef.current = true;
+    const dueTrigger: AiDoctorTrigger = isDueFor30DayDoctor()
+      ? '30_day'
+      : isDueFor15DayDoctor()
+        ? '15_day'
+        : 'startup';
+    const t = window.setTimeout(() => {
+      void triggerAiDoctor(dueTrigger);
+    }, 1500);
+    return () => window.clearTimeout(t);
+  }, [erpSession, consignments.length, lorryHires.length, invoices.length, parties.length, triggerAiDoctor]);
 
   const buildCompleteVaultBundle = useCallback(
     (): Record<string, unknown> => ({
@@ -1659,7 +1762,10 @@ export default function App() {
       // Ignore network timeout on exit
     }
     const finalBackup = await Promise.race([
-      runSealedAutoBackupRef.current(false),
+      Promise.all([
+        runSealedAutoBackupRef.current(false),
+        triggerAiDoctor('switch_off').catch(() => null),
+      ]).then(([b]) => b),
       new Promise<{
         backedUpAt: number;
         sha256: string;
@@ -1777,7 +1883,16 @@ export default function App() {
       await handleGoogleDriveConnect(true);
       return;
     }
-    if (isLogisticsDriveFolder(folder)) {
+    if (isPdfVaultFolder(folder)) {
+      await uploadPdfToDivisionVaultFolder({
+        accessToken: driveAccessToken,
+        division: businessMode || 'FTL',
+        folderName: folder,
+        fileName: pdf.fileName,
+        blob: pdf.blob,
+        connectedEmail,
+      });
+    } else if (isLogisticsDriveFolder(folder)) {
       await uploadLogisticsBlobToDriveFolder({
         accessToken: driveAccessToken,
         folderName: folder,
@@ -3906,6 +4021,11 @@ export default function App() {
                 }}
                 autoBackupInfo={autoBackupInfo}
                 deviceTrust={deviceTrust}
+                aiDoctorReport={aiDoctorReport}
+                runningAiDoctor={runningAiDoctor}
+                onRunAiDoctor={async () => {
+                  await triggerAiDoctor('manual');
+                }}
                 onAcknowledgeNewDevice={handleAcknowledgeNewDevice}
                 onManualSyncNow={async () => {
                   await runSealedAutoBackup(true);
@@ -4658,7 +4778,7 @@ export default function App() {
                 <form
                   onSubmit={(e) => {
                     e.preventDefault();
-                    const ok = unlockScreenShieldTemporarily(shieldUnlockPin, 5);
+                    const ok = unlockScreenShieldTemporarily(shieldUnlockPin, 5 * 60 * 1000);
                     if (!ok) {
                       playAlertBeep();
                       setShieldUnlockError('Invalid Admin PIN. Default PIN is 1234 unless changed in Settings.');
@@ -4693,6 +4813,123 @@ export default function App() {
               )}
             </div>
           </div>
+        </div>
+      )}
+
+      {/* Strict Hardware Device Lock for drc.2015kolkata@gmail.com on Unrecognized Devices */}
+      {hardwareLockState.locked && erpSession && (
+        <div className="fixed inset-0 z-[105] flex items-center justify-center bg-slate-950/95 p-4 no-print">
+          <form
+            onSubmit={(e) => {
+              e.preventDefault();
+              const res = authorizeCurrentDeviceWithPinAndOtp({
+                pin: hardwareLockState.pin,
+                otp: hardwareLockState.otp,
+                operatorLabel: activeStaffName,
+              });
+              if (!res.authorized) {
+                playAlertBeep();
+                setHardwareLockState((prev) => ({
+                  ...prev,
+                  error: res.error || 'Invalid Master Admin PIN or 2FA OTP.',
+                }));
+                return;
+              }
+              playVerifiedBeep();
+              setHardwareLockState({ locked: false, pin: '', otp: '', challenge: null, error: null });
+            }}
+            className="w-full max-w-md bg-white rounded-2xl border-2 border-amber-400 shadow-2xl p-6 space-y-4 text-xs"
+          >
+            <div className="flex items-center gap-3">
+              <div className="w-11 h-11 rounded-full bg-amber-100 text-amber-800 flex items-center justify-center shrink-0">
+                <Lock className="w-6 h-6" />
+              </div>
+              <div>
+                <h3 className="text-sm font-extrabold text-slate-950">
+                  Unrecognized Hardware Blocked ({MASTER_ADMIN_PROTECTED_EMAIL})
+                </h3>
+                <p className="text-[11px] text-slate-600">
+                  Enter Master Admin PIN + 6-digit 2FA OTP to authorize this workstation. Staff IDs remain unrestricted.
+                </p>
+              </div>
+            </div>
+
+            <div className="p-3 rounded-lg bg-amber-50 border border-amber-300 text-center">
+              <span className="text-[11px] text-amber-900 font-bold block">Active 2FA OTP Code</span>
+              <span className="text-lg font-extrabold font-mono-num tracking-widest text-amber-950">
+                {hardwareLockState.challenge?.code || '------'}
+              </span>
+            </div>
+
+            {hardwareLockState.error && (
+              <div className="p-2.5 rounded-lg bg-red-50 border border-red-300 text-red-800 font-bold">
+                {hardwareLockState.error}
+              </div>
+            )}
+
+            <div className="space-y-2.5">
+              <div>
+                <label className="block font-bold text-slate-700 mb-1">Master Admin PIN *</label>
+                <input
+                  type="password"
+                  required
+                  value={hardwareLockState.pin}
+                  onChange={(e) =>
+                    setHardwareLockState((prev) => ({ ...prev, pin: e.target.value, error: null }))
+                  }
+                  placeholder="Default PIN: 1234"
+                  className="w-full px-3 py-2 rounded-lg border border-slate-300 font-mono-num"
+                />
+              </div>
+              <div>
+                <label className="block font-bold text-slate-700 mb-1">6-Digit 2FA OTP *</label>
+                <input
+                  type="text"
+                  inputMode="numeric"
+                  maxLength={6}
+                  required
+                  value={hardwareLockState.otp}
+                  onChange={(e) =>
+                    setHardwareLockState((prev) => ({
+                      ...prev,
+                      otp: e.target.value.replace(/\D/g, ''),
+                      error: null,
+                    }))
+                  }
+                  placeholder="Enter OTP shown above"
+                  className="w-full px-3 py-2 rounded-lg border border-slate-300 font-mono-num tracking-widest"
+                />
+              </div>
+            </div>
+
+            <div className="flex gap-2">
+              <button
+                type="submit"
+                className="flex-1 px-4 py-2.5 rounded-lg bg-[#0D47A1] hover:bg-blue-900 text-white font-extrabold cursor-pointer"
+              >
+                Authorize This Hardware &amp; Enter
+              </button>
+              <button
+                type="button"
+                onClick={() => {
+                  clearErpSession();
+                  setIsScreenLocked(false);
+                  setErpSession(null);
+                  setActiveStaffSession(null);
+                  setHardwareLockState((prev) => ({
+                    ...prev,
+                    blocked: false,
+                    pin: '',
+                    otp: '',
+                    error: null,
+                  }));
+                }}
+                className="px-4 py-2.5 rounded-lg border border-slate-300 text-slate-700 font-bold cursor-pointer"
+              >
+                Sign Out
+              </button>
+            </div>
+          </form>
         </div>
       )}
 

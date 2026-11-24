@@ -6,6 +6,7 @@ import {
   ClipboardList,
   Cloud,
   FileText,
+  FolderOpen,
   IndianRupee,
   LayoutDashboard,
   Package,
@@ -41,6 +42,7 @@ import { LogisticsDocketManifestPanel } from './LogisticsDocketManifestPanel';
 import { LogisticsBillingLedgerPanel } from './LogisticsBillingLedgerPanel';
 import { LogisticsMastersDrivePanel } from './LogisticsMastersDrivePanel';
 import { AllInOneEntrySheet } from './AllInOneEntrySheet';
+import { PdfStoreVaultPanel } from './PdfStoreVaultPanel';
 
 interface LogisticsWorkspaceProps {
   divisionMode?: LogisticsDivisionCode;
@@ -69,7 +71,7 @@ interface LogisticsWorkspaceProps {
   connectedEmail: string | null;
   driveAccessToken: string | null;
   onConnectDrive: () => Promise<void>;
-  onPreviewPdf: (pdf: GeneratedPdfResult, folder: LogisticsDriveFolderName) => void;
+  onPreviewPdf: (pdf: GeneratedPdfResult, folder: AnyDriveFolderName) => void;
   onShowConfirm: (opts: {
     title: string;
     description: string;
@@ -143,6 +145,7 @@ export const LogisticsWorkspace: React.FC<LogisticsWorkspaceProps> = ({
       { id: 'masters', label: `${divisionMeta.shortLabel} Masters`, icon: Users },
       { id: 'billing', label: 'Invoices / CN / DN', icon: FileText },
       { id: 'ledgers', label: `${divisionMeta.shortLabel} Ledgers`, icon: IndianRupee },
+      { id: 'pdfVault', label: '5-Folder PDF Vault', icon: FolderOpen },
       { id: 'backup', label: 'Drive Backup & JSON', icon: Cloud },
     ],
     [divisionMeta.shortLabel, divisionMode]
@@ -393,6 +396,7 @@ export const LogisticsWorkspace: React.FC<LogisticsWorkspaceProps> = ({
             vehicles={vehicles}
             drivers={drivers}
             company={company}
+            driveAccessToken={driveAccessToken}
             onPreviewPdf={onPreviewPdf}
             onShowConfirm={onShowConfirm}
           />
@@ -413,6 +417,20 @@ export const LogisticsWorkspace: React.FC<LogisticsWorkspaceProps> = ({
             company={company}
             onPreviewPdf={onPreviewPdf}
             onShowConfirm={onShowConfirm}
+          />
+        )}
+
+        {activeLogiTab === 'pdfVault' && (
+          <PdfStoreVaultPanel
+            company={company}
+            parties={ftlParties}
+            logisticsParties={parties}
+            defaultDivision={divisionMode}
+            driveAccessToken={driveAccessToken}
+            connectedEmail={connectedEmail}
+            onConnectDrive={onConnectDrive}
+            onPreviewPdf={onPreviewPdf}
+            titleSubtitle={`${divisionMeta.title} · 5 Segregated Date-Grouped Binary PDF Folders`}
           />
         )}
 

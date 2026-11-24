@@ -56,6 +56,7 @@ import {
 import { useDebouncedValue } from '../hooks/useDebounce';
 import { PaginatedDataTable, TableColumn } from './PaginatedDataTable';
 import { GstFilingHubModule } from './GstFilingHubModule';
+import { PdfStoreVaultPanel } from './PdfStoreVaultPanel';
 import { EntityQuickPreviewCard, formatPartyDetailsLine } from './RichEntityPicker';
 import { SearchableSelect } from './SearchableSelect';
 
@@ -89,6 +90,7 @@ interface ReportsMisModuleProps {
 export type ReportTab =
   | 'gstRegister'
   | 'gstFilingHub'
+  | 'pdfVault'
   | 'foxproStatements'
   | 'invoiceRegister'
   | 'purchaseRegister'
@@ -1665,6 +1667,7 @@ const ReportsMisModuleInner: React.FC<ReportsMisModuleProps> = ({
   const tabs: Array<{ id: ReportTab; label: string; adminOnly?: boolean }> = [
     { id: 'gstRegister', label: 'G-S-T R-E-G-I-S-T-E-R' },
     { id: 'gstFilingHub', label: 'GST & RCM Filing Hub' },
+    { id: 'pdfVault', label: 'PDF Store Vault (5 Folders)' },
     { id: 'foxproStatements', label: 'FoxPro Statements (6)' },
     { id: 'invoiceRegister', label: 'Invoice Register' },
     { id: 'purchaseRegister', label: 'Purchase / Lorry Hire' },
@@ -1683,7 +1686,8 @@ const ReportsMisModuleInner: React.FC<ReportsMisModuleProps> = ({
     tab !== 'finalResults' &&
     tab !== 'aiAdvisor' &&
     tab !== 'partyFollowUp' &&
-    tab !== 'gstFilingHub';
+    tab !== 'gstFilingHub' &&
+    tab !== 'pdfVault';
 
   return (
     <div className="space-y-4">
@@ -1719,7 +1723,7 @@ const ReportsMisModuleInner: React.FC<ReportsMisModuleProps> = ({
             </div>
           )}
 
-          {tab !== 'aiAdvisor' && tab !== 'gstFilingHub' && (
+          {tab !== 'aiAdvisor' && tab !== 'gstFilingHub' && tab !== 'pdfVault' && (
             <>
               <button
                 type="button"
@@ -1882,6 +1886,17 @@ const ReportsMisModuleInner: React.FC<ReportsMisModuleProps> = ({
           driveAccessToken={driveAccessToken}
           onConnectDrive={onConnectDrive}
           onPreviewPdf={onPreviewPdf}
+        />
+      )}
+
+      {/* TAB: 5-FOLDER DATE-GROUPED PDF STORE VAULT */}
+      {tab === 'pdfVault' && (
+        <PdfStoreVaultPanel
+          company={company}
+          parties={parties}
+          driveAccessToken={driveAccessToken}
+          onConnectDrive={onConnectDrive}
+          onPreviewPdf={(pdf, folder) => onPreviewPdf(pdf, folder as DriveFolderName)}
         />
       )}
 

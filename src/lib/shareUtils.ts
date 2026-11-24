@@ -78,6 +78,16 @@ export function triggerExternalShareLink(href: string): void {
   document.body.removeChild(link);
 }
 
+export function buildBareWhatsAppProtocolHref(phone?: string): string {
+  const normalized = normalizeIndianWhatsAppPhone(phone);
+  return normalized ? `whatsapp://send?phone=${normalized}` : 'whatsapp://send';
+}
+
+export function buildBareEmailProtocolHref(email?: string): string {
+  const to = String(email || '').trim();
+  return to ? `mailto:${encodeURIComponent(to)}` : 'mailto:';
+}
+
 export function downloadPdfFileFromResult(pdf: { blobUrl: string; fileName: string }): void {
   const a = document.createElement('a');
   a.href = pdf.blobUrl;
@@ -87,8 +97,13 @@ export function downloadPdfFileFromResult(pdf: { blobUrl: string; fileName: stri
   document.body.removeChild(a);
 }
 
+/**
+ * STRICT BINARY .PDF SHARE:
+ * Never attaches text messages, subjects, bodies, or URLs.
+ * Sends ONLY pure binary `.pdf` File(s) via native share sheet (or downloads + opens bare WhatsApp / Mail composer).
+ */
 export async function sharePdfDirect(params: {
-  pdf: { blob: Blob; blobUrl: string; fileName: string };
+  pdf: { blob: Blob; blobUrl?: string; fileName: string };
   channel: 'whatsapp' | 'email';
   phone?: string;
   email?: string;
@@ -96,74 +111,101 @@ export async function sharePdfDirect(params: {
   docNo: string;
   docLabel: string;
   company?: CompanySettings;
-}): Promise<{ method: 'web_share' | 'cloud_api' | 'protocol'; cancelled?: boolean; message: string }> {
-  const party = String(params.partyName || '').trim();
-  const docLabel = String(params.docLabel || 'Document').trim();
-  const docNo = String(params.docNo || params.pdf.fileName.replace(/\.pdf$/i, '')).trim();
-  const shareText = buildDirectDocumentShareText({ partyName: party, docLabel, docNo });
-
-  if (params.channel === 'whatsapp' && params.company?.whatsappCloud?.enabled && params.phone) {
-    const apiRes = await sendViaWhatsAppCloudApi({
-      company: params.company,
-      toPhone: params.phone,
-      message: shareText,
-    });
-    if (apiRes.ok) {
-      downloadPdfFileFromResult(params.pdf);
-      return {
-        method: 'cloud_api',
-        message: `Sent via WhatsApp Cloud API to ${params.phone} & downloaded ${params.pdf.fileName}.`,
-      };
-    }
-  }
+}): Promise<{ method: 'web_share' | 'protocol'; cancelled?: boolean; message: string }> {
+  const blobUrl = params.pdf.blobUrl || URL.createObjectURL(params.pdf.blob);
+  const file = new File([params.pdf.blob], params.pdf.fileName, {
+    type: 'application/pdf',
+  });
 
   if (typeof navigator !== 'undefined' && typeof navigator.share === 'function') {
     try {
-      const pdfFile = new File([params.pdf.blob], params.pdf.fileName, {
-        type: 'application/pdf',
-      });
       const canShareFiles =
-        typeof navigator.canShare === 'function' ? navigator.canShare({ files: [pdfFile] }) : false;
+        typeof navigator.canShare === 'function' ? navigator.canShare({ files: [file] }) : false;
       if (canShareFiles) {
         await navigator.share({
-          title: `${docLabel} ${docNo}`,
-          text: shareText,
-          files: [pdfFile],
+          files: [file],
         });
         return {
           method: 'web_share',
-          message: `${docLabel} ${docNo} PDF attached & shared.`,
+          message: `Shared ${params.pdf.fileName} (pure binary PDF).`,
         };
       }
     } catch (err) {
       if (err instanceof Error && err.name === 'AbortError') {
         return { method: 'web_share', cancelled: true, message: 'Share cancelled.' };
       }
-      // Fall through cleanly to direct PDF download + native protocol link
     }
   }
 
-  downloadPdfFileFromResult(params.pdf);
+  downloadPdfFileFromResult({ blobUrl, fileName: params.pdf.fileName });
   if (params.channel === 'whatsapp') {
-    triggerExternalShareLink(
-      buildNativeWhatsAppProtocolHref({ phone: params.phone, message: shareText })
-    );
+    triggerExternalShareLink(buildBareWhatsAppProtocolHref(params.phone));
     return {
       method: 'protocol',
-      message: `${params.pdf.fileName} downloaded & WhatsApp opened (${party || docNo}).`,
+      message: `${params.pdf.fileName} downloaded & WhatsApp opened (pure binary PDF only).`,
     };
   }
 
   triggerExternalShareLink(
-    buildEmailShareHref({
-      email: params.email || params.company?.email || OFFICIAL_PARTY_EMAIL,
-      subject: `${docLabel} ${docNo}${party ? ` - ${party}` : ''}`,
-      body: shareText,
-    })
+    buildBareEmailProtocolHref(params.email || params.company?.email || OFFICIAL_PARTY_EMAIL)
   );
   return {
     method: 'protocol',
-    message: `${params.pdf.fileName} downloaded & Email composer opened (${party || docNo}).`,
+    message: `${params.pdf.fileName} downloaded & Mail composer opened (pure binary PDF only).`,
+  };
+}
+
+export async function sharePdfBatchDirect(params: {
+  pdfs: Array<{ blob: Blob; fileName: string }>;
+  channel: 'whatsapp' | 'email';
+  phone?: string;
+  email?: string;
+  company?: CompanySettings;
+}): Promise<{ method: 'web_share' | 'protocol'; cancelled?: boolean; message: string }> {
+  if (!params.pdfs.length) {
+    return { method: 'protocol', message: 'Select at least one PDF file to share.' };
+  }
+  const files = params.pdfs.map(
+    (p) => new File([p.blob], p.fileName, { type: 'application/pdf' })
+  );
+
+  if (typeof navigator !== 'undefined' && typeof navigator.share === 'function') {
+    try {
+      const canShareFiles =
+        typeof navigator.canShare === 'function' ? navigator.canShare({ files }) : false;
+      if (canShareFiles) {
+        await navigator.share({ files });
+        return {
+          method: 'web_share',
+          message: `Shared ${files.length} binary .pdf file(s).`,
+        };
+      }
+    } catch (err) {
+      if (err instanceof Error && err.name === 'AbortError') {
+        return { method: 'web_share', cancelled: true, message: 'Batch share cancelled.' };
+      }
+    }
+  }
+
+  for (const item of params.pdfs) {
+    const url = URL.createObjectURL(item.blob);
+    downloadPdfFileFromResult({ blobUrl: url, fileName: item.fileName });
+    setTimeout(() => URL.revokeObjectURL(url), 4000);
+  }
+  if (params.channel === 'whatsapp') {
+    triggerExternalShareLink(buildBareWhatsAppProtocolHref(params.phone));
+    return {
+      method: 'protocol',
+      message: `${files.length} binary .pdf file(s) downloaded & WhatsApp opened.`,
+    };
+  }
+
+  triggerExternalShareLink(
+    buildBareEmailProtocolHref(params.email || params.company?.email || OFFICIAL_PARTY_EMAIL)
+  );
+  return {
+    method: 'protocol',
+    message: `${files.length} binary .pdf file(s) downloaded & Mail opened.`,
   };
 }
 

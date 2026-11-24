@@ -119,6 +119,7 @@ import {
 import { SupportedCountry } from '../lib/postalPinLookup';
 import { VoiceDraftFields } from '../lib/voicePilot';
 import { PinCountryInputs, useAutoPinLookup } from './CityPinCountryAutoFill';
+import { deleteIdbObject, loadIdbObject, saveIdbObject } from '../lib/indexedDbStore';
 
 interface AllInOneEntrySheetProps {
   divisionMode: BusinessMode;
@@ -525,6 +526,154 @@ const AllInOneEntrySheetInner: React.FC<AllInOneEntrySheetProps> = ({
   const deferredFindCnQuery = useDeferredValue(findCnQuery);
   const deferredRegisterSearch = useDeferredValue(registerSearch);
   const [viewModalRow, setViewModalRow] = useState<UnifiedRegisterRow | null>(null);
+  const draftHydratedRef = useRef(false);
+
+  const ALL_IN_ONE_DRAFT_KEY = 'drc_draft_lr_allinone_v1';
+
+  useEffect(() => {
+    let cancelled = false;
+    void loadIdbObject<Record<string, unknown>>(ALL_IN_ONE_DRAFT_KEY).then((draft) => {
+      draftHydratedRef.current = true;
+      if (cancelled || !draft || editingCnId || editingDocketId) return;
+      if (draft.divisionMode && draft.divisionMode !== divisionMode) return;
+      if (typeof draft.docNo === 'string' && draft.docNo.trim()) setDocNo(draft.docNo);
+      if (typeof draft.docDate === 'string' && draft.docDate) setDocDate(draft.docDate);
+      if (typeof draft.billedAtBranch === 'string' && draft.billedAtBranch) setBilledAtBranch(draft.billedAtBranch);
+      if (draft.transportMode === 'Road' || draft.transportMode === 'Rail' || draft.transportMode === 'Air') setTransportMode(draft.transportMode);
+      if (draft.bookingBasis === 'Party' || draft.bookingBasis === 'Franchise' || draft.bookingBasis === 'Cash') setBookingBasis(draft.bookingBasis);
+      if (draft.payBasis === 'TBB' || draft.payBasis === 'Paid' || draft.payBasis === 'To-Pay') setPayBasis(draft.payBasis);
+      if (typeof draft.deliverAt === 'string') setDeliverAt(draft.deliverAt);
+      if (typeof draft.billingPartyName === 'string') setBillingPartyName(draft.billingPartyName);
+      if (typeof draft.consignorName === 'string') setConsignorName(draft.consignorName);
+      if (typeof draft.consignorAddress === 'string') setConsignorAddress(draft.consignorAddress);
+      if (typeof draft.consignorGstin === 'string') setConsignorGstin(draft.consignorGstin);
+      if (typeof draft.consigneeName === 'string') setConsigneeName(draft.consigneeName);
+      if (typeof draft.consigneeAddress === 'string') setConsigneeAddress(draft.consigneeAddress);
+      if (typeof draft.consigneeGstin === 'string') setConsigneeGstin(draft.consigneeGstin);
+      if (typeof draft.fromCity === 'string' && draft.fromCity) setFromCity(draft.fromCity);
+      if (typeof draft.toCity === 'string') setToCity(draft.toCity);
+      if (typeof draft.truckNo === 'string') setTruckNo(draft.truckNo);
+      if (typeof draft.driverName === 'string') setDriverName(draft.driverName);
+      if (typeof draft.driverMobile === 'string') setDriverMobile(draft.driverMobile);
+      if (typeof draft.packages === 'string') setPackages(draft.packages);
+      if (typeof draft.particulars === 'string') setParticulars(draft.particulars);
+      if (typeof draft.ewayBillNo === 'string') setEwayBillNo(draft.ewayBillNo);
+      if (typeof draft.nettWeight === 'string') setNettWeight(draft.nettWeight);
+      if (typeof draft.chargedWeight === 'string') setChargedWeight(draft.chargedWeight);
+      if (typeof draft.rateMode === 'string') setRateMode(draft.rateMode);
+      if (typeof draft.ratePerUnit === 'string') setRatePerUnit(draft.ratePerUnit);
+      if (typeof draft.baseFreight === 'string') setBaseFreight(draft.baseFreight);
+      if (typeof draft.otherCharge === 'string') setOtherCharge(draft.otherCharge);
+      if (draft.manualFreightOverride === null || typeof draft.manualFreightOverride === 'string') {
+        setManualFreightOverride(draft.manualFreightOverride as string | null);
+      }
+      if (typeof draft.brokerName === 'string') setBrokerName(draft.brokerName);
+      if (typeof draft.ownerName === 'string') setOwnerName(draft.ownerName);
+      if (typeof draft.hireAmount === 'string') setHireAmount(draft.hireAmount);
+      if (typeof draft.hireRatePerUnit === 'string') setHireRatePerUnit(draft.hireRatePerUnit);
+      if (typeof draft.cnRemarks === 'string') setCnRemarks(draft.cnRemarks);
+      if (draft.consignorName || draft.toCity || draft.truckNo || draft.billingPartyName) {
+        setStatusToast('Restored unsaved LR / Bilty draft automatically from offline vault.');
+      }
+    });
+    return () => {
+      cancelled = true;
+    };
+  }, []);
+
+  useEffect(() => {
+    if (!draftHydratedRef.current || editingCnId || editingDocketId) return;
+    const hasMeaningfulInput = Boolean(
+      billingPartyName.trim() ||
+        consignorName.trim() ||
+        consigneeName.trim() ||
+        toCity.trim() ||
+        truckNo.trim() ||
+        ewayBillNo.trim() ||
+        Number(baseFreight || 0) > 0 ||
+        manualFreightOverride !== null
+    );
+    if (!hasMeaningfulInput) return;
+    const timer = window.setTimeout(() => {
+      void saveIdbObject(ALL_IN_ONE_DRAFT_KEY, {
+        divisionMode,
+        docNo,
+        docDate,
+        billedAtBranch,
+        transportMode,
+        bookingBasis,
+        payBasis,
+        deliverAt,
+        billingPartyName,
+        consignorName,
+        consignorAddress,
+        consignorGstin,
+        consigneeName,
+        consigneeAddress,
+        consigneeGstin,
+        fromCity,
+        toCity,
+        truckNo,
+        driverName,
+        driverMobile,
+        packages,
+        particulars,
+        ewayBillNo,
+        nettWeight,
+        chargedWeight,
+        rateMode,
+        ratePerUnit,
+        baseFreight,
+        otherCharge,
+        manualFreightOverride,
+        brokerName,
+        ownerName,
+        hireAmount,
+        hireRatePerUnit,
+        cnRemarks,
+        savedAt: Date.now(),
+      });
+    }, 350);
+    return () => window.clearTimeout(timer);
+  }, [
+    editingCnId,
+    editingDocketId,
+    divisionMode,
+    docNo,
+    docDate,
+    billedAtBranch,
+    transportMode,
+    bookingBasis,
+    payBasis,
+    deliverAt,
+    billingPartyName,
+    consignorName,
+    consignorAddress,
+    consignorGstin,
+    consigneeName,
+    consigneeAddress,
+    consigneeGstin,
+    fromCity,
+    toCity,
+    truckNo,
+    driverName,
+    driverMobile,
+    packages,
+    particulars,
+    ewayBillNo,
+    nettWeight,
+    chargedWeight,
+    rateMode,
+    ratePerUnit,
+    baseFreight,
+    otherCharge,
+    manualFreightOverride,
+    brokerName,
+    ownerName,
+    hireAmount,
+    hireRatePerUnit,
+    cnRemarks,
+  ]);
 
   // Master Data Lists
   const combinedParties = useMemo<AnyPartyEntity[]>(() => {
@@ -919,6 +1068,7 @@ const AllInOneEntrySheetInner: React.FC<AllInOneEntrySheetProps> = ({
     setMultiAdvances([]);
     setMultiPaidReturns([]);
     setMultiBalanceDates([]);
+    void deleteIdbObject('drc_draft_lr_allinone_v1');
   }, [isFtl, divisionMeta.docPrefix, consignments.length, logisticsDockets.length]);
 
   const buildCurrentCnSnapshot = useCallback((): ConsignmentNote => {
@@ -1363,6 +1513,7 @@ const AllInOneEntrySheetInner: React.FC<AllInOneEntrySheetProps> = ({
           ownerUid,
         });
 
+        await deleteIdbObject('drc_draft_lr_allinone_v1');
         playVerifiedBeep();
 
         if (afterAction === 'pdf') {
@@ -2238,37 +2389,42 @@ const AllInOneEntrySheetInner: React.FC<AllInOneEntrySheetProps> = ({
             <div>
               <label className="block font-bold text-slate-700 mb-1">Mode / Basis</label>
               <div className="flex gap-1">
-                <select
-                  value={transportMode}
-                  onChange={(e) => setTransportMode(e.target.value as 'Road' | 'Rail' | 'Air')}
-                  className="w-1/2 px-1.5 py-1.5 rounded border border-slate-300 bg-white font-semibold"
-                >
-                  <option value="Road">Road</option>
-                  <option value="Rail">Rail</option>
-                  <option value="Air">Air</option>
-                </select>
-                <select
-                  value={bookingBasis}
-                  onChange={(e) => setBookingBasis(e.target.value as 'Party' | 'Franchise' | 'Cash')}
-                  className="w-1/2 px-1.5 py-1.5 rounded border border-slate-300 bg-white font-semibold"
-                >
-                  <option value="Party">Party</option>
-                  <option value="Franchise">Franchise</option>
-                  <option value="Cash">Cash</option>
-                </select>
+                <div className="w-1/2">
+                  <SearchableSelect
+                    ariaLabel="Transport Mode"
+                    value={transportMode}
+                    onChange={(val) => setTransportMode(val as 'Road' | 'Rail' | 'Air')}
+                    sortAlphabetically={false}
+                    options={['Road', 'Rail', 'Air']}
+                    buttonClassName="!py-1.5 !font-semibold"
+                  />
+                </div>
+                <div className="w-1/2">
+                  <SearchableSelect
+                    ariaLabel="Booking Basis"
+                    value={bookingBasis}
+                    onChange={(val) => setBookingBasis(val as 'Party' | 'Franchise' | 'Cash')}
+                    sortAlphabetically={false}
+                    options={['Party', 'Franchise', 'Cash']}
+                    buttonClassName="!py-1.5 !font-semibold"
+                  />
+                </div>
               </div>
             </div>
             <div>
               <label className="block font-bold text-slate-700 mb-1">Pay Basis</label>
-              <select
+              <SearchableSelect
+                ariaLabel="Pay Basis"
                 value={payBasis}
-                onChange={(e) => setPayBasis(e.target.value as 'TBB' | 'Paid' | 'To-Pay')}
-                className="w-full px-2 py-1.5 rounded border border-slate-300 bg-white font-bold text-[#0D47A1]"
-              >
-                <option value="TBB">TBB (To Be Billed)</option>
-                <option value="Paid">Paid</option>
-                <option value="To-Pay">To-Pay</option>
-              </select>
+                onChange={(val) => setPayBasis(val as 'TBB' | 'Paid' | 'To-Pay')}
+                sortAlphabetically={false}
+                options={[
+                  { value: 'TBB', label: 'TBB (To Be Billed)' },
+                  { value: 'Paid', label: 'Paid' },
+                  { value: 'To-Pay', label: 'To-Pay' },
+                ]}
+                buttonClassName="!py-1.5 !font-bold !text-[#0D47A1]"
+              />
             </div>
           </div>
 
@@ -3630,14 +3786,14 @@ const AllInOneEntrySheetInner: React.FC<AllInOneEntrySheetProps> = ({
               </div>
               <div>
                 <label className="block font-bold text-slate-700 mb-1">Hire Mode</label>
-                <select
+                <SearchableSelect
+                  ariaLabel="Hire Rate Mode"
                   value={hireRateMode}
-                  onChange={(e) => setHireRateMode(e.target.value as 'Fixed' | 'Per MT')}
-                  className="w-full px-2 py-1.5 rounded border border-slate-300 bg-white font-semibold"
-                >
-                  <option value="Fixed">Fixed</option>
-                  <option value="Per MT">Per MT</option>
-                </select>
+                  onChange={(val) => setHireRateMode(val as 'Fixed' | 'Per MT')}
+                  sortAlphabetically={false}
+                  options={['Fixed', 'Per MT']}
+                  buttonClassName="!py-1.5 !font-semibold"
+                />
               </div>
               {hireRateMode === 'Per MT' ? (
                 <div>
@@ -3719,18 +3875,21 @@ const AllInOneEntrySheetInner: React.FC<AllInOneEntrySheetProps> = ({
               </div>
               <div>
                 <label className="block font-bold text-slate-700 mb-1">TDS 194C (%)</label>
-                <select
+                <SearchableSelect
+                  ariaLabel="TDS 194C Percentage"
                   value={tdsRatePct}
-                  onChange={(e) => {
-                    setTdsRatePct(e.target.value);
+                  onChange={(val) => {
+                    setTdsRatePct(val);
                     setPayTdsOverride('');
                   }}
-                  className="w-full px-2 py-1.5 rounded border border-slate-300 bg-white font-mono-num"
-                >
-                  <option value="0">0% Exempt</option>
-                  <option value="1">1% Indv</option>
-                  <option value="2">2% Co</option>
-                </select>
+                  sortAlphabetically={false}
+                  options={[
+                    { value: '0', label: '0% Exempt' },
+                    { value: '1', label: '1% Indv' },
+                    { value: '2', label: '2% Co' },
+                  ]}
+                  buttonClassName="!py-1.5 !font-mono-num"
+                />
               </div>
             </div>
 
@@ -3835,20 +3994,19 @@ const AllInOneEntrySheetInner: React.FC<AllInOneEntrySheetProps> = ({
                         );
                         return (
                           <tr key={idx} className="border-b border-amber-100 bg-white">
-                            <td className="p-1">
-                              <select
+                            <td className="p-1 min-w-[115px]">
+                              <SearchableSelect
+                                ariaLabel={`Advance ${idx + 1} Payee Type`}
                                 value={adv.payeeType}
-                                onChange={(e) =>
+                                onChange={(val) =>
                                   setHireAdvances((prev) =>
-                                    prev.map((r, i) => (i === idx ? { ...r, payeeType: e.target.value } : r))
+                                    prev.map((r, i) => (i === idx ? { ...r, payeeType: val } : r))
                                   )
                                 }
-                                className="px-1.5 py-1 rounded border border-slate-300"
-                              >
-                                <option value="Lorry Owner">Lorry Owner</option>
-                                <option value="Broker">Broker</option>
-                                <option value="Driver">Driver</option>
-                              </select>
+                                sortAlphabetically={false}
+                                options={['Lorry Owner', 'Broker', 'Driver']}
+                                buttonClassName="!py-1 !text-[11px]"
+                              />
                             </td>
                             <td className="p-1">
                               <input
@@ -3901,22 +4059,19 @@ const AllInOneEntrySheetInner: React.FC<AllInOneEntrySheetProps> = ({
                                 className="px-1 py-1 rounded border border-slate-300 font-mono-num"
                               />
                             </td>
-                            <td className="p-1">
-                              <select
+                            <td className="p-1 min-w-[110px]">
+                              <SearchableSelect
+                                ariaLabel={`Advance ${idx + 1} Payment Mode`}
                                 value={adv.mode}
-                                onChange={(e) =>
+                                onChange={(val) =>
                                   setHireAdvances((prev) =>
-                                    prev.map((r, i) => (i === idx ? { ...r, mode: e.target.value } : r))
+                                    prev.map((r, i) => (i === idx ? { ...r, mode: val } : r))
                                   )
                                 }
-                                className="px-1 py-1 rounded border border-slate-300"
-                              >
-                                {PAYMENT_MODE_OPTIONS.map((m) => (
-                                  <option key={m} value={m}>
-                                    {m}
-                                  </option>
-                                ))}
-                              </select>
+                                sortAlphabetically={false}
+                                options={PAYMENT_MODE_OPTIONS}
+                                buttonClassName="!py-1 !text-[11px]"
+                              />
                             </td>
                             <td className="p-1">
                               <input
@@ -4058,33 +4213,35 @@ const AllInOneEntrySheetInner: React.FC<AllInOneEntrySheetProps> = ({
               </div>
               <div>
                 <label className="block font-bold text-slate-700 mb-1">Entry Type</label>
-                <select
+                <SearchableSelect
+                  ariaLabel="Staff Entry Type"
                   value={staffEntryType}
-                  onChange={(e) => setStaffEntryType(e.target.value as 'Commission' | 'Advance Taken' | 'Paid')}
-                  className="w-full px-2 py-1.5 rounded border border-slate-300 bg-white font-semibold"
-                >
-                  <option value="Commission">Commission (+)</option>
-                  <option value="Advance Taken">Advance Taken (-)</option>
-                  <option value="Paid">Monthly Paid (-)</option>
-                </select>
+                  onChange={(val) => setStaffEntryType(val as 'Commission' | 'Advance Taken' | 'Paid')}
+                  sortAlphabetically={false}
+                  options={[
+                    { value: 'Commission', label: 'Commission (+)' },
+                    { value: 'Advance Taken', label: 'Advance Taken (-)' },
+                    { value: 'Paid', label: 'Monthly Paid (-)' },
+                  ]}
+                  buttonClassName="!py-1.5 !font-semibold"
+                />
               </div>
               <div>
                 <label className="block font-bold text-slate-700 mb-1">WHEELS (Auto Rate)</label>
-                <select
+                <SearchableSelect
+                  ariaLabel="Wheel Type Auto Rate"
                   value={wheelType}
-                  onChange={(e) => {
-                    const wt = e.target.value;
+                  onChange={(wt) => {
                     setWheelType(wt);
                     setStaffAmount(String(wheelRates[wt] || 0));
                   }}
-                  className="w-full px-2 py-1.5 rounded border border-slate-300 bg-white font-semibold"
-                >
-                  {WHEEL_TYPES.map((w) => (
-                    <option key={w} value={w}>
-                      {w} (₹{wheelRates[w] || 0})
-                    </option>
-                  ))}
-                </select>
+                  sortAlphabetically={false}
+                  options={WHEEL_TYPES.map((w) => ({
+                    value: w,
+                    label: `${w} (₹${wheelRates[w] || 0})`,
+                  }))}
+                  buttonClassName="!py-1.5 !font-semibold"
+                />
               </div>
               <div>
                 <label className="block font-bold text-slate-700 mb-1">RUPEES (₹)</label>

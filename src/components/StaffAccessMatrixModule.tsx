@@ -1,5 +1,14 @@
-import React, { useState } from 'react';
-import { CheckCircle2, Eye, Lock, ShieldCheck, UserCheck } from 'lucide-react';
+import React, { useMemo, useState } from 'react';
+import {
+  CheckCircle2,
+  ChevronLeft,
+  ChevronRight,
+  Eye,
+  Lock,
+  Search,
+  ShieldCheck,
+  UserCheck,
+} from 'lucide-react';
 import {
   logBranchActivity,
   upsertDocument,
@@ -10,6 +19,7 @@ import {
   SheetPermissionKey,
   StaffAccount,
 } from '../types/erp';
+import { SearchableSelect } from './SearchableSelect';
 
 interface StaffAccessMatrixModuleProps {
   staffAccounts: StaffAccount[];
@@ -48,6 +58,26 @@ export const StaffAccessMatrixModule: React.FC<StaffAccessMatrixModuleProps> = (
 }) => {
   const [savingId, setSavingId] = useState<string | null>(null);
   const [statusMsg, setStatusMsg] = useState<string | null>(null);
+  const [searchQuery, setSearchQuery] = useState('');
+  const [page, setPage] = useState(1);
+  const pageSize = 25;
+
+  const filteredStaff = useMemo(() => {
+    const q = searchQuery.trim().toLowerCase();
+    if (!q) return staffAccounts;
+    return staffAccounts.filter((s) =>
+      `${s.displayName} ${s.staffCode} ${s.role} ${s.branchCode || ''}`
+        .toLowerCase()
+        .includes(q)
+    );
+  }, [staffAccounts, searchQuery]);
+
+  const totalPages = Math.max(1, Math.ceil(filteredStaff.length / pageSize));
+  const safePage = Math.min(page, totalPages);
+  const pagedStaff = useMemo(
+    () => filteredStaff.slice((safePage - 1) * pageSize, safePage * pageSize),
+    [filteredStaff, safePage]
+  );
 
   const resolveCurrentLevel = (
     staff: StaffAccount,
@@ -164,7 +194,7 @@ export const StaffAccessMatrixModule: React.FC<StaffAccessMatrixModuleProps> = (
             </div>
             <div>
               <h2 className="text-lg sm:text-xl font-extrabold text-slate-900">
-                Staff Sheet Access Control Matrix
+                Staff Sheet Access Control Matrix ({staffAccounts.length} Accounts)
               </h2>
               <p className="text-xs sm:text-sm text-slate-600">
                 Control exactly which sheets each staff member can View &amp; Edit, View Only, or is Blocked from opening. Changes apply instantly.
@@ -183,6 +213,47 @@ export const StaffAccessMatrixModule: React.FC<StaffAccessMatrixModuleProps> = (
               <Lock className="w-3.5 h-3.5" /> Blocked
             </span>
           </div>
+        </div>
+
+        <div className="mt-3 flex flex-wrap items-center justify-between gap-2">
+          <div className="relative flex-1 min-w-[240px] max-w-md">
+            <Search className="w-4 h-4 text-slate-400 absolute left-2.5 top-1/2 -translate-y-1/2" />
+            <input
+              type="text"
+              value={searchQuery}
+              onChange={(e) => {
+                setSearchQuery(e.target.value);
+                setPage(1);
+              }}
+              placeholder="Search 100+ staff by Name, Staff Code, Role, Branch..."
+              className="w-full pl-8 pr-3 py-1.5 rounded-lg border border-slate-300 text-xs focus:outline-none focus:ring-2 focus:ring-indigo-500"
+            />
+          </div>
+          {filteredStaff.length > pageSize && (
+            <div className="flex items-center gap-2 text-xs text-slate-600 font-semibold">
+              <span>
+                Page {safePage} / {totalPages} ({filteredStaff.length} staff)
+              </span>
+              <button
+                type="button"
+                disabled={safePage <= 1}
+                onClick={() => setPage((p) => Math.max(1, p - 1))}
+                className="p-1 rounded border border-slate-300 bg-white hover:bg-slate-50 disabled:opacity-40 cursor-pointer"
+                aria-label="Previous staff page"
+              >
+                <ChevronLeft className="w-4 h-4" />
+              </button>
+              <button
+                type="button"
+                disabled={safePage >= totalPages}
+                onClick={() => setPage((p) => Math.min(totalPages, p + 1))}
+                className="p-1 rounded border border-slate-300 bg-white hover:bg-slate-50 disabled:opacity-40 cursor-pointer"
+                aria-label="Next staff page"
+              >
+                <ChevronRight className="w-4 h-4" />
+              </button>
+            </div>
+          )}
         </div>
 
         {statusMsg && (
@@ -214,7 +285,7 @@ export const StaffAccessMatrixModule: React.FC<StaffAccessMatrixModuleProps> = (
               </tr>
             </thead>
             <tbody>
-              {staffAccounts.map((staff) => {
+              {pagedStaff.map((staff) => {
                 const isAdminRole = staff.role === 'Admin';
                 return (
                   <tr
@@ -245,25 +316,24 @@ export const StaffAccessMatrixModule: React.FC<StaffAccessMatrixModuleProps> = (
                               Admin Full Access
                             </span>
                           ) : (
-                            <select
-                              aria-label={`${staff.displayName} ${def.label} access`}
+                            <SearchableSelect
+                              ariaLabel={`${staff.displayName} ${def.label} access`}
                               value={cur}
                               disabled={savingId === `${staff.id}_${def.key}`}
-                              onChange={(e) =>
+                              sortAlphabetically={false}
+                              onChange={(val) =>
                                 void handlePermissionChange(
                                   staff,
                                   def.key,
-                                  e.target.value as SheetAccessLevel
+                                  val as SheetAccessLevel
                                 )
                               }
-                              className={`w-full px-2 py-1.5 rounded border text-[11px] font-bold cursor-pointer focus:outline-none ${matchedOpt.badgeClass}`}
-                            >
-                              {ACCESS_OPTIONS.map((opt) => (
-                                <option key={opt.value} value={opt.value}>
-                                  {opt.label}
-                                </option>
-                              ))}
-                            </select>
+                              options={ACCESS_OPTIONS.map((opt) => ({
+                                value: opt.value,
+                                label: opt.label,
+                              }))}
+                              buttonClassName={`!py-1 !text-[11px] !font-bold ${matchedOpt.badgeClass}`}
+                            />
                           )}
                         </td>
                       );

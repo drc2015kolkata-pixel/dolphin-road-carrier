@@ -1,5 +1,6 @@
 import {
   BillCopyCount,
+  BusinessMode,
   CompanySettings,
   ConsignmentNote,
   Declaration194C,
@@ -7,7 +8,9 @@ import {
   LogisticsDocket,
   LogisticsInvoice,
   LogisticsManifest,
+  PdfVaultFolder,
   Quotation,
+  getLogisticsDivisionFromId,
 } from '../types/erp';
 import {
   buildPdfArrayBuffer,
@@ -16,10 +19,11 @@ import {
   PdfOrientation,
   PdfTaskPayload,
 } from './pdfBuilders';
+import { savePdfToVault } from './pdfVaultStorage';
 
-const DRC_TRIANGLE_LOGO_URL = '/drc-triangle-logo.svg';
+const DRC_RING_LOGO_URL = '/assets/aistudio/WhatsApp_Image_2026-11-16_at_11.55.22_PM__2__3293db0a.jpeg';
 const FALLBACK_LOGO_PNG = '/pwa-192x192.png';
-const DRC_STAMP_URL = '/assets/aistudio/WhatsApp_Image_2026-11-16_at_11.55.22_PM__2__3293db0a.jpeg';
+const DRC_STAMP_URL = '/assets/aistudio/WhatsApp_Image_2026-11-16_at_11.55.22_PM__1__bc12d579.jpeg';
 const DRC_194C_REF_URL = '/assets/aistudio/WhatsApp_Image_2026-11-16_at_11.55.22_PM_8065282f.jpeg';
 
 let cachedLogoDataUrl: string | undefined;
@@ -78,9 +82,9 @@ function createFallbackTwinDolphinWatermarkDataUrl(): string | undefined {
     ctx.fillRect(0, 0, canvas.width, canvas.height);
 
     ctx.save();
-    ctx.globalAlpha = 0.095;
+    ctx.globalAlpha = 0.11;
     ctx.strokeStyle = '#1E40AF';
-    ctx.fillStyle = '#60A5FA';
+    ctx.fillStyle = '#3B82F6';
     ctx.lineWidth = 4;
 
     ctx.beginPath();
@@ -88,25 +92,29 @@ function createFallbackTwinDolphinWatermarkDataUrl(): string | undefined {
     ctx.stroke();
 
     ctx.beginPath();
-    ctx.moveTo(116, 295);
-    ctx.bezierCurveTo(106, 180, 178, 118, 248, 150);
-    ctx.bezierCurveTo(212, 172, 182, 225, 174, 300);
+    ctx.moveTo(260, 412);
+    ctx.bezierCurveTo(132, 336, 94, 214, 154, 148);
+    ctx.bezierCurveTo(192, 108, 242, 128, 258, 174);
+    ctx.bezierCurveTo(222, 166, 176, 198, 180, 268);
+    ctx.bezierCurveTo(184, 326, 226, 372, 260, 412);
     ctx.closePath();
     ctx.fill();
 
     ctx.beginPath();
-    ctx.moveTo(404, 295);
-    ctx.bezierCurveTo(414, 180, 342, 118, 272, 150);
-    ctx.bezierCurveTo(308, 172, 338, 225, 346, 300);
+    ctx.moveTo(260, 412);
+    ctx.bezierCurveTo(388, 336, 426, 214, 366, 148);
+    ctx.bezierCurveTo(328, 108, 278, 128, 262, 174);
+    ctx.bezierCurveTo(298, 166, 344, 198, 340, 268);
+    ctx.bezierCurveTo(336, 326, 294, 372, 260, 412);
     ctx.closePath();
     ctx.fill();
 
-    ctx.font = '900 58px Arial, sans-serif';
+    ctx.font = '900 54px Georgia, serif';
     ctx.textAlign = 'center';
     ctx.fillStyle = '#1E3A8A';
-    ctx.fillText('D.R.C', 260, 338);
-    ctx.font = 'bold 20px Arial, sans-serif';
-    ctx.fillText('DOLPHIN ROAD CARRIERS', 260, 370);
+    ctx.fillText('D.R.C', 260, 278);
+    ctx.font = 'bold 19px Arial, sans-serif';
+    ctx.fillText('DOLPHIN ROAD CARRIERS', 260, 314);
     ctx.restore();
 
     return canvas.toDataURL('image/jpeg', 0.85);
@@ -118,11 +126,11 @@ function createFallbackTwinDolphinWatermarkDataUrl(): string | undefined {
 async function getAssets(company?: CompanySettings): Promise<PdfAssets> {
   if (!cachedLogoDataUrl) {
     cachedLogoDataUrl =
-      (await loadImageToCompressedDataUrl(DRC_TRIANGLE_LOGO_URL, 640, 1.0, undefined, true)) ||
+      (await loadImageToCompressedDataUrl(DRC_RING_LOGO_URL, 640, 0.96)) ||
       (await loadImageToCompressedDataUrl(FALLBACK_LOGO_PNG, 512, 1.0, undefined, true));
   }
   if (!cachedDefaultStampDataUrl) {
-    cachedDefaultStampDataUrl = await loadImageToCompressedDataUrl(DRC_STAMP_URL, 540, 0.94);
+    cachedDefaultStampDataUrl = await loadImageToCompressedDataUrl(DRC_STAMP_URL, 560, 0.95);
   }
   if (!cachedPanCropDataUrl) {
     cachedPanCropDataUrl = await loadImageToCompressedDataUrl(
@@ -203,7 +211,104 @@ function getPdfWorker(): Worker | null {
   return sharedPdfWorker;
 }
 
-async function runPdfTask(task: PdfTaskPayload): Promise<GeneratedPdfResult> {
+export interface PdfVaultSaveContext {
+  folder: PdfVaultFolder;
+  division: BusinessMode;
+  docNo?: string;
+  partyName?: string;
+  truckNo?: string;
+  phone?: string;
+  email?: string;
+  createdDate?: string;
+}
+
+function normalizeDivisionCode(raw?: string, docId?: string): BusinessMode {
+  const s = String(raw || '').trim().toUpperCase();
+  if (s === 'PTL') return 'PTL';
+  if (s === 'COURIER') return 'COURIER';
+  if (s === 'LOGISTICS') return 'LOGISTICS';
+  if (docId) {
+    if (docId.startsWith('ptl_')) return 'PTL';
+    if (docId.startsWith('cour_')) return 'COURIER';
+  }
+  return 'FTL';
+}
+
+function resolveVaultContextFromTask(task: PdfTaskPayload): PdfVaultSaveContext | null {
+  if (task.kind === 'lr3copy') {
+    return {
+      folder: '1. LR_Copy_PDFs',
+      division: normalizeDivisionCode(task.cn.division, task.cn.id),
+      docNo: task.cn.cnNo,
+      partyName: task.cn.consigneeName || task.cn.billingPartyName || task.cn.consignorName,
+      truckNo: task.cn.truckNo,
+    };
+  }
+  if (task.kind === 'logisticsDocket') {
+    return {
+      folder: '1. LR_Copy_PDFs',
+      division: normalizeDivisionCode(
+        task.docket.division || getLogisticsDivisionFromId(task.docket.id),
+        task.docket.id
+      ),
+      docNo: task.docket.docketNo,
+      partyName: task.docket.consigneeName || task.docket.billingPartyName || task.docket.consignorName,
+      truckNo: task.docket.manifestNo,
+    };
+  }
+  if (task.kind === 'invoice') {
+    return {
+      folder: '2. Tax_Invoice_PDFs',
+      division: normalizeDivisionCode(task.invoice.division, task.invoice.id),
+      docNo: task.invoice.invoiceNo,
+      partyName: task.invoice.partyName,
+    };
+  }
+  if (task.kind === 'logisticsInvoice') {
+    return {
+      folder: '2. Tax_Invoice_PDFs',
+      division: normalizeDivisionCode(
+        task.invoice.division || getLogisticsDivisionFromId(task.invoice.id),
+        task.invoice.id
+      ),
+      docNo: task.invoice.docNo,
+      partyName: task.invoice.partyName,
+    };
+  }
+  if (task.kind === 'quotation') {
+    return {
+      folder: '3. Quotation_PDFs',
+      division: normalizeDivisionCode(task.quote.division, task.quote.id),
+      docNo: task.quote.quotationNo,
+      partyName: task.quote.partyName,
+      phone: task.quote.partyPhone,
+      email: task.quote.partyEmail,
+    };
+  }
+  if (task.kind === 'declaration194c') {
+    return {
+      folder: '4. Declaration_PDFs',
+      division: normalizeDivisionCode(task.decl.division, task.decl.id),
+      docNo: `194C-${task.decl.financialYear}`,
+      partyName: task.decl.partyName,
+    };
+  }
+  if (task.kind === 'podScan') {
+    return {
+      folder: '5. POD_Scans_PDFs',
+      division: normalizeDivisionCode(task.division),
+      docNo: task.cnNo,
+      truckNo: task.truckNo,
+      partyName: task.partyName,
+    };
+  }
+  return null;
+}
+
+async function runPdfTask(
+  task: PdfTaskPayload,
+  vaultOverride?: Partial<PdfVaultSaveContext>
+): Promise<GeneratedPdfResult> {
   const worker = getPdfWorker();
   const chosenOrientation: PdfOrientation =
     task.orientation ||
@@ -284,6 +389,15 @@ async function runPdfTask(task: PdfTaskPayload): Promise<GeneratedPdfResult> {
       const blob = new Blob([result.buffer], { type: 'application/pdf' });
       const blobUrl = URL.createObjectURL(blob);
       const sizeKB = Math.max(1, Math.round(blob.size / 1024));
+      const baseVault = resolveVaultContextFromTask(task);
+      if (baseVault) {
+        void savePdfToVault({
+          ...baseVault,
+          ...vaultOverride,
+          fileName: result.fileName,
+          blob,
+        });
+      }
       return attachRebuild({
         blob,
         blobUrl,
@@ -304,6 +418,15 @@ async function runPdfTask(task: PdfTaskPayload): Promise<GeneratedPdfResult> {
   const blob = new Blob([buffer], { type: 'application/pdf' });
   const blobUrl = URL.createObjectURL(blob);
   const sizeKB = Math.max(1, Math.round(blob.size / 1024));
+  const baseVault = resolveVaultContextFromTask(task);
+  if (baseVault) {
+    void savePdfToVault({
+      ...baseVault,
+      ...vaultOverride,
+      fileName,
+      blob,
+    });
+  }
   return attachRebuild({
     blob,
     blobUrl,
@@ -331,13 +454,13 @@ export async function generateInvoicePDF(
     orientation,
     copyCount: copyCount || invoice.copyCount || 1,
     assets: { ...assets },
-  });
+  }, shareMeta);
   return {
     ...res,
     shareMeta: shareMeta || {
       partyName: invoice.partyName,
       docNo: invoice.invoiceNo,
-      summaryText: `Tax Invoice ${invoice.invoiceNo} | Date: ${invoice.invoiceDate} | Party: ${invoice.partyName} | Grand Total: Rs. ${Number(invoice.grandTotal || 0).toLocaleString('en-IN')}`,
+      summaryText: `Tax Invoice ${invoice.invoiceNo} | Date: ${invoice.invoiceDate}`,
     },
   };
 }
@@ -355,13 +478,13 @@ export async function generateLR3CopyPDF(
     company,
     orientation,
     assets: { ...assets },
-  });
+  }, shareMeta);
   return {
     ...res,
     shareMeta: shareMeta || {
       partyName: cn.billingPartyName || cn.consignorName,
       docNo: cn.cnNo,
-      summaryText: `Consignment Note (LR) ${cn.cnNo} | Date: ${cn.cnDate} | ${cn.fromCity} -> ${cn.toCity} | Truck: ${cn.truckNo} | Freight: ${cn.showFreightOnPrint === false ? 'As Agreed' : `Rs. ${Number(cn.totalFreight || 0).toLocaleString('en-IN')}`}`,
+      summaryText: `Consignment Note (LR) ${cn.cnNo} | Date: ${cn.cnDate}`,
     },
   };
 }
@@ -379,7 +502,7 @@ export async function generateQuotationPDF(
     company,
     orientation,
     assets: { ...assets },
-  });
+  }, shareMeta);
   return {
     ...res,
     shareMeta: shareMeta || {
@@ -387,7 +510,7 @@ export async function generateQuotationPDF(
       phone: quote.partyPhone,
       email: quote.partyEmail,
       docNo: quote.quotationNo,
-      summaryText: `Rate Quotation ${quote.quotationNo} | Party: ${quote.partyName} | Route: ${quote.destination} | Vehicle: ${quote.vehicleType} | Freight: Rs. ${Number(quote.freight || 0).toLocaleString('en-IN')}`,
+      summaryText: `Rate Quotation ${quote.quotationNo} | Party: ${quote.partyName}`,
     },
   };
 }
@@ -405,13 +528,13 @@ export async function generateDeclaration194CPDF(
     company,
     orientation,
     assets: { ...assets },
-  });
+  }, shareMeta);
   return {
     ...res,
     shareMeta: shareMeta || {
       partyName: decl.partyName,
       docNo: `194C-${decl.financialYear}`,
-      summaryText: `Section 194C TDS Exemption Declaration (${decl.financialYear}) for ${decl.partyName} — ${company.companyName} (PAN: ${company.pan})`,
+      summaryText: `Section 194C Declaration (${decl.financialYear}) - ${decl.partyName}`,
     },
   };
 }
@@ -494,13 +617,13 @@ export async function generateLogisticsDocketPDF(
     company,
     orientation,
     assets: { ...assets },
-  });
+  }, shareMeta);
   return {
     ...res,
     shareMeta: shareMeta || {
       partyName: docket.billingPartyName || docket.consignorName,
       docNo: docket.docketNo,
-      summaryText: `Logistics Parcel Docket ${docket.docketNo} | ${docket.originBranch} -> ${docket.destBranch} | ${docket.packages} Pkgs (${docket.chargedWeightKg} Kg) | ${docket.payMode}: Rs. ${Number(docket.totalAmount || 0).toLocaleString('en-IN')}`,
+      summaryText: `Parcel Docket ${docket.docketNo} | ${docket.originBranch} -> ${docket.destBranch}`,
     },
   };
 }
@@ -542,13 +665,78 @@ export async function generateLogisticsInvoicePDF(
     company,
     orientation,
     assets: { ...assets },
-  });
+  }, shareMeta);
   return {
     ...res,
     shareMeta: shareMeta || {
       partyName: invoice.partyName,
       docNo: invoice.docNo,
-      summaryText: `Logistics ${invoice.docType} ${invoice.docNo} | Party: ${invoice.partyName} | Total: Rs. ${Number(invoice.grandTotal || 0).toLocaleString('en-IN')}`,
+      summaryText: `${invoice.docType} ${invoice.docNo} | Party: ${invoice.partyName}`,
+    },
+  };
+}
+
+export async function generatePodScanPDF(params: {
+  imageDataUrl: string;
+  truckNo: string;
+  cnNo?: string;
+  podDate: string;
+  remarks?: string;
+  partyName?: string;
+  division?: BusinessMode;
+  company: CompanySettings;
+  orientation?: PdfOrientation;
+}): Promise<GeneratedPdfResult> {
+  const assets = await getAssets(params.company);
+  const normalizedImg =
+    (await loadImageToCompressedDataUrl(params.imageDataUrl, 1280, 0.86)) || params.imageDataUrl;
+  const res = await runPdfTask({
+    kind: 'podScan',
+    imageDataUrl: normalizedImg,
+    truckNo: params.truckNo,
+    cnNo: params.cnNo,
+    podDate: params.podDate,
+    remarks: params.remarks,
+    partyName: params.partyName,
+    division: params.division || 'FTL',
+    company: params.company,
+    orientation: params.orientation || 'p',
+    assets: { ...assets },
+  });
+  return {
+    ...res,
+    shareMeta: {
+      partyName: params.partyName,
+      docNo: params.cnNo || params.truckNo,
+    },
+  };
+}
+
+export async function generateEntityKycPDF(params: {
+  role: 'Driver' | 'Broker' | 'Lorry Owner' | 'Vehicle';
+  recordName: string;
+  fields: Array<{ label: string; value: string }>;
+  attachedImageDataUrl?: string;
+  company: CompanySettings;
+  orientation?: PdfOrientation;
+  shareMeta?: PdfShareMeta;
+}): Promise<GeneratedPdfResult> {
+  const assets = await getAssets(params.company);
+  const res = await runPdfTask({
+    kind: 'entityKyc',
+    role: params.role,
+    recordName: params.recordName,
+    fields: params.fields,
+    attachedImageDataUrl: params.attachedImageDataUrl,
+    company: params.company,
+    orientation: params.orientation || 'p',
+    assets: { ...assets },
+  }, params.shareMeta);
+  return {
+    ...res,
+    shareMeta: params.shareMeta || {
+      partyName: params.recordName,
+      docNo: `${params.role} KYC`,
     },
   };
 }
