@@ -100,11 +100,13 @@ import {
   AutoCollectedOldDataResult,
   autoCollectOldDataFiles,
   DbfVerificationSummary,
+  extractBillingPartiesFromDbfTables,
   loadRawDbfArchiveFromIdb,
   RawDbfTableDump,
 } from '../lib/foxproDbfImport';
 import {
   analyzeAndSeparateMisclassifiedParties,
+  cleanAndDeduplicateDrivers,
   restoreHeadPartiesToBillingCustomers,
 } from '../lib/partySeparation';
 import {
@@ -822,29 +824,94 @@ const BackupSettingsModuleInner: React.FC<BackupSettingsModuleProps> = ({
     setDriveError(null);
     try {
       let totalImported = 0;
-      if (autoCollectResult.parties.length > 0) {
-        totalImported += await bulkUpsertDocuments('parties', autoCollectResult.parties as unknown as Array<Record<string, unknown>>);
+
+      const customerImported = autoCollectResult.parties.filter((p) => p.partyType === 'Customer');
+      const nonCustomerImported = autoCollectResult.parties.filter((p) => p.partyType !== 'Customer');
+      const partySync = restoreHeadPartiesToBillingCustomers(
+        allData.parties,
+        [...allData.consignments, ...autoCollectResult.consignments],
+        [...allData.invoices, ...autoCollectResult.invoices],
+        customerImported
+      );
+
+      const partiesToUpsert = [...partySync.restoredParties, ...nonCustomerImported];
+      if (partiesToUpsert.length > 0) {
+        totalImported += await bulkUpsertDocuments(
+          'parties',
+          partiesToUpsert as unknown as Array<Record<string, unknown>>
+        );
       }
+      for (const dupPartyId of partySync.duplicatePartyIds) {
+        await removeDocument('parties', dupPartyId);
+      }
+
       if (autoCollectResult.vehicles.length > 0) {
-        totalImported += await bulkUpsertDocuments('vehicles', autoCollectResult.vehicles as unknown as Array<Record<string, unknown>>);
+        totalImported += await bulkUpsertDocuments(
+          'vehicles',
+          autoCollectResult.vehicles as unknown as Array<Record<string, unknown>>
+        );
       }
-      if (autoCollectResult.drivers.length > 0) {
-        totalImported += await bulkUpsertDocuments('drivers', autoCollectResult.drivers as unknown as Array<Record<string, unknown>>);
+
+      // Clean & deduplicate combined Drivers so misclassified parties/duplicates never persist
+      const combinedDriverMap = new Map<string, Driver>();
+      for (const d of allData.drivers) combinedDriverMap.set(d.id, d);
+      for (const d of autoCollectResult.drivers) combinedDriverMap.set(d.id, d);
+      const allCombinedParties = [...partySync.mergedParties, ...nonCustomerImported];
+      const driverCleanup = cleanAndDeduplicateDrivers({
+        drivers: Array.from(combinedDriverMap.values()),
+        parties: allCombinedParties,
+        invoices: [...allData.invoices, ...autoCollectResult.invoices],
+        consignments: [...allData.consignments, ...autoCollectResult.consignments],
+        lorryHires: [...allData.lorryHires, ...autoCollectResult.lorryHires],
+        extraBillingPartyNames: customerImported.map((p) => p.name),
+      });
+
+      const importedDriverIdSet = new Set(autoCollectResult.drivers.map((d) => d.id));
+      const updatedDriverIdSet = new Set(driverCleanup.updatedDrivers.map((d) => d.id));
+      const driversToUpsert = driverCleanup.cleanDrivers.filter(
+        (d) => importedDriverIdSet.has(d.id) || updatedDriverIdSet.has(d.id)
+      );
+      if (driversToUpsert.length > 0) {
+        totalImported += await bulkUpsertDocuments(
+          'drivers',
+          driversToUpsert as unknown as Array<Record<string, unknown>>
+        );
       }
+      for (const remDrvId of driverCleanup.removedDriverIds) {
+        if (allData.drivers.some((d) => d.id === remDrvId)) {
+          await removeDocument('drivers', remDrvId);
+        }
+      }
+
       if (autoCollectResult.consignments.length > 0) {
-        totalImported += await bulkUpsertDocuments('consignments', autoCollectResult.consignments as unknown as Array<Record<string, unknown>>);
+        totalImported += await bulkUpsertDocuments(
+          'consignments',
+          autoCollectResult.consignments as unknown as Array<Record<string, unknown>>
+        );
       }
       if (autoCollectResult.invoices.length > 0) {
-        totalImported += await bulkUpsertDocuments('invoices', autoCollectResult.invoices as unknown as Array<Record<string, unknown>>);
+        totalImported += await bulkUpsertDocuments(
+          'invoices',
+          autoCollectResult.invoices as unknown as Array<Record<string, unknown>>
+        );
       }
       if (autoCollectResult.lorryHires.length > 0) {
-        totalImported += await bulkUpsertDocuments('lorry_hires', autoCollectResult.lorryHires as unknown as Array<Record<string, unknown>>);
+        totalImported += await bulkUpsertDocuments(
+          'lorry_hires',
+          autoCollectResult.lorryHires as unknown as Array<Record<string, unknown>>
+        );
       }
       if (autoCollectResult.transactions.length > 0) {
-        totalImported += await bulkUpsertDocuments('transactions', autoCollectResult.transactions as unknown as Array<Record<string, unknown>>);
+        totalImported += await bulkUpsertDocuments(
+          'transactions',
+          autoCollectResult.transactions as unknown as Array<Record<string, unknown>>
+        );
       }
       if (autoCollectResult.bankReceipts.length > 0) {
-        totalImported += await bulkUpsertDocuments('bank_receipts', autoCollectResult.bankReceipts as unknown as Array<Record<string, unknown>>);
+        totalImported += await bulkUpsertDocuments(
+          'bank_receipts',
+          autoCollectResult.bankReceipts as unknown as Array<Record<string, unknown>>
+        );
       }
       if (autoCollectResult.destinations.length > 0) {
         const mergedPlaces = Array.from(
@@ -864,8 +931,12 @@ const BackupSettingsModuleInner: React.FC<BackupSettingsModuleProps> = ({
         await saveSettingsDocument('company', { ...nextComp, ownerUid }, hasCustomSettings);
       }
       playVerifiedBeep();
+      const drvCleanedMsg =
+        driverCleanup.removedDriverIds.length > 0
+          ? ` Cleaned ${driverCleanup.removedDriverIds.length} duplicate/misclassified driver(s).`
+          : '';
       setDriveStatus(
-        `One-Click Auto-Collect Complete: ✅ Imported ${autoCollectResult.verificationSummary.totalImportedRows} / ${autoCollectResult.verificationSummary.totalActiveRows} Total DBF Rows — ${autoCollectResult.verificationSummary.missedRows} Missed (${totalImported} Firestore records synced).`
+        `One-Click Auto-Collect Complete: ✅ Imported ${autoCollectResult.verificationSummary.totalImportedRows} / ${autoCollectResult.verificationSummary.totalActiveRows} Total DBF Rows — ${autoCollectResult.verificationSummary.missedRows} Missed (${totalImported} Firestore records synced).${drvCleanedMsg}`
       );
       setAutoCollectResult(null);
     } catch (err) {
@@ -888,30 +959,79 @@ const BackupSettingsModuleInner: React.FC<BackupSettingsModuleProps> = ({
     setCleaningParties(true);
     setDriveError(null);
     try {
-      const { restoredParties, restoredCount } = restoreHeadPartiesToBillingCustomers(
-        allData.parties,
-        allData.consignments,
-        allData.invoices
-      );
-      if (restoredCount === 0) {
+      const archivedTables = await loadRawDbfArchiveFromIdb();
+      const extracted = extractBillingPartiesFromDbfTables({
+        tables: archivedTables,
+        ownerUid,
+      });
+
+      const { restoredParties, restoredCount, addedCount, duplicatePartyIds, mergedParties } =
+        restoreHeadPartiesToBillingCustomers(
+          allData.parties,
+          allData.consignments,
+          allData.invoices,
+          extracted.parties
+        );
+
+      const driverCleanup = cleanAndDeduplicateDrivers({
+        drivers: allData.drivers,
+        parties: mergedParties,
+        invoices: allData.invoices,
+        consignments: allData.consignments,
+        lorryHires: allData.lorryHires,
+        extraBillingPartyNames: extracted.parties.map((p) => p.name),
+      });
+
+      if (
+        restoredParties.length === 0 &&
+        duplicatePartyIds.length === 0 &&
+        driverCleanup.updatedDrivers.length === 0 &&
+        driverCleanup.removedDriverIds.length === 0
+      ) {
         const billingCount = allData.parties.filter(
           (p) => p.partyType === 'Customer' || p.partyType === 'Consignor' || p.partyType === 'Consignee'
         ).length;
         setDriveStatus(
-          `All ${billingCount} HEAD/Billing Customers are already correctly mapped to Billing Customers.`
+          `All ${billingCount} Billing Customers (HEAD / MARPARTY / Sundry Debtors) and ${allData.drivers.length} Drivers are already cleanly synced with 0 duplicates.`
         );
         return;
       }
-      await bulkUpsertDocuments(
-        'parties',
-        restoredParties as unknown as Array<Record<string, unknown>>
-      );
+
+      if (restoredParties.length > 0) {
+        await bulkUpsertDocuments(
+          'parties',
+          restoredParties as unknown as Array<Record<string, unknown>>
+        );
+      }
+      for (const dupPartyId of duplicatePartyIds) {
+        await removeDocument('parties', dupPartyId);
+      }
+
+      if (driverCleanup.updatedDrivers.length > 0) {
+        await bulkUpsertDocuments(
+          'drivers',
+          driverCleanup.updatedDrivers as unknown as Array<Record<string, unknown>>
+        );
+      }
+      for (const remDrvId of driverCleanup.removedDriverIds) {
+        await removeDocument('drivers', remDrvId);
+      }
+
       playVerifiedBeep();
+      const { headCount, marpartyCount, sundryDebtorsCount } = extracted.sourceStats;
+      const sourceSummary =
+        headCount + marpartyCount + sundryDebtorsCount > 0
+          ? ` (Archive scanned: HEAD ${headCount}, MARPARTY ${marpartyCount}, SUNDRY DEBTORS ${sundryDebtorsCount})`
+          : '';
+      const driverSummary =
+        driverCleanup.removedDriverIds.length > 0
+          ? ` Removed ${driverCleanup.removedDriverIds.length} duplicate/misclassified Driver(s) (${driverCleanup.duplicateCount} duplicate, ${driverCleanup.misclassifiedCount} non-driver/party).`
+          : '';
       setDriveStatus(
-        `Restored ${restoredCount} HEAD.DBF party record(s) back to Billing Customers ('Customer'). They now appear cleanly under Billing Parties & Tax Invoice.`
+        `Synced ${restoredCount} unique Billing Customer(s) (${addedCount} new, ${duplicatePartyIds.length} duplicate merged)${sourceSummary}.${driverSummary} All unique parties now appear in 1,000-Party Master Directory & Party Account Ledger.`
       );
     } catch (err) {
-      setDriveError(err instanceof Error ? err.message : 'Failed to restore HEAD parties.');
+      setDriveError(err instanceof Error ? err.message : 'Failed to sync HEAD / MARPARTY / Debtors billing parties.');
     } finally {
       setCleaningParties(false);
     }
@@ -2088,7 +2208,7 @@ const BackupSettingsModuleInner: React.FC<BackupSettingsModuleProps> = ({
                     One-Click Auto-Collect FoxPro (.DBF) &amp; Bank PNB Excel Importer
                   </h3>
                   <p className="text-[11px] text-blue-100">
-                    Maps HEAD, brkrmast, desmast, courvhl, drvrmast, courtran, Tax Inv, challant &amp; PNB Bank Excel (UPI/UTR/Cheque + 194C TDS) — strictly excludes scrap*.dbf
+                    Maps HEAD, marparty, group, ledger (Sundry Debtors), brkrmast, desmast, courvhl, drvrmast, courtran, Tax Inv, challant &amp; PNB Bank Excel (UPI/UTR/Cheque + 194C TDS) — strictly excludes scrap*.dbf
                   </p>
                 </div>
               </div>
@@ -2178,7 +2298,7 @@ const BackupSettingsModuleInner: React.FC<BackupSettingsModuleProps> = ({
                   <Users className="w-3.5 h-3.5" />
                   {cleaningParties
                     ? 'Working...'
-                    : '👥 Move All HEAD Parties to Billing Customers'}
+                    : '👥 Move All HEAD / MARPARTY / Debtors to Billing Customers'}
                 </button>
                 <button
                   type="button"

@@ -20,6 +20,17 @@ export function normalizePartyMatchKey(name: string | undefined | null): string 
     .replace(/\s+/g, ' ');
 }
 
+export function isBillingCustomerOriginId(id: string | undefined | null): boolean {
+  const s = String(id || '');
+  return (
+    s.startsWith('dbf_head_') ||
+    s.startsWith('dbf_marparty_') ||
+    s.startsWith('dbf_ledger_') ||
+    s.startsWith('dbf_party_') ||
+    s.startsWith('dbf_acct_')
+  );
+}
+
 export function isBillingCustomerType(partyType: Party['partyType'] | string | undefined): boolean {
   const norm = String(partyType || '').trim().toLowerCase();
   return norm === 'customer' || norm === 'consignor' || norm === 'consignee';
@@ -207,11 +218,8 @@ export function filterBillingCustomerParties(params: {
     const key = normalizePartyMatchKey(p.name);
     if (!key) continue;
 
-    // Never reclassify/exclude explicit HEAD / PARTY / ACCT DBF customers or explicit 'Customer' role rows
-    const isFromHeadDbf =
-      p.id.startsWith('dbf_head_') ||
-      p.id.startsWith('dbf_party_') ||
-      p.id.startsWith('dbf_acct_');
+    // Never reclassify/exclude explicit HEAD / MARPARTY / LEDGER Sundry Debtors / PARTY / ACCT DBF customers or explicit 'Customer' role rows
+    const isFromHeadDbf = isBillingCustomerOriginId(p.id);
     const isProtectedCustomer =
       isFromHeadDbf || p.partyType === 'Customer' || knownInvoiceOrCnCustomers.has(key);
     const hasGstin = Boolean(p.gstin && p.gstin.trim().length >= 10);
@@ -401,10 +409,7 @@ export function analyzeAndSeparateMisclassifiedParties(params: {
       continue;
     }
 
-    const isFromHeadDbf =
-      p.id.startsWith('dbf_head_') ||
-      p.id.startsWith('dbf_party_') ||
-      p.id.startsWith('dbf_acct_');
+    const isFromHeadDbf = isBillingCustomerOriginId(p.id);
     const isCustomerTagged = isBillingCustomerType(p.partyType);
     const hasGstin = Boolean(p.gstin && p.gstin.trim().length >= 10);
     const isProtected = isFromHeadDbf || protectedCustomerKeys.has(key);
@@ -521,16 +526,21 @@ export function analyzeAndSeparateMisclassifiedParties(params: {
 }
 
 /**
- * Restores any HEAD / PARTY / ACCT FoxPro customer records (plus invoiced/consigned billing parties)
- * that were mistakenly moved into Broker / TruckOwner / Vendor back to Billing Customers ('Customer').
+ * Restores any HEAD / MARPARTY / LEDGER (Sundry Debtors) / PARTY / ACCT FoxPro customer records
+ * (plus invoiced/consigned billing parties and optional freshly extracted DBF billing parties)
+ * into unique Billing Customers ('Customer') while merging duplicates cleanly.
  */
 export function restoreHeadPartiesToBillingCustomers(
   parties: Party[],
   consignments: ConsignmentNote[] = [],
-  invoices: Invoice[] = []
+  invoices: Invoice[] = [],
+  extraBillingParties: Party[] = []
 ): {
   restoredParties: Party[];
   restoredCount: number;
+  addedCount: number;
+  duplicatePartyIds: string[];
+  mergedParties: Party[];
 } {
   const billedCustomerKeys = new Set<string>();
   for (const inv of invoices) {
@@ -544,33 +554,439 @@ export function restoreHeadPartiesToBillingCustomers(
     if (k2) billedCustomerKeys.add(k2);
   }
 
-  const restoredParties: Party[] = [];
+  const extraCustomerMap = new Map<string, Party>();
+  for (const ep of extraBillingParties) {
+    const k = normalizePartyMatchKey(ep.name);
+    if (!k) continue;
+    const prev = extraCustomerMap.get(k);
+    extraCustomerMap.set(k, prev ? mergePartyFields(prev, ep) : ep);
+  }
+
+  const upsertedMap = new Map<string, Party>();
+  const duplicateIds = new Set<string>();
+  const canonicalCustomerByKey = new Map<string, Party>();
+  let restoredCount = 0;
+  let addedCount = 0;
+
+  const pickPartyDedupKey = (p: Party): string => {
+    const norm = normalizePartyMatchKey(p.name);
+    const gst = String(p.gstin || '').trim().toUpperCase();
+    return gst && gst.length >= 10 ? `${norm}::${gst}` : norm;
+  };
+
+  // Index existing Customer rows first
   for (const p of parties) {
-    const isExplicitNonCustomer =
+    if (p.partyType === 'Customer') {
+      const dKey = pickPartyDedupKey(p);
+      const normOnly = normalizePartyMatchKey(p.name);
+      if (dKey && !canonicalCustomerByKey.has(dKey)) {
+        canonicalCustomerByKey.set(dKey, p);
+      }
+      if (normOnly && !canonicalCustomerByKey.has(normOnly)) {
+        canonicalCustomerByKey.set(normOnly, p);
+      }
+    }
+  }
+
+  const workingList: Party[] = [];
+
+  for (const p of parties) {
+    const normName = normalizePartyMatchKey(p.name);
+    const isExplicitBrokerOrOwnerId =
       p.id.startsWith('dbf_brk_') ||
       p.id.startsWith('brk_') ||
       p.id.startsWith('dbf_own_') ||
-      p.id.startsWith('own_') ||
-      p.id.startsWith('dbf_drv_');
-    if (isExplicitNonCustomer) continue;
+      p.id.startsWith('own_');
 
-    const isHeadOrigin =
-      p.id.startsWith('dbf_head_') ||
-      p.id.startsWith('dbf_party_') ||
-      p.id.startsWith('dbf_acct_');
-    const isBilledCustomer = billedCustomerKeys.has(normalizePartyMatchKey(p.name));
+    const isDriverOriginId = p.id.startsWith('dbf_drv_');
+    const isBillingOrigin = isBillingCustomerOriginId(p.id);
+    const isBilledCustomer = Boolean(normName && billedCustomerKeys.has(normName));
+    const matchingExtra = normName ? extraCustomerMap.get(normName) : undefined;
 
-    if ((isHeadOrigin || isBilledCustomer) && p.partyType !== 'Customer') {
-      restoredParties.push({
-        ...p,
-        partyType: 'Customer',
-        balanceType: p.balanceType || 'Dr',
-      });
+    if (isDriverOriginId || (isExplicitBrokerOrOwnerId && !matchingExtra && !isBillingOrigin)) {
+      workingList.push(p);
+      continue;
     }
+
+    const shouldBeCustomer =
+      p.partyType === 'Customer' ||
+      isBillingOrigin ||
+      isBilledCustomer ||
+      (Boolean(matchingExtra) && !isExplicitBrokerOrOwnerId);
+
+    if (shouldBeCustomer && normName) {
+      let upgraded: Party =
+        p.partyType !== 'Customer'
+          ? {
+              ...p,
+              partyType: 'Customer',
+              balanceType: p.balanceType || 'Dr',
+            }
+          : p;
+
+      if (matchingExtra) {
+        const enriched = mergePartyFields(upgraded, matchingExtra);
+        if (
+          enriched.address !== upgraded.address ||
+          enriched.gstin !== upgraded.gstin ||
+          enriched.pan !== upgraded.pan ||
+          enriched.phone !== upgraded.phone ||
+          enriched.email !== upgraded.email ||
+          enriched.openingBalance !== upgraded.openingBalance ||
+          enriched.city !== upgraded.city ||
+          enriched.pinCode !== upgraded.pinCode ||
+          enriched.partyCode !== upgraded.partyCode
+        ) {
+          upgraded = {
+            ...enriched,
+            city: upgraded.city || matchingExtra.city || '',
+            pinCode: upgraded.pinCode || matchingExtra.pinCode || '',
+            stateCode: upgraded.stateCode || matchingExtra.stateCode || '',
+            stateName: upgraded.stateName || matchingExtra.stateName || '',
+            partyCode: upgraded.partyCode || matchingExtra.partyCode || '',
+          };
+        }
+      }
+
+      const exactKey = pickPartyDedupKey(upgraded);
+      const existingCanonical =
+        canonicalCustomerByKey.get(exactKey) ||
+        (!upgraded.gstin ? canonicalCustomerByKey.get(normName) : undefined);
+
+      if (existingCanonical && existingCanonical.id !== upgraded.id) {
+        const sameOrCompatibleGst =
+          !existingCanonical.gstin ||
+          !upgraded.gstin ||
+          existingCanonical.gstin.trim().toUpperCase() === upgraded.gstin.trim().toUpperCase();
+        if (sameOrCompatibleGst) {
+          const mergedCanonical = mergePartyFields(existingCanonical, upgraded);
+          canonicalCustomerByKey.set(exactKey, mergedCanonical);
+          canonicalCustomerByKey.set(normName, mergedCanonical);
+          upsertedMap.set(mergedCanonical.id, mergedCanonical);
+          duplicateIds.add(upgraded.id);
+          continue;
+        }
+      }
+
+      canonicalCustomerByKey.set(exactKey, upgraded);
+      if (!canonicalCustomerByKey.has(normName)) {
+        canonicalCustomerByKey.set(normName, upgraded);
+      }
+
+      if (upgraded.partyType !== p.partyType || upgraded !== p) {
+        upsertedMap.set(upgraded.id, upgraded);
+        if (p.partyType !== 'Customer') restoredCount += 1;
+      }
+      workingList.push(upgraded);
+      continue;
+    }
+
+    workingList.push(p);
   }
+
+  // Add any newly extracted Billing Parties from HEAD / MARPARTY / LEDGER (Sundry Debtors)
+  for (const ep of extraBillingParties) {
+    const normName = normalizePartyMatchKey(ep.name);
+    if (!normName) continue;
+    const dKey = pickPartyDedupKey(ep);
+    const existing =
+      canonicalCustomerByKey.get(dKey) ||
+      canonicalCustomerByKey.get(normName);
+
+    if (existing) {
+      const sameOrCompatibleGst =
+        !existing.gstin ||
+        !ep.gstin ||
+        existing.gstin.trim().toUpperCase() === ep.gstin.trim().toUpperCase();
+      if (sameOrCompatibleGst) {
+        const merged = mergePartyFields(existing, ep);
+        const enriched: Party = {
+          ...merged,
+          partyType: 'Customer',
+          balanceType: merged.balanceType || 'Dr',
+          city: existing.city || ep.city || '',
+          pinCode: existing.pinCode || ep.pinCode || '',
+          stateCode: existing.stateCode || ep.stateCode || '',
+          stateName: existing.stateName || ep.stateName || '',
+          partyCode: existing.partyCode || ep.partyCode || '',
+        };
+        const changed =
+          existing.partyType !== 'Customer' ||
+          enriched.address !== existing.address ||
+          enriched.gstin !== existing.gstin ||
+          enriched.pan !== existing.pan ||
+          enriched.phone !== existing.phone ||
+          enriched.email !== existing.email ||
+          enriched.openingBalance !== existing.openingBalance ||
+          enriched.city !== existing.city ||
+          enriched.pinCode !== existing.pinCode ||
+          enriched.partyCode !== existing.partyCode;
+        if (changed) {
+          if (existing.partyType !== 'Customer') restoredCount += 1;
+          canonicalCustomerByKey.set(dKey, enriched);
+          canonicalCustomerByKey.set(normName, enriched);
+          upsertedMap.set(enriched.id, enriched);
+        }
+        continue;
+      }
+    }
+
+    const newCustomer: Party = {
+      ...ep,
+      partyType: 'Customer',
+      balanceType: ep.balanceType || 'Dr',
+    };
+    canonicalCustomerByKey.set(dKey, newCustomer);
+    if (!canonicalCustomerByKey.has(normName)) {
+      canonicalCustomerByKey.set(normName, newCustomer);
+    }
+    upsertedMap.set(newCustomer.id, newCustomer);
+    workingList.push(newCustomer);
+    addedCount += 1;
+  }
+
+  const finalMerged = workingList
+    .filter((p) => !duplicateIds.has(p.id))
+    .map((p) => upsertedMap.get(p.id) || p);
+
   return {
-    restoredParties,
-    restoredCount: restoredParties.length,
+    restoredParties: Array.from(upsertedMap.values()),
+    restoredCount: restoredCount + addedCount,
+    addedCount,
+    duplicatePartyIds: Array.from(duplicateIds),
+    mergedParties: finalMerged,
   };
 }
+
+export interface DriverCleanupResult {
+  cleanDrivers: Driver[];
+  updatedDrivers: Driver[];
+  removedDriverIds: string[];
+  duplicateCount: number;
+  misclassifiedCount: number;
+}
+
+const COMPANY_OR_NON_DRIVER_REGEX =
+  /\b(pvt\.?\s*ltd|private\s*limited|p\.?\s*ltd|ltd\.?|limited|llp|inc\.?|corp\.?|corporation|enterprises?|industries|traders?|trading|associates?|agenc(?:y|ies)|emporium|syndicate|merchants?|suppliers?|distributors?|builders?|developers?|infra|infrastructure|projects?|logistics|cargo|carriers?|roadways|roadlines|transport|packers|movers|motors|automobiles?|steel|steels|iron|cement|tea|jute|textile|mills?|chemicals?|pharma|plastics?|polymers?|paper|packaging|exports?|imports?|overseas|india|commercial|co\.?|m\/s|&\s*(sons|co|bros|brothers)|broker|brkr|commission\s*agent|lorry\s*owner|truck\s*owner|sundry\s*debtor)\b|^m\/s\b|\(\s*(party|cust|customer|brk|broker|own|owner)\s*\)$/i;
+
+function isValidRealDlNo(dlNo: string | undefined | null): boolean {
+  const clean = String(dlNo || '')
+    .trim()
+    .toUpperCase()
+    .replace(/[^A-Z0-9]/g, '');
+  if (!clean || clean.length < 7) return false;
+  if (clean.startsWith('DLOLD') || clean.startsWith('UNSPECIFIED') || /^0+$/.test(clean)) {
+    return false;
+  }
+  return /[A-Z]/.test(clean) && /\d{4,}/.test(clean);
+}
+
+function normDlKey(dlNo: string | undefined | null): string {
+  return String(dlNo || '')
+    .trim()
+    .toUpperCase()
+    .replace(/[^A-Z0-9]/g, '');
+}
+
+function scoreDriverRichness(d: Driver): number {
+  let score = 0;
+  if (isValidRealDlNo(d.dlNo)) score += 10;
+  if (d.dlExpiry && d.dlExpiry.trim()) score += 4;
+  if (d.phone && d.phone.trim()) score += 3;
+  if (d.aadhaarNo && d.aadhaarNo.trim()) score += 2;
+  if (d.panNo && d.panNo.trim()) score += 2;
+  if (d.bankAccountNo && d.bankAccountNo.trim()) score += 2;
+  if (d.address && d.address.trim()) score += 1;
+  if (!String(d.id || '').startsWith('dbf_')) score += 2;
+  return score;
+}
+
+function mergeDriverFields(primary: Driver, secondary: Driver): { merged: Driver; changed: boolean } {
+  const betterDl =
+    isValidRealDlNo(primary.dlNo)
+      ? primary.dlNo
+      : isValidRealDlNo(secondary.dlNo)
+        ? secondary.dlNo
+        : primary.dlNo || secondary.dlNo || '';
+  const merged: Driver = {
+    ...primary,
+    dlNo: betterDl,
+    dlExpiry: primary.dlExpiry || secondary.dlExpiry || '',
+    phone: primary.phone || secondary.phone || '',
+    address: primary.address || secondary.address || '',
+    pinCode: primary.pinCode || secondary.pinCode || '',
+    country: primary.country || secondary.country,
+    aadhaarNo: primary.aadhaarNo || secondary.aadhaarNo || '',
+    panNo: primary.panNo || secondary.panNo || '',
+    bankName: primary.bankName || secondary.bankName || '',
+    bankAccountNo: primary.bankAccountNo || secondary.bankAccountNo || '',
+    bankIfsc: primary.bankIfsc || secondary.bankIfsc || '',
+  };
+  const changed =
+    merged.dlNo !== primary.dlNo ||
+    merged.dlExpiry !== (primary.dlExpiry || '') ||
+    merged.phone !== (primary.phone || '') ||
+    merged.address !== (primary.address || '') ||
+    merged.pinCode !== (primary.pinCode || '') ||
+    merged.aadhaarNo !== (primary.aadhaarNo || '') ||
+    merged.panNo !== (primary.panNo || '') ||
+    merged.bankName !== (primary.bankName || '') ||
+    merged.bankAccountNo !== (primary.bankAccountNo || '') ||
+    merged.bankIfsc !== (primary.bankIfsc || '');
+  return { merged, changed };
+}
+
+/**
+ * Removes duplicate Driver records (same normalized name or same valid DL No) and
+ * misclassified non-driver entries (Companies, Billing Parties from HEAD/MARPARTY/Sundry Debtors,
+ * Brokers, Lorry Owners, or blank/unspecified placeholder rows).
+ */
+export function cleanAndDeduplicateDrivers(params: {
+  drivers: Driver[];
+  parties?: Party[];
+  invoices?: Invoice[];
+  consignments?: ConsignmentNote[];
+  lorryHires?: LorryHire[];
+  extraBillingPartyNames?: string[];
+}): DriverCleanupResult {
+  const {
+    drivers,
+    parties = [],
+    invoices = [],
+    consignments = [],
+    lorryHires = [],
+    extraBillingPartyNames = [],
+  } = params;
+
+  const billingCustomerKeys = new Set<string>();
+  const brokerOwnerKeys = new Set<string>();
+
+  for (const p of parties) {
+    const k = normalizePartyMatchKey(p.name);
+    if (!k) continue;
+    if (p.partyType === 'Broker' || p.partyType === 'TruckOwner') {
+      brokerOwnerKeys.add(k);
+    } else if (isBillingCustomerType(p.partyType) || isBillingCustomerOriginId(p.id)) {
+      billingCustomerKeys.add(k);
+    }
+  }
+  for (const inv of invoices) {
+    const k = normalizePartyMatchKey(inv.partyName);
+    if (k) billingCustomerKeys.add(k);
+  }
+  for (const cn of consignments) {
+    const k1 = normalizePartyMatchKey(cn.billingPartyName);
+    const k2 = normalizePartyMatchKey(cn.consignorName);
+    if (k1) billingCustomerKeys.add(k1);
+    if (k2) billingCustomerKeys.add(k2);
+  }
+  for (const name of extraBillingPartyNames) {
+    const k = normalizePartyMatchKey(name);
+    if (k) billingCustomerKeys.add(k);
+  }
+  for (const lh of lorryHires) {
+    const bk = normalizePartyMatchKey(lh.brokerName);
+    const ow = normalizePartyMatchKey(lh.ownerName);
+    if (bk) brokerOwnerKeys.add(bk);
+    if (ow) brokerOwnerKeys.add(ow);
+  }
+
+  const confirmedTripDriverKeys = new Set<string>();
+  for (const cn of consignments) {
+    const dk = normalizePartyMatchKey(cn.driverName);
+    if (dk) confirmedTripDriverKeys.add(dk);
+  }
+
+  const removedIds = new Set<string>();
+  let misclassifiedCount = 0;
+
+  const validCandidates: Driver[] = [];
+  for (const d of drivers) {
+    const rawName = String(d.name || '').trim();
+    const key = normalizePartyMatchKey(rawName);
+    const idStr = String(d.id || '');
+    const realDl = isValidRealDlNo(d.dlNo);
+
+    const isBlankOrJunk =
+      !key ||
+      /^unspecified[-\s]*driver/i.test(rawName) ||
+      /^dl[-\s]*old[-\s]*\d+$/i.test(rawName);
+    const hasNonDriverOriginId =
+      idStr.startsWith('dbf_head_') ||
+      idStr.startsWith('dbf_marparty_') ||
+      idStr.startsWith('dbf_ledger_') ||
+      idStr.startsWith('dbf_party_') ||
+      idStr.startsWith('dbf_acct_') ||
+      idStr.startsWith('dbf_brk_') ||
+      idStr.startsWith('dbf_own_');
+    const isCompanyOrNonDriverName = COMPANY_OR_NON_DRIVER_REGEX.test(rawName);
+    const isConfirmedTripDriver = confirmedTripDriverKeys.has(key);
+    const isBillingPartyMisclassified =
+      billingCustomerKeys.has(key) && (!realDl || idStr.startsWith('dbf_') || !isConfirmedTripDriver);
+    const isBrokerOrOwnerMisclassified =
+      (brokerOwnerKeys.has(key) || (idStr.startsWith('dbf_') && isKnownTransportBrokerName(rawName))) &&
+      (!realDl || !isConfirmedTripDriver);
+
+    if (
+      isBlankOrJunk ||
+      hasNonDriverOriginId ||
+      isCompanyOrNonDriverName ||
+      isBillingPartyMisclassified ||
+      isBrokerOrOwnerMisclassified
+    ) {
+      removedIds.add(d.id);
+      misclassifiedCount += 1;
+      continue;
+    }
+
+    validCandidates.push(d);
+  }
+
+  // Sort richest records first so canonical entry keeps best DL / KYC details
+  const sorted = [...validCandidates].sort((a, b) => scoreDriverRichness(b) - scoreDriverRichness(a));
+
+  const byName = new Map<string, Driver>();
+  const byDl = new Map<string, Driver>();
+  const updatedMap = new Map<string, Driver>();
+  let duplicateCount = 0;
+
+  for (const d of sorted) {
+    const nameKey = normalizePartyMatchKey(d.name);
+    const dlKey = isValidRealDlNo(d.dlNo) ? normDlKey(d.dlNo) : '';
+
+    const matchByName = nameKey ? byName.get(nameKey) : undefined;
+    const matchByDl = dlKey ? byDl.get(dlKey) : undefined;
+    const existing = matchByName || matchByDl;
+
+    if (existing && existing.id !== d.id) {
+      const { merged, changed } = mergeDriverFields(existing, d);
+      if (changed) {
+        updatedMap.set(merged.id, merged);
+        byName.set(normalizePartyMatchKey(merged.name), merged);
+        if (isValidRealDlNo(merged.dlNo)) {
+          byDl.set(normDlKey(merged.dlNo), merged);
+        }
+      }
+      removedIds.add(d.id);
+      duplicateCount += 1;
+      continue;
+    }
+
+    if (nameKey) byName.set(nameKey, d);
+    if (dlKey) byDl.set(dlKey, d);
+  }
+
+  const cleanDrivers = validCandidates
+    .filter((d) => !removedIds.has(d.id))
+    .map((d) => updatedMap.get(d.id) || d);
+
+  return {
+    cleanDrivers,
+    updatedDrivers: Array.from(updatedMap.values()),
+    removedDriverIds: Array.from(removedIds),
+    duplicateCount,
+    misclassifiedCount,
+  };
+}
+
 

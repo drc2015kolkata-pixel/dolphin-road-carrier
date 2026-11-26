@@ -13,7 +13,7 @@ import { makeSafeDocId, normalizeFyLabel, resolveFinancialYearFromDate, roundPai
 import { sheetToObjectsSmartHeader } from './excelImport';
 import { buildAutomaticNarration, extractPaymentMetadata } from './paymentNarration';
 import { extractCreditReceiptsFromRows } from '../components/BankReceiptImportModule';
-import { normalizePartyMatchKey } from './partySeparation';
+import { cleanAndDeduplicateDrivers, normalizePartyMatchKey } from './partySeparation';
 import { loadIdbObject, saveIdbObject } from './indexedDbStore';
 
 export const RAW_DBF_ARCHIVE_IDB_KEY = 'drc_raw_dbf_archive_v1';
@@ -347,6 +347,14 @@ function isHeadCustomerDbf(leaf: string): boolean {
   return /^(head|party|partymast|acct|acmast|cust|customer).*\.dbf$/i.test(leaf);
 }
 
+function isMarpartyDbf(leaf: string): boolean {
+  return /^marp(arty)?.*\.dbf$/i.test(leaf) || leaf.includes('marparty');
+}
+
+function isGroupDbf(leaf: string): boolean {
+  return /^(group|grpmast|acgroup|grp).*\.dbf$/i.test(leaf);
+}
+
 function isBrokerDbf(leaf: string): boolean {
   return /^(broker|brkrmast|brkr).*\.dbf$/i.test(leaf) || leaf.includes('brkrmast');
 }
@@ -389,6 +397,11 @@ function isOpeningBalanceDbf(leaf: string): boolean {
   return /^(opbal|openbal|opening|ob).*\.dbf$/i.test(leaf) || leaf.includes('opbal');
 }
 
+function isLedgerDbf(leaf: string): boolean {
+  if (isConsignmentDbf(leaf)) return false;
+  return /^(ledger|ledg).*\.dbf$/i.test(leaf);
+}
+
 function isLedgerVoucherDbf(leaf: string): boolean {
   if (isConsignmentDbf(leaf)) return false;
   return /^(trn|trnmast|vouch|voucher|ledger|ledg|jour).*\.dbf$/i.test(leaf);
@@ -396,6 +409,8 @@ function isLedgerVoucherDbf(leaf: string): boolean {
 
 function classifyDbfTableKind(leaf: string): string {
   if (isHeadCustomerDbf(leaf)) return 'HEAD / Billing Parties';
+  if (isMarpartyDbf(leaf)) return 'MARPARTY Billing Parties';
+  if (isGroupDbf(leaf)) return 'GROUP Master (Account Groups)';
   if (isBrokerDbf(leaf)) return 'BROKER Master';
   if (isOwnerOrVehicleMasterDbf(leaf)) return 'OWNER / Vehicle Master';
   if (isDriverDbf(leaf)) return 'DRIVER Master';
@@ -404,8 +419,354 @@ function classifyDbfTableKind(leaf: string): string {
   if (isConsignmentDbf(leaf)) return 'CNMAST / COURTRAN Consignments';
   if (isChallanDbf(leaf)) return 'CHALLAN Lorry Hires';
   if (isInvoiceDbf(leaf)) return 'BILMAST / INVOICE Bills';
+  if (isLedgerDbf(leaf)) return 'LEDGER Accounts & Sundry Debtors';
   if (isLedgerVoucherDbf(leaf)) return 'TRN / VOUCH Ledger';
   return 'Other Legacy DBF Archive';
+}
+
+function isSundryDebtorGroupLabel(text: string): boolean {
+  const s = String(text || '').trim();
+  if (!s || /creditor/i.test(s)) return false;
+  return (
+    /\bsundry\s*deb/i.test(s) ||
+    /\bs\.?\s*debtor/i.test(s) ||
+    /\bsun\.?\s*deb/i.test(s) ||
+    /\btrade\s*debtor/i.test(s) ||
+    /\btrade\s*receivable/i.test(s) ||
+    /^debtors?$/i.test(s)
+  );
+}
+
+interface DbfGroupLookup {
+  groupCodeToName: Map<string, string>;
+  sundryDebtorCodes: Set<string>;
+}
+
+function buildGroupLookupFromTables(
+  tables: Array<{ leaf: string; rows: Array<Record<string, unknown>> }>
+): DbfGroupLookup {
+  const groupCodeToName = new Map<string, string>();
+  const groupCodeToParent = new Map<string, string>();
+
+  for (const { leaf, rows } of tables) {
+    if (!isGroupDbf(leaf)) continue;
+    for (const row of rows) {
+      const gCode = pickStr(row, ['gcode', 'grpcd', 'grcode', 'groupcd', 'grpid', 'code', 'id', 'srno']).toUpperCase();
+      const gName = pickStr(row, ['gname', 'grpname', 'groupname', 'grname', 'group', 'name', 'title', 'head', 'desc']);
+      const parentCode = pickStr(row, ['pgcode', 'pgrpcd', 'parent', 'under', 'undergroup', 'maingrp', 'parentcd']).toUpperCase();
+      if (gCode && gName) {
+        groupCodeToName.set(gCode, gName);
+      }
+      if (gCode && parentCode) {
+        groupCodeToParent.set(gCode, parentCode);
+      }
+    }
+  }
+
+  const sundryDebtorCodes = new Set<string>();
+  for (const [code, name] of groupCodeToName.entries()) {
+    if (isSundryDebtorGroupLabel(name)) {
+      sundryDebtorCodes.add(code);
+      continue;
+    }
+    let cur = groupCodeToParent.get(code);
+    for (let depth = 0; depth < 5 && cur; depth += 1) {
+      const parentName = groupCodeToName.get(cur) || cur;
+      if (isSundryDebtorGroupLabel(parentName)) {
+        sundryDebtorCodes.add(code);
+        break;
+      }
+      cur = groupCodeToParent.get(cur);
+    }
+  }
+
+  return { groupCodeToName, sundryDebtorCodes };
+}
+
+function isLedgerRowSundryDebtor(row: Record<string, unknown>, groupLookup: DbfGroupLookup): boolean {
+  const directGroupText = pickStr(row, [
+    'grpname',
+    'groupname',
+    'grname',
+    'subgroup',
+    'under',
+    'schname',
+    'schedule',
+    'actype',
+    'ac_type',
+    'category',
+    'nature',
+  ]);
+  if (directGroupText && isSundryDebtorGroupLabel(directGroupText)) {
+    return true;
+  }
+
+  const groupFieldVal = pickStr(row, ['group', 'sch', 'type']).trim();
+  if (groupFieldVal) {
+    if (isSundryDebtorGroupLabel(groupFieldVal)) return true;
+    const upper = groupFieldVal.toUpperCase();
+    if (groupLookup.sundryDebtorCodes.has(upper)) return true;
+    const mapped = groupLookup.groupCodeToName.get(upper);
+    if (mapped && isSundryDebtorGroupLabel(mapped)) return true;
+  }
+
+  const codeVal = pickStr(row, ['gcode', 'grpcd', 'grcode', 'groupcd', 'grpid', 'grp', 'schcode', 'acgroup', 'groupid']).toUpperCase();
+  if (codeVal) {
+    if (groupLookup.sundryDebtorCodes.has(codeVal)) return true;
+    const mapped = groupLookup.groupCodeToName.get(codeVal);
+    if (mapped && isSundryDebtorGroupLabel(mapped)) return true;
+    if (isSundryDebtorGroupLabel(codeVal)) return true;
+  }
+
+  return false;
+}
+
+function buildCustomerPartyFromDbfRow(params: {
+  row: Record<string, unknown>;
+  idx: number;
+  fileName: string;
+  idPrefix: string;
+  ownerUid: string;
+  enrichByCode?: Map<string, DbfEnrichMeta>;
+  enrichByName?: Map<string, DbfEnrichMeta>;
+  openingBalByCode?: Map<string, { amount: number; balanceType: 'Dr' | 'Cr'; name: string }>;
+  headCodeToName?: Map<string, string>;
+}): { party: Party; code: string } | null {
+  const {
+    row,
+    idx,
+    fileName,
+    idPrefix,
+    ownerUid,
+    enrichByCode,
+    enrichByName,
+    openingBalByCode,
+    headCodeToName,
+  } = params;
+
+  const code = pickStr(row, [
+    'hcode',
+    'pcode',
+    'mcode',
+    'lcode',
+    'acode',
+    'partycd',
+    'ledcd',
+    'code',
+    'headcd',
+    'id',
+  ]).toUpperCase();
+  const rawName = pickStr(row, [
+    'hname',
+    'pname',
+    'partyname',
+    'party',
+    'mname',
+    'lname',
+    'headname',
+    'acname',
+    'accname',
+    'custname',
+    'compname',
+    'ledger',
+    'title',
+    'name',
+  ]);
+  const cleanName = rawName.trim() || (code && !/^0+$/.test(code) ? code : '');
+  if (!cleanName) return null;
+
+  if (code && headCodeToName && !headCodeToName.has(code)) {
+    headCodeToName.set(code, cleanName);
+  }
+
+  const opOverride =
+    (code ? openingBalByCode?.get(code) : undefined) ||
+    openingBalByCode?.get(normalizePartyMatchKey(cleanName));
+  const directOpBal = roundPaise(
+    Math.abs(pickNum(row, ['opbal', 'opening', 'openbal', 'op_bal', 'balance', 'clbal']))
+  );
+  const opBal = directOpBal > 0 ? directOpBal : opOverride?.amount || 0;
+  const dcRaw = pickStr(row, ['opdc', 'drcr', 'dc', 'baltype', 'optype']).toUpperCase();
+  const balanceType: 'Dr' | 'Cr' = dcRaw
+    ? dcRaw.startsWith('C')
+      ? 'Cr'
+      : 'Dr'
+    : opOverride?.balanceType || 'Dr';
+
+  const byCode = code ? enrichByCode?.get(code) : undefined;
+  const byName = enrichByName?.get(normalizePartyMatchKey(cleanName));
+
+  const party: Party = {
+    id: makeSafeDocId(`${idPrefix}${fileName}_${idx}`),
+    name: cleanName,
+    partyCode: code || undefined,
+    partyType: 'Customer',
+    address: composeDbfAddress(row) || byCode?.address || byName?.address || '',
+    city: pickStr(row, ['city', 'town', 'place', 'station', 'dist', 'district']),
+    pinCode: pickStr(row, ['pin', 'pincode', 'zip']),
+    stateName: pickStr(row, ['state', 'stname', 'statename']),
+    contactPerson: pickStr(row, ['contactper', 'cperson', 'attn', 'prop']),
+    gstin: pickStr(row, ['gstno', 'gstin', 'gst', 'tin', 'vatno']).toUpperCase() || byCode?.gstin || byName?.gstin || '',
+    pan: pickStr(row, ['panno', 'itpan', 'pan', 'panno1']).toUpperCase() || byCode?.pan || byName?.pan || '',
+    phone: pickStr(row, ['phone', 'mobile', 'mob', 'tel', 'phno', 'contact', 'offph', 'resph', 'ph1']) || byCode?.phone || byName?.phone || '',
+    email: pickStr(row, ['email', 'mail', 'emailid']) || byCode?.email || byName?.email || '',
+    bankName: pickStr(row, ['bankname', 'bank', 'bkname']) || byCode?.bankName || byName?.bankName || '',
+    bankAccountNo: pickStr(row, ['bankac', 'acno', 'accno', 'accountno']) || byCode?.bankAccountNo || byName?.bankAccountNo || '',
+    bankIfsc: pickStr(row, ['ifsc', 'ifsccode']).toUpperCase() || byCode?.bankIfsc || byName?.bankIfsc || '',
+    openingBalance: opBal,
+    currentBalance: opBal,
+    balanceType,
+    ownerUid,
+  };
+
+  return { party, code };
+}
+
+function upsertUniqueCustomerParty(
+  parties: Party[],
+  seenByName: Map<string, number>,
+  seenByNameGstin: Map<string, number>,
+  incoming: Party
+): void {
+  const normName = normalizePartyMatchKey(incoming.name);
+  if (!normName) return;
+  const gst = String(incoming.gstin || '').trim().toUpperCase();
+  const gstKey = gst && gst.length >= 10 ? `${normName}::${gst}` : '';
+
+  let existingIdx = gstKey ? seenByNameGstin.get(gstKey) : undefined;
+  if (existingIdx === undefined) {
+    const byNameIdx = seenByName.get(normName);
+    if (byNameIdx !== undefined) {
+      const prev = parties[byNameIdx];
+      const prevGst = String(prev.gstin || '').trim().toUpperCase();
+      if (!gst || !prevGst || gst === prevGst) {
+        existingIdx = byNameIdx;
+      }
+    }
+  }
+
+  if (existingIdx !== undefined) {
+    const prev = parties[existingIdx];
+    const merged: Party = {
+      ...prev,
+      partyCode: prev.partyCode || incoming.partyCode,
+      address: prev.address || incoming.address,
+      city: prev.city || incoming.city,
+      pinCode: prev.pinCode || incoming.pinCode,
+      stateName: prev.stateName || incoming.stateName,
+      contactPerson: prev.contactPerson || incoming.contactPerson,
+      gstin: prev.gstin || incoming.gstin,
+      pan: prev.pan || incoming.pan,
+      phone: prev.phone || incoming.phone,
+      email: prev.email || incoming.email,
+      bankName: prev.bankName || incoming.bankName,
+      bankAccountNo: prev.bankAccountNo || incoming.bankAccountNo,
+      bankIfsc: prev.bankIfsc || incoming.bankIfsc,
+      openingBalance: prev.openingBalance || incoming.openingBalance,
+      currentBalance: prev.currentBalance || incoming.currentBalance,
+    };
+    parties[existingIdx] = merged;
+    const mergedGst = String(merged.gstin || '').trim().toUpperCase();
+    if (mergedGst && mergedGst.length >= 10) {
+      seenByNameGstin.set(`${normName}::${mergedGst}`, existingIdx);
+    }
+    return;
+  }
+
+  const nextIdx = parties.length;
+  parties.push(incoming);
+  if (!seenByName.has(normName)) {
+    seenByName.set(normName, nextIdx);
+  }
+  if (gstKey) {
+    seenByNameGstin.set(gstKey, nextIdx);
+  }
+}
+
+/**
+ * Extracts every unique Billing Party ('Customer') from already-archived DBF tables
+ * across HEAD.dbf, marparty.dbf, and ledger.dbf / group.dbf (SUNDRY DEBTORS).
+ */
+export function extractBillingPartiesFromDbfTables(params: {
+  tables: Array<{ fileName: string; rows: Array<Record<string, unknown>> }>;
+  ownerUid: string;
+}): {
+  parties: Party[];
+  sourceStats: {
+    headCount: number;
+    marpartyCount: number;
+    sundryDebtorsCount: number;
+    uniqueCount: number;
+  };
+} {
+  const prepared = (params.tables || []).map((t) => ({
+    fileName: t.fileName,
+    leaf: fileLeafName(t.fileName),
+    rows: Array.isArray(t.rows) ? t.rows : [],
+  }));
+
+  const groupLookup = buildGroupLookupFromTables(prepared);
+  const parties: Party[] = [];
+  const seenByName = new Map<string, number>();
+  const seenByNameGstin = new Map<string, number>();
+
+  let headCount = 0;
+  let marpartyCount = 0;
+  let sundryDebtorsCount = 0;
+
+  for (const t of prepared) {
+    if (isHeadCustomerDbf(t.leaf)) {
+      t.rows.forEach((row, idx) => {
+        const built = buildCustomerPartyFromDbfRow({
+          row,
+          idx,
+          fileName: t.fileName,
+          idPrefix: 'dbf_head_',
+          ownerUid: params.ownerUid,
+        });
+        if (!built) return;
+        headCount += 1;
+        upsertUniqueCustomerParty(parties, seenByName, seenByNameGstin, built.party);
+      });
+    } else if (isMarpartyDbf(t.leaf)) {
+      t.rows.forEach((row, idx) => {
+        const built = buildCustomerPartyFromDbfRow({
+          row,
+          idx,
+          fileName: t.fileName,
+          idPrefix: 'dbf_marparty_',
+          ownerUid: params.ownerUid,
+        });
+        if (!built) return;
+        marpartyCount += 1;
+        upsertUniqueCustomerParty(parties, seenByName, seenByNameGstin, built.party);
+      });
+    } else if (isLedgerDbf(t.leaf)) {
+      t.rows.forEach((row, idx) => {
+        if (!isLedgerRowSundryDebtor(row, groupLookup)) return;
+        const built = buildCustomerPartyFromDbfRow({
+          row,
+          idx,
+          fileName: t.fileName,
+          idPrefix: 'dbf_ledger_',
+          ownerUid: params.ownerUid,
+        });
+        if (!built) return;
+        sundryDebtorsCount += 1;
+        upsertUniqueCustomerParty(parties, seenByName, seenByNameGstin, built.party);
+      });
+    }
+  }
+
+  return {
+    parties,
+    sourceStats: {
+      headCount,
+      marpartyCount,
+      sundryDebtorsCount,
+      uniqueCount: parties.length,
+    },
+  };
 }
 
 export interface AutoCollectedOldDataResult {
@@ -535,17 +896,29 @@ export async function autoCollectOldDataFiles(params: {
     fileImportedCount.set(fileName, (fileImportedCount.get(fileName) || 0) + delta);
   };
 
+  // Build GROUP.DBF lookup map so LEDGER.DBF rows under SUNDRY DEBTORS convert cleanly to Billing Parties
+  const groupLookup = buildGroupLookupFromTables(
+    dbfTables.map((d) => ({ leaf: d.leaf, rows: d.table.rows }))
+  );
+
   // Pre-scan all master tables + OPBAL to populate cross-merge enrichment indexes
   const openingBalByCode = new Map<string, { amount: number; balanceType: 'Dr' | 'Cr'; name: string }>();
   for (const { leaf, table } of dbfTables) {
     if (
       isHeadCustomerDbf(leaf) ||
+      isMarpartyDbf(leaf) ||
       isBrokerDbf(leaf) ||
       isOwnerOrVehicleMasterDbf(leaf) ||
       isDriverDbf(leaf)
     ) {
       table.rows.forEach((row) => {
         recordEnrichFromRow(row);
+      });
+    } else if (isLedgerDbf(leaf)) {
+      table.rows.forEach((row) => {
+        if (isLedgerRowSundryDebtor(row, groupLookup)) {
+          recordEnrichFromRow(row);
+        }
       });
     } else if (isOpeningBalanceDbf(leaf)) {
       table.rows.forEach((row) => {
@@ -560,8 +933,9 @@ export async function autoCollectOldDataFiles(params: {
     }
   }
 
-  // First pass: map HEAD/PARTY/ACCT (Customer), BROKER (Broker), OWNER/VHMAIN (TruckOwner + Vehicle), DRIVER, DESMAST, OPBAL
-  const seenCustomerKeys = new Map<string, number>();
+  // First pass: map HEAD / MARPARTY / LEDGER (Sundry Debtors), BROKER, OWNER/VHMAIN, DRIVER, DESMAST, OPBAL
+  const seenCustomerByName = new Map<string, number>();
+  const seenCustomerByNameGstin = new Map<string, number>();
   const seenBrokerKeys = new Map<string, number>();
   const seenOwnerKeys = new Map<string, number>();
   const seenVehicleTrucks = new Set<string>();
@@ -583,65 +957,57 @@ export async function autoCollectOldDataFiles(params: {
   };
 
   for (const { leaf, table } of dbfTables) {
-    if (isHeadCustomerDbf(leaf)) {
+    if (isHeadCustomerDbf(leaf) || isMarpartyDbf(leaf)) {
+      const idPrefix = isMarpartyDbf(leaf) ? 'dbf_marparty_' : 'dbf_head_';
       table.rows.forEach((row, idx) => {
-        const code = pickStr(row, ['hcode', 'pcode', 'acode', 'code', 'headcd', 'id']).toUpperCase();
-        const rawName = pickStr(row, ['hname', 'pname', 'partyname', 'headname', 'acname', 'custname', 'name']);
-        const name = rawName || code || `UNSPECIFIED-PARTY-${idx + 1}`;
-        if (code) headCodeToName.set(code, name);
-
-        const opOverride =
-          (code ? openingBalByCode.get(code) : undefined) ||
-          openingBalByCode.get(normalizePartyMatchKey(name));
-        const directOpBal = roundPaise(Math.abs(pickNum(row, ['opbal', 'opening', 'openbal', 'op_bal', 'balance'])));
-        const opBal = directOpBal > 0 ? directOpBal : opOverride?.amount || 0;
-        const dcRaw = pickStr(row, ['opdc', 'drcr', 'dc', 'baltype']).toUpperCase();
-        const balanceType: 'Dr' | 'Cr' = dcRaw ? (dcRaw.startsWith('C') ? 'Cr' : 'Dr') : opOverride?.balanceType || 'Dr';
-
-        // STRICT RULE: HEAD.DBF / PARTY.DBF / ACCT.DBF ALWAYS map to Customers / Billing Parties (never auto-moved to Brokers)
-        const rawParty: Party = applyEnrichmentToParty(
-          {
-            id: makeSafeDocId(`dbf_head_${table.fileName}_${idx}`),
-            name,
-            partyType: 'Customer',
-            address: composeDbfAddress(row),
-            gstin: pickStr(row, ['gstno', 'gstin', 'gst', 'tin']).toUpperCase(),
-            pan: pickStr(row, ['panno', 'itpan', 'pan']).toUpperCase(),
-            phone: pickStr(row, ['phone', 'mobile', 'mob', 'tel', 'phno', 'contact']),
-            email: pickStr(row, ['email', 'mail']),
-            bankName: pickStr(row, ['bankname', 'bank', 'bkname']),
-            bankAccountNo: pickStr(row, ['bankac', 'acno', 'accno', 'accountno']),
-            bankIfsc: pickStr(row, ['ifsc', 'ifsccode']).toUpperCase(),
-            openingBalance: opBal,
-            currentBalance: opBal,
-            balanceType,
-            ownerUid: params.ownerUid,
-          },
-          code
-        );
-
-        const dedupKey = `${normalizePartyMatchKey(rawParty.name)}::${rawParty.gstin || code || idx}`;
-        const existingIdx = seenCustomerKeys.get(dedupKey);
-        if (existingIdx !== undefined) {
-          const prev = result.parties[existingIdx];
-          result.parties[existingIdx] = {
-            ...prev,
-            address: prev.address || rawParty.address,
-            gstin: prev.gstin || rawParty.gstin,
-            pan: prev.pan || rawParty.pan,
-            phone: prev.phone || rawParty.phone,
-            email: prev.email || rawParty.email,
-            bankName: prev.bankName || rawParty.bankName,
-            bankAccountNo: prev.bankAccountNo || rawParty.bankAccountNo,
-            bankIfsc: prev.bankIfsc || rawParty.bankIfsc,
-            openingBalance: prev.openingBalance || rawParty.openingBalance,
-            currentBalance: prev.currentBalance || rawParty.currentBalance,
-          };
-        } else {
-          seenCustomerKeys.set(dedupKey, result.parties.length);
-          result.parties.push(rawParty);
+        const built = buildCustomerPartyFromDbfRow({
+          row,
+          idx,
+          fileName: table.fileName,
+          idPrefix,
+          ownerUid: params.ownerUid,
+          enrichByCode,
+          enrichByName,
+          openingBalByCode,
+          headCodeToName,
+        });
+        if (built) {
+          upsertUniqueCustomerParty(
+            result.parties,
+            seenCustomerByName,
+            seenCustomerByNameGstin,
+            built.party
+          );
         }
         bumpFileImported(table.fileName);
+      });
+    } else if (isGroupDbf(leaf)) {
+      table.rows.forEach(() => {
+        bumpFileImported(table.fileName);
+      });
+    } else if (isLedgerDbf(leaf)) {
+      table.rows.forEach((row, idx) => {
+        if (isLedgerRowSundryDebtor(row, groupLookup)) {
+          const built = buildCustomerPartyFromDbfRow({
+            row,
+            idx,
+            fileName: table.fileName,
+            idPrefix: 'dbf_ledger_',
+            ownerUid: params.ownerUid,
+            enrichByCode,
+            enrichByName,
+            openingBalByCode,
+            headCodeToName,
+          });
+          if (built) {
+            upsertUniqueCustomerParty(
+              result.parties,
+              seenCustomerByName,
+              seenCustomerByNameGstin,
+              built.party
+            );
+          }
+        }
       });
     } else if (isBrokerDbf(leaf)) {
       table.rows.forEach((row, idx) => {
@@ -784,53 +1150,41 @@ export async function autoCollectOldDataFiles(params: {
         const opBal = roundPaise(Math.abs(pickNum(row, ['opbal', 'opening', 'openbal', 'op_bal', 'balance', 'amount'])));
         const dcRaw = pickStr(row, ['opdc', 'drcr', 'dc', 'baltype']).toUpperCase();
         const balanceType: 'Dr' | 'Cr' = dcRaw.startsWith('C') ? 'Cr' : 'Dr';
-        const dedupKey = `${normalizePartyMatchKey(name)}::${code || idx}`;
-        const existingIdx = seenCustomerKeys.get(dedupKey);
-        if (existingIdx !== undefined) {
-          const prev = result.parties[existingIdx];
-          if (!prev.openingBalance && opBal > 0) {
-            result.parties[existingIdx] = {
-              ...prev,
+        const existingByName = result.parties.findIndex(
+          (p) => normalizePartyMatchKey(p.name) === normalizePartyMatchKey(name)
+        );
+        if (existingByName >= 0) {
+          if (!result.parties[existingByName].openingBalance && opBal > 0) {
+            result.parties[existingByName] = {
+              ...result.parties[existingByName],
               openingBalance: opBal,
               currentBalance: opBal,
               balanceType,
             };
           }
         } else {
-          const existingByName = result.parties.findIndex(
-            (p) => normalizePartyMatchKey(p.name) === normalizePartyMatchKey(name)
-          );
-          if (existingByName >= 0) {
-            if (!result.parties[existingByName].openingBalance && opBal > 0) {
-              result.parties[existingByName] = {
-                ...result.parties[existingByName],
+          upsertUniqueCustomerParty(
+            result.parties,
+            seenCustomerByName,
+            seenCustomerByNameGstin,
+            applyEnrichmentToParty(
+              {
+                id: makeSafeDocId(`dbf_opbal_${table.fileName}_${idx}`),
+                name,
+                partyType: 'Customer',
+                address: composeDbfAddress(row),
+                gstin: pickStr(row, ['gstno', 'gstin', 'gst']).toUpperCase(),
+                pan: pickStr(row, ['panno', 'itpan', 'pan']).toUpperCase(),
+                phone: pickStr(row, ['phone', 'mobile', 'tel']),
+                email: pickStr(row, ['email', 'mail']),
                 openingBalance: opBal,
                 currentBalance: opBal,
                 balanceType,
-              };
-            }
-          } else {
-            seenCustomerKeys.set(dedupKey, result.parties.length);
-            result.parties.push(
-              applyEnrichmentToParty(
-                {
-                  id: makeSafeDocId(`dbf_opbal_${table.fileName}_${idx}`),
-                  name,
-                  partyType: 'Customer',
-                  address: composeDbfAddress(row),
-                  gstin: pickStr(row, ['gstno', 'gstin', 'gst']).toUpperCase(),
-                  pan: pickStr(row, ['panno', 'itpan', 'pan']).toUpperCase(),
-                  phone: pickStr(row, ['phone', 'mobile', 'tel']),
-                  email: pickStr(row, ['email', 'mail']),
-                  openingBalance: opBal,
-                  currentBalance: opBal,
-                  balanceType,
-                  ownerUid: params.ownerUid,
-                },
-                code
-              )
-            );
-          }
+                ownerUid: params.ownerUid,
+              },
+              code
+            )
+          );
         }
         bumpFileImported(table.fileName);
       });
@@ -1074,48 +1428,56 @@ export async function autoCollectOldDataFiles(params: {
             : drcrFlag.startsWith('D') || /bill|sale|inv|debit|\bdr\b/i.test(drcrFlag);
 
         const amount = roundPaise(isDebit ? drAmt || genericAmt : crAmt || genericAmt);
+        const rawTxDate = pickStr(row, ['vdate', 'trndate', 'date', 'dt', 'docdt']);
+        const explicitVNo = pickStr(row, ['vno', 'vouchno', 'vchno', 'trno', 'docno']);
+        const hasVoucherData = amount > 0 || Boolean(rawTxDate) || Boolean(explicitVNo);
 
-        const txDate = normDate(pickStr(row, ['vdate', 'trndate', 'date', 'dt', 'docdt']));
-        const vNo =
-          pickStr(row, ['vno', 'vouchno', 'vchno', 'trno', 'docno', 'refno', 'billno']) ||
-          `DBF-${idx + 1}`;
-        const rawNarr = pickStr(row, ['narration', 'narr', 'particulars', 'desc', 'remarks', 'note']);
-        const modeRaw = pickStr(row, ['mode', 'paymode', 'pmode', 'bank']);
-        const refNo = pickStr(row, ['refno', 'utr', 'cheque', 'chqno', 'billno', 'cnno']);
-        const resolvedFy = resolveFinancialYearFromDate(txDate) || normalizeFyLabel(params.activeFy);
+        if (hasVoucherData || !isLedgerDbf(leaf)) {
+          const txDate = normDate(rawTxDate);
+          const vNo =
+            explicitVNo ||
+            pickStr(row, ['refno', 'billno']) ||
+            `DBF-${idx + 1}`;
+          const rawNarr = pickStr(row, ['narration', 'narr', 'particulars', 'desc', 'remarks', 'note']);
+          const modeRaw = pickStr(row, ['mode', 'paymode', 'pmode', 'bank']);
+          const refNo = pickStr(row, ['refno', 'utr', 'cheque', 'chqno', 'billno', 'cnno']);
+          const resolvedFy = resolveFinancialYearFromDate(txDate) || normalizeFyLabel(params.activeFy);
 
-        const meta = extractPaymentMetadata({
-          description: rawNarr || modeRaw,
-          referenceNo: refNo || vNo,
-          rawMode: modeRaw,
-        });
+          const meta = extractPaymentMetadata({
+            description: rawNarr || modeRaw,
+            referenceNo: refNo || vNo,
+            rawMode: modeRaw,
+          });
 
-        result.transactions.push({
-          id: makeSafeDocId(`dbf_trn_${table.fileName}_${idx}`),
-          txCode: vNo,
-          txDate,
-          financialYear: resolvedFy,
-          txType: isDebit ? 'Expense' : 'Income',
-          ledgerAccount: isDebit ? 'Party Ledger Receivable (Dr)' : 'Party Ledger Receipt (Cr)',
-          partyName,
-          amount,
-          narration: rawNarr || `${isDebit ? 'Debit' : 'Credit'} Voucher ${vNo} (${resolvedFy})`,
-          paymentMode: meta.paymentMode || 'Cash',
-          referenceNo: refNo,
-          upiRefId: meta.upiRefId || '',
-          utrNo: meta.utrNo || '',
-          chequeNo: meta.chequeNo || '',
-          tdsAmount: roundPaise(pickNum(row, ['tds', 'tdsamt'])),
-          linkedCnNo: pickStr(row, ['cnno', 'lrno']),
-          linkedInvoiceNo: '',
-          branchCode: params.branchCode,
-          createdByStaff: params.staffCode,
-          ownerUid: params.ownerUid,
-        });
+          result.transactions.push({
+            id: makeSafeDocId(`dbf_trn_${table.fileName}_${idx}`),
+            txCode: vNo,
+            txDate,
+            financialYear: resolvedFy,
+            txType: isDebit ? 'Expense' : 'Income',
+            ledgerAccount: isDebit ? 'Party Ledger Receivable (Dr)' : 'Party Ledger Receipt (Cr)',
+            partyName,
+            amount,
+            narration: rawNarr || `${isDebit ? 'Debit' : 'Credit'} Voucher ${vNo} (${resolvedFy})`,
+            paymentMode: meta.paymentMode || 'Cash',
+            referenceNo: refNo,
+            upiRefId: meta.upiRefId || '',
+            utrNo: meta.utrNo || '',
+            chequeNo: meta.chequeNo || '',
+            tdsAmount: roundPaise(pickNum(row, ['tds', 'tdsamt'])),
+            linkedCnNo: pickStr(row, ['cnno', 'lrno']),
+            linkedInvoiceNo: '',
+            branchCode: params.branchCode,
+            createdByStaff: params.staffCode,
+            ownerUid: params.ownerUid,
+          });
+        }
         bumpFileImported(table.fileName);
       });
     } else if (
       !isHeadCustomerDbf(leaf) &&
+      !isMarpartyDbf(leaf) &&
+      !isGroupDbf(leaf) &&
       !isBrokerDbf(leaf) &&
       !isOwnerOrVehicleMasterDbf(leaf) &&
       !isDriverDbf(leaf) &&
@@ -1227,7 +1589,17 @@ export async function autoCollectOldDataFiles(params: {
     }
   }
 
-  // Final count sync: preserve exact role mapping without reclassifying HEAD customers into Brokers
+  // Remove duplicate or misclassified non-driver entries before returning DBF import preview
+  const driverCleanup = cleanAndDeduplicateDrivers({
+    drivers: result.drivers,
+    parties: result.parties,
+    invoices: combinedInvoices,
+    consignments: result.consignments,
+    lorryHires: result.lorryHires,
+  });
+  result.drivers = driverCleanup.cleanDrivers;
+
+  // Final count sync: preserve exact role mapping without reclassifying HEAD/MARPARTY/Sundry Debtors customers into Brokers
   result.brokersAddedCount = result.parties.filter((p) => p.partyType === 'Broker').length;
   result.destinations = Array.from(new Set(result.destinations.filter(Boolean))).sort();
   return result;
