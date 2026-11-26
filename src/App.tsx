@@ -210,6 +210,7 @@ import {
   unlockVoicePilotWithPin,
   VoicePilotLang,
 } from './lib/voicePilot';
+import { autoSortAllDbfDataToExactRoles } from './lib/dbfRoleAutoSort';
 
 import { A4PreviewModal } from './components/A4PreviewModal';
 const MasterModule = lazy(() =>
@@ -858,6 +859,70 @@ export default function App() {
   useEffect(() => {
     document.title = `Dolphin Road Carriers ERP | FINANCIAL YEAR: ${activeFy.replace(/^FY\s+/i, '')}`;
   }, [activeFy]);
+
+  const part1AutoSortRunningRef = useRef(false);
+  useEffect(() => {
+    if (!erpSession || part1AutoSortRunningRef.current) return;
+    const totalRecords =
+      parties.length +
+      vehicles.length +
+      drivers.length +
+      consignments.length +
+      invoices.length +
+      lorryHires.length;
+    if (totalRecords === 0) return;
+
+    const flagKey = `drc_part1_dbf_autosort_v1_${workspaceUid}`;
+    try {
+      if (localStorage.getItem(flagKey)) return;
+    } catch {
+      return;
+    }
+
+    const timer = window.setTimeout(() => {
+      if (part1AutoSortRunningRef.current) return;
+      part1AutoSortRunningRef.current = true;
+      void autoSortAllDbfDataToExactRoles({
+        ownerUid: workspaceUid,
+        activeFy,
+        branchCode: activeOperationalBranch,
+        staffCode: activeStaffCode,
+        parties,
+        vehicles,
+        drivers,
+        consignments,
+        invoices,
+        lorryHires,
+      })
+        .then(() => {
+          try {
+            localStorage.setItem(flagKey, String(Date.now()));
+          } catch {
+            // ignore storage quota
+          }
+        })
+        .catch(() => {
+          // Allow retry on next load if transient failure occurred
+        })
+        .finally(() => {
+          part1AutoSortRunningRef.current = false;
+        });
+    }, 1400);
+
+    return () => window.clearTimeout(timer);
+  }, [
+    erpSession,
+    workspaceUid,
+    activeFy,
+    activeOperationalBranch,
+    activeStaffCode,
+    parties,
+    vehicles,
+    drivers,
+    consignments,
+    invoices,
+    lorryHires,
+  ]);
 
   useEffect(() => {
     setBholeImgFailed(false);

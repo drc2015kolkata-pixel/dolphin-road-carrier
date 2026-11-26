@@ -1139,6 +1139,68 @@ export async function removeDocument(collectionName: string, id: string) {
   emitErpDataSavedEvent(collectionName, 'delete');
 }
 
+export async function bulkRemoveDocuments(
+  collectionName: string,
+  ids: string[]
+): Promise<number> {
+  const uniqueIds = Array.from(new Set(ids.filter(Boolean)));
+  if (uniqueIds.length === 0) return 0;
+
+  const removeSet = new Set(uniqueIds);
+  const currentList = ([...(collectionState.get(collectionName) || [])] as Array<
+    Record<string, unknown> & { id: string }
+  >);
+  notifyCollection(
+    collectionName,
+    currentList.filter((item) => !removeSet.has(item.id))
+  );
+
+  // Sync deletes to local SQLite/Express backend in small chunks
+  const API_CHUNK = 12;
+  for (let i = 0; i < uniqueIds.length; i += API_CHUNK) {
+    const chunk = uniqueIds.slice(i, i + API_CHUNK);
+    await Promise.all(
+      chunk.map(async (id) => {
+        try {
+          const res = await fetch('/api/erp/delete', {
+            method: 'POST',
+            headers: { 'Content-Type': 'application/json' },
+            body: JSON.stringify({ collection: collectionName, id }),
+          });
+          if (!res.ok) {
+            enqueueOfflineOp({ opType: 'delete', collectionName, docId: id });
+          } else {
+            markCloudSyncedNow();
+          }
+        } catch {
+          enqueueOfflineOp({ opType: 'delete', collectionName, docId: id });
+        }
+      })
+    );
+  }
+
+  // Real-time Firestore chunked batch delete when verified Google user is signed in
+  if (auth.currentUser?.emailVerified) {
+    try {
+      const CHUNK_SIZE = 300;
+      for (let i = 0; i < uniqueIds.length; i += CHUNK_SIZE) {
+        const chunk = uniqueIds.slice(i, i + CHUNK_SIZE);
+        const batch = writeBatch(db);
+        for (const id of chunk) {
+          batch.delete(doc(db, collectionName, id));
+        }
+        await batch.commit();
+      }
+      markCloudSyncedNow();
+    } catch {
+      // Keep local + Express delete intact even if Firestore batch hits offline/rules limit
+    }
+  }
+
+  emitErpDataSavedEvent(collectionName, 'bulk-delete');
+  return uniqueIds.length;
+}
+
 /**
  * Atomic server-side serial counter for collision-free numbering across 50+ concurrent operators.
  */

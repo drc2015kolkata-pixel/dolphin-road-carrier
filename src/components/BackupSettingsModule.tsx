@@ -107,8 +107,10 @@ import {
 import {
   analyzeAndSeparateMisclassifiedParties,
   cleanAndDeduplicateDrivers,
+  cleanAndDeduplicateVehicles,
   restoreHeadPartiesToBillingCustomers,
 } from '../lib/partySeparation';
+import { autoSortAllDbfDataToExactRoles } from '../lib/dbfRoleAutoSort';
 import {
   AI_DOCTOR_15DAY_KEY,
   AI_DOCTOR_30DAY_KEY,
@@ -123,6 +125,7 @@ import {
   verifyAdminPin,
 } from '../lib/selfHealing';
 import {
+  bulkRemoveDocuments,
   bulkUpsertDocuments,
   CustomAuthSession,
   forceTwoWaySyncAndMerge,
@@ -841,15 +844,30 @@ const BackupSettingsModuleInner: React.FC<BackupSettingsModuleProps> = ({
           partiesToUpsert as unknown as Array<Record<string, unknown>>
         );
       }
-      for (const dupPartyId of partySync.duplicatePartyIds) {
-        await removeDocument('parties', dupPartyId);
+      if (partySync.duplicatePartyIds.length > 0) {
+        await bulkRemoveDocuments('parties', partySync.duplicatePartyIds);
       }
 
-      if (autoCollectResult.vehicles.length > 0) {
+      const combinedVehicleMap = new Map<string, Vehicle>();
+      for (const v of allData.vehicles) combinedVehicleMap.set(v.id, v);
+      for (const v of autoCollectResult.vehicles) combinedVehicleMap.set(v.id, v);
+      const vehicleCleanup = cleanAndDeduplicateVehicles(Array.from(combinedVehicleMap.values()));
+      const importedVehicleIdSet = new Set(autoCollectResult.vehicles.map((v) => v.id));
+      const updatedVehicleIdSet = new Set(vehicleCleanup.updatedVehicles.map((v) => v.id));
+      const vehiclesToUpsert = vehicleCleanup.cleanVehicles.filter(
+        (v) => importedVehicleIdSet.has(v.id) || updatedVehicleIdSet.has(v.id)
+      );
+      if (vehiclesToUpsert.length > 0) {
         totalImported += await bulkUpsertDocuments(
           'vehicles',
-          autoCollectResult.vehicles as unknown as Array<Record<string, unknown>>
+          vehiclesToUpsert as unknown as Array<Record<string, unknown>>
         );
+      }
+      const vehicleIdsToDelete = vehicleCleanup.removedVehicleIds.filter((id) =>
+        allData.vehicles.some((v) => v.id === id)
+      );
+      if (vehicleIdsToDelete.length > 0) {
+        await bulkRemoveDocuments('vehicles', vehicleIdsToDelete);
       }
 
       // Clean & deduplicate combined Drivers so misclassified parties/duplicates never persist
@@ -1075,6 +1093,33 @@ const BackupSettingsModuleInner: React.FC<BackupSettingsModuleProps> = ({
       );
     } catch (err) {
       setDriveError(err instanceof Error ? err.message : 'Failed to separate brokers from billing parties.');
+    } finally {
+      setCleaningParties(false);
+    }
+  };
+
+  const handleAutoSortAllDbfRoles = async () => {
+    setCleaningParties(true);
+    setDriveError(null);
+    try {
+      const summary = await autoSortAllDbfDataToExactRoles({
+        ownerUid,
+        activeFy,
+        branchCode: activeStaffSession?.branchCode || 'KOL-HQ',
+        staffCode: activeStaffSession?.staffCode || 'ADMIN',
+        parties: allData.parties,
+        vehicles: allData.vehicles,
+        drivers: allData.drivers,
+        consignments: allData.consignments,
+        invoices: allData.invoices,
+        lorryHires: allData.lorryHires,
+      });
+      playVerifiedBeep();
+      setDriveStatus(
+        `🧹 Auto-Sort DBF Data Complete: Billing Parties [${summary.billingPartiesCount}] | Brokers [${summary.brokersCount}] | Lorry Owners [${summary.ownersCount}] | Drivers [${summary.driversCount}] | Real Vehicles [${summary.vehiclesCount}] — Purged ${summary.vehiclesPurgedCount} placeholder/duplicate vehicle(s), ${summary.driversRemovedCount} non-driver/duplicate(s), ${summary.partiesRemovedCount} duplicate party(s), repaired ${summary.tripsRepairedCount} trip link(s)${summary.marbillInvoicesAddedCount > 0 ? `, synced ${summary.marbillInvoicesAddedCount} marbill invoice(s)` : ''}.`
+      );
+    } catch (err) {
+      setDriveError(err instanceof Error ? err.message : 'Auto-Sort DBF Data failed.');
     } finally {
       setCleaningParties(false);
     }
@@ -2289,6 +2334,15 @@ const BackupSettingsModuleInner: React.FC<BackupSettingsModuleProps> = ({
                 </span>
               </div>
               <div className="flex flex-wrap items-center gap-2">
+                <button
+                  type="button"
+                  disabled={cleaningParties}
+                  onClick={() => void handleAutoSortAllDbfRoles()}
+                  className="inline-flex items-center gap-1.5 px-3 py-1.5 rounded-lg bg-amber-500 hover:bg-amber-600 text-slate-950 text-xs font-extrabold cursor-pointer whitespace-nowrap disabled:opacity-60 shadow-xs"
+                >
+                  <Sparkles className="w-3.5 h-3.5" />
+                  {cleaningParties ? 'Sorting...' : '🧹 Auto-Sort All DBF Data to Exact Roles'}
+                </button>
                 <button
                   type="button"
                   disabled={cleaningParties}
@@ -5158,13 +5212,23 @@ const BackupSettingsModuleInner: React.FC<BackupSettingsModuleProps> = ({
                     </p>
                   </div>
                 </div>
-                <button
-                  type="button"
-                  onClick={() => setRawArchiveOpen(false)}
-                  className="px-3 py-1 rounded bg-white/15 hover:bg-white/25 text-white font-bold cursor-pointer"
-                >
-                  Close
-                </button>
+                <div className="flex items-center gap-2">
+                  <button
+                    type="button"
+                    disabled={cleaningParties}
+                    onClick={() => void handleAutoSortAllDbfRoles()}
+                    className="px-3 py-1 rounded bg-amber-400 hover:bg-amber-300 text-slate-950 font-extrabold cursor-pointer disabled:opacity-60"
+                  >
+                    {cleaningParties ? 'Sorting...' : '🧹 Auto-Sort All DBF Data to Exact Roles'}
+                  </button>
+                  <button
+                    type="button"
+                    onClick={() => setRawArchiveOpen(false)}
+                    className="px-3 py-1 rounded bg-white/15 hover:bg-white/25 text-white font-bold cursor-pointer"
+                  >
+                    Close
+                  </button>
+                </div>
               </div>
 
               {rawArchiveTables.length === 0 ? (

@@ -4,6 +4,7 @@ import {
   Invoice,
   LorryHire,
   Party,
+  Vehicle,
 } from '../types/erp';
 import { ALL_INDIA_STATES_DISTRICTS } from './dropdownMasterStore';
 
@@ -29,6 +30,13 @@ export function isBillingCustomerOriginId(id: string | undefined | null): boolea
     s.startsWith('dbf_party_') ||
     s.startsWith('dbf_acct_')
   );
+}
+
+export const BILLING_COMPANY_KEYWORD_REGEX =
+  /\b(pvt\.?\s*ltd|private\s*limited|p\.?\s*ltd|ltd\.?|limited|llp|enterprises?|industries|industry|traders?|trading|corp\.?|corporation|tea|steel|steels|iron|agenc(?:y|ies))\b/i;
+
+export function hasBillingCompanySuffixOrKeyword(name: string | undefined | null): boolean {
+  return BILLING_COMPANY_KEYWORD_REGEX.test(String(name || '').trim());
 }
 
 export function isBillingCustomerType(partyType: Party['partyType'] | string | undefined): boolean {
@@ -409,12 +417,12 @@ export function analyzeAndSeparateMisclassifiedParties(params: {
       continue;
     }
 
-    const isFromHeadDbf = isBillingCustomerOriginId(p.id);
+    const isFromHeadDbf = isBillingCustomerOriginId(p.id) || hasBillingCompanySuffixOrKeyword(p.name);
     const isCustomerTagged = isBillingCustomerType(p.partyType);
     const hasGstin = Boolean(p.gstin && p.gstin.trim().length >= 10);
     const isProtected = isFromHeadDbf || protectedCustomerKeys.has(key);
 
-    // 1. Check Broker classification (Never reclassify HEAD/PARTY/ACCT customers to Broker)
+    // 1. Check Broker classification (Never reclassify HEAD/MARPARTY/Sundry Debtors or company-suffix customers to Broker)
     const shouldBeBroker =
       !isFromHeadDbf &&
       (p.id.startsWith('dbf_brk_') ||
@@ -836,6 +844,21 @@ function mergeDriverFields(primary: Driver, secondary: Driver): { merged: Driver
   return { merged, changed };
 }
 
+const NON_HUMAN_DRIVER_TOKENS_REGEX =
+  /^(self|owner|market|nil|n\/?a|none|null|unknown|unspecified|driver|party|customer|-+|\.+|\d+)$/i;
+const TRUCK_REG_AS_NAME_REGEX = /^[A-Z]{2}[-\s]?\d{1,2}[-\s]?[A-Z]{0,3}[-\s]?\d{3,4}$/i;
+
+export function isIndividualHumanDriverName(name: string | undefined | null): boolean {
+  const clean = String(name || '').trim();
+  if (!clean || clean.length < 2) return false;
+  if (NON_HUMAN_DRIVER_TOKENS_REGEX.test(clean)) return false;
+  if (/^unspecified[-\s]*driver/i.test(clean) || /^dl[-\s]*old[-\s]*\d+$/i.test(clean)) return false;
+  if (TRUCK_REG_AS_NAME_REGEX.test(clean)) return false;
+  if (hasBillingCompanySuffixOrKeyword(clean)) return false;
+  if (COMPANY_OR_NON_DRIVER_REGEX.test(clean)) return false;
+  return /[a-zA-Z]/.test(clean);
+}
+
 /**
  * Removes duplicate Driver records (same normalized name or same valid DL No) and
  * misclassified non-driver entries (Companies, Billing Parties from HEAD/MARPARTY/Sundry Debtors,
@@ -907,10 +930,6 @@ export function cleanAndDeduplicateDrivers(params: {
     const idStr = String(d.id || '');
     const realDl = isValidRealDlNo(d.dlNo);
 
-    const isBlankOrJunk =
-      !key ||
-      /^unspecified[-\s]*driver/i.test(rawName) ||
-      /^dl[-\s]*old[-\s]*\d+$/i.test(rawName);
     const hasNonDriverOriginId =
       idStr.startsWith('dbf_head_') ||
       idStr.startsWith('dbf_marparty_') ||
@@ -919,7 +938,7 @@ export function cleanAndDeduplicateDrivers(params: {
       idStr.startsWith('dbf_acct_') ||
       idStr.startsWith('dbf_brk_') ||
       idStr.startsWith('dbf_own_');
-    const isCompanyOrNonDriverName = COMPANY_OR_NON_DRIVER_REGEX.test(rawName);
+    const isNotHuman = !isIndividualHumanDriverName(rawName);
     const isConfirmedTripDriver = confirmedTripDriverKeys.has(key);
     const isBillingPartyMisclassified =
       billingCustomerKeys.has(key) && (!realDl || idStr.startsWith('dbf_') || !isConfirmedTripDriver);
@@ -928,9 +947,8 @@ export function cleanAndDeduplicateDrivers(params: {
       (!realDl || !isConfirmedTripDriver);
 
     if (
-      isBlankOrJunk ||
       hasNonDriverOriginId ||
-      isCompanyOrNonDriverName ||
+      isNotHuman ||
       isBillingPartyMisclassified ||
       isBrokerOrOwnerMisclassified
     ) {
@@ -988,5 +1006,161 @@ export function cleanAndDeduplicateDrivers(params: {
     misclassifiedCount,
   };
 }
+
+export function normalizeTruckRegNo(raw: string | undefined | null): string {
+  return String(raw || '')
+    .trim()
+    .toUpperCase()
+    .replace(/\s+/g, '');
+}
+
+export function isRealTruckRegistrationNo(raw: string | undefined | null): boolean {
+  const clean = normalizeTruckRegNo(raw);
+  if (!clean || clean.length < 5 || clean.length > 20) return false;
+  if (
+    clean === '-' ||
+    clean === 'N/A' ||
+    clean === 'NA' ||
+    clean === 'NIL' ||
+    clean === 'NONE' ||
+    clean === 'SELF' ||
+    /^UNSPECIFIED/i.test(clean) ||
+    /^DLOLD/i.test(clean) ||
+    /^0+$/.test(clean)
+  ) {
+    return false;
+  }
+  const alnum = clean.replace(/[^A-Z0-9]/g, '');
+  return /[A-Z]/.test(alnum) && (alnum.match(/\d/g)?.length || 0) >= 2;
+}
+
+export interface VehicleCleanupResult {
+  cleanVehicles: Vehicle[];
+  updatedVehicles: Vehicle[];
+  removedVehicleIds: string[];
+  unspecifiedPurgedCount: number;
+  duplicateCount: number;
+}
+
+function scoreVehicleRichness(v: Vehicle): number {
+  let score = 0;
+  if (v.engineNo) score += 3;
+  if (v.chassisNo) score += 3;
+  if (v.fitnessExpiry) score += 2;
+  if (v.insuranceExpiry) score += 2;
+  if (v.permitExpiry) score += 2;
+  if (v.nationalPermitExpiry) score += 2;
+  if (v.rcExpiry) score += 2;
+  if (v.roadTaxExpiry) score += 2;
+  if (v.pucExpiry) score += 2;
+  if (v.ownerName && !/^market\s*\/\s*fleet\s*owner$/i.test(v.ownerName)) score += 2;
+  if (v.ownerPhone) score += 1;
+  if (!String(v.id || '').startsWith('dbf_')) score += 2;
+  return score;
+}
+
+function mergeVehicleFields(primary: Vehicle, secondary: Vehicle): { merged: Vehicle; changed: boolean } {
+  const primaryGenericOwner = /^market\s*\/\s*fleet\s*owner$/i.test(primary.ownerName || '');
+  const secondaryRealOwner =
+    secondary.ownerName && !/^market\s*\/\s*fleet\s*owner$/i.test(secondary.ownerName)
+      ? secondary.ownerName
+      : '';
+  const mergedOwner =
+    !primary.ownerName || (primaryGenericOwner && secondaryRealOwner)
+      ? secondaryRealOwner || primary.ownerName || 'Market / Fleet Owner'
+      : primary.ownerName;
+
+  const merged: Vehicle = {
+    ...primary,
+    truckNo: normalizeTruckRegNo(primary.truckNo),
+    vehicleType: primary.vehicleType || secondary.vehicleType || 'Goods Carrier',
+    vehicleMake: primary.vehicleMake || secondary.vehicleMake || '',
+    bodyType: primary.bodyType || secondary.bodyType || '',
+    vehicleColor: primary.vehicleColor || secondary.vehicleColor || '',
+    ownerName: mergedOwner,
+    ownerPhone: primary.ownerPhone || secondary.ownerPhone || '',
+    engineNo: primary.engineNo || secondary.engineNo || '',
+    chassisNo: primary.chassisNo || secondary.chassisNo || '',
+    fitnessExpiry: primary.fitnessExpiry || secondary.fitnessExpiry || '',
+    insuranceExpiry: primary.insuranceExpiry || secondary.insuranceExpiry || '',
+    permitExpiry: primary.permitExpiry || secondary.permitExpiry || '',
+    nationalPermitExpiry: primary.nationalPermitExpiry || secondary.nationalPermitExpiry || '',
+    rcExpiry: primary.rcExpiry || secondary.rcExpiry || '',
+    roadTaxExpiry: primary.roadTaxExpiry || secondary.roadTaxExpiry || '',
+    pucExpiry: primary.pucExpiry || secondary.pucExpiry || '',
+  };
+
+  const changed =
+    merged.truckNo !== primary.truckNo ||
+    merged.ownerName !== primary.ownerName ||
+    merged.ownerPhone !== (primary.ownerPhone || '') ||
+    merged.engineNo !== (primary.engineNo || '') ||
+    merged.chassisNo !== (primary.chassisNo || '') ||
+    merged.fitnessExpiry !== (primary.fitnessExpiry || '') ||
+    merged.insuranceExpiry !== (primary.insuranceExpiry || '') ||
+    merged.permitExpiry !== (primary.permitExpiry || '') ||
+    merged.nationalPermitExpiry !== (primary.nationalPermitExpiry || '') ||
+    merged.rcExpiry !== (primary.rcExpiry || '') ||
+    merged.roadTaxExpiry !== (primary.roadTaxExpiry || '') ||
+    merged.pucExpiry !== (primary.pucExpiry || '');
+
+  return { merged, changed };
+}
+
+/**
+ * Purges all UNSPECIFIED-TRUCK-* / blank / invalid vehicle placeholders and deduplicates
+ * Vehicles cleanly by normalized registration number.
+ */
+export function cleanAndDeduplicateVehicles(vehicles: Vehicle[]): VehicleCleanupResult {
+  const removedIds = new Set<string>();
+  let unspecifiedPurgedCount = 0;
+
+  const validCandidates: Vehicle[] = [];
+  for (const v of vehicles) {
+    if (!isRealTruckRegistrationNo(v.truckNo)) {
+      removedIds.add(v.id);
+      unspecifiedPurgedCount += 1;
+      continue;
+    }
+    validCandidates.push({
+      ...v,
+      truckNo: normalizeTruckRegNo(v.truckNo),
+    });
+  }
+
+  const sorted = [...validCandidates].sort((a, b) => scoreVehicleRichness(b) - scoreVehicleRichness(a));
+  const byRegKey = new Map<string, Vehicle>();
+  const updatedMap = new Map<string, Vehicle>();
+  let duplicateCount = 0;
+
+  for (const v of sorted) {
+    const regKey = normalizeTruckRegNo(v.truckNo).replace(/[^A-Z0-9]/g, '');
+    const existing = byRegKey.get(regKey);
+    if (existing && existing.id !== v.id) {
+      const { merged, changed } = mergeVehicleFields(existing, v);
+      if (changed) {
+        updatedMap.set(merged.id, merged);
+        byRegKey.set(regKey, merged);
+      }
+      removedIds.add(v.id);
+      duplicateCount += 1;
+      continue;
+    }
+    byRegKey.set(regKey, v);
+  }
+
+  const cleanVehicles = validCandidates
+    .filter((v) => !removedIds.has(v.id))
+    .map((v) => updatedMap.get(v.id) || v);
+
+  return {
+    cleanVehicles,
+    updatedVehicles: Array.from(updatedMap.values()),
+    removedVehicleIds: Array.from(removedIds),
+    unspecifiedPurgedCount,
+    duplicateCount,
+  };
+}
+
 
 
