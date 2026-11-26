@@ -1259,6 +1259,7 @@ export async function restoreErpBackupBundle(payload: Record<string, unknown>): 
     ['lorry_hires', ['lorryHires', 'lorry_hires']],
     ['transactions', ['transactions']],
     ['declarations', ['declarations']],
+    ['trip_expenses', ['tripExpenses', 'trip_expenses']],
     ['bank_receipts', ['bankReceipts', 'bank_receipts']],
     ['staff_commissions', ['staffCommissions', 'staff_commissions']],
     ['staff_accounts', ['staffAccounts', 'staff_accounts']],

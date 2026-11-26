@@ -79,6 +79,39 @@ export const A4PreviewModal: React.FC<A4PreviewModalProps> = ({
     }
   };
 
+  useEffect(() => {
+    if (!pdf) return;
+    const onVoicePrint = async (ev: Event) => {
+      const detail = (ev as CustomEvent<{ copies?: 1 | 2 }>).detail;
+      const requestedCopies = detail?.copies;
+      if (
+        requestedCopies &&
+        pdf.rebuildWithCopyCount &&
+        onReplacePdf &&
+        pdf.copyCount !== requestedCopies
+      ) {
+        setSwitchingCopies(true);
+        try {
+          const rebuilt = await pdf.rebuildWithCopyCount(requestedCopies);
+          onReplacePdf(rebuilt);
+          window.setTimeout(() => {
+            const iframe = document.getElementById('drc-a4-preview-frame') as HTMLIFrameElement | null;
+            if (iframe?.contentWindow) {
+              iframe.contentWindow.focus();
+              iframe.contentWindow.print();
+            }
+          }, 220);
+        } finally {
+          setSwitchingCopies(false);
+        }
+        return;
+      }
+      handlePrint();
+    };
+    window.addEventListener('drc:voice-print-command', onVoicePrint);
+    return () => window.removeEventListener('drc:voice-print-command', onVoicePrint);
+  }, [pdf, onReplacePdf]);
+
   const handleOrientationChange = async (next: PdfOrientation) => {
     if (!pdf.rebuildWithOrientation || !onReplacePdf || pdf.orientation === next) return;
     setSwitchingOrientation(true);

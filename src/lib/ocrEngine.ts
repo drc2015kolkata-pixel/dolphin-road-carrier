@@ -462,7 +462,8 @@ function enrichScannedLR(raw: ScannedLRResult, rotatedDataUrl: string, appliedRo
 
 export async function scanPhysicalLR(
   file: File,
-  onStatus?: (msg: string) => void
+  onStatus?: (msg: string) => void,
+  allowOnlineAi = false
 ): Promise<{ result: ScannedLRResult; compressedDataUrl: string }> {
   onStatus?.('Auto-rotating & normalizing scan orientation...');
   let { dataUrl, base64, mimeType, appliedRotationDeg } = await autoRotateAndCompressImage(file, 1600, 0.78);
@@ -496,29 +497,31 @@ export async function scanPhysicalLR(
     rawText = '';
   }
 
-  try {
-    onStatus?.('Analyzing handwritten & printed LR fields with AI High-Thinking Vision...');
-    const resp = await fetch('/api/gemini/ocr-lr', {
-      method: 'POST',
-      headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify({
-        imageBase64: base64,
-        mimeType,
-        tesseractText: rawText,
-      }),
-    });
+  if (allowOnlineAi) {
+    try {
+      onStatus?.('Analyzing handwritten & printed LR fields with AI High-Thinking Vision...');
+      const resp = await fetch('/api/gemini/ocr-lr', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({
+          imageBase64: base64,
+          mimeType,
+          tesseractText: rawText,
+        }),
+      });
 
-    if (resp.ok) {
-      const json = (await resp.json()) as { data?: ScannedLRResult };
-      if (json.data) {
-        return {
-          result: enrichScannedLR(json.data, dataUrl, appliedRotationDeg, rawText),
-          compressedDataUrl: dataUrl,
-        };
+      if (resp.ok) {
+        const json = (await resp.json()) as { data?: ScannedLRResult };
+        if (json.data) {
+          return {
+            result: enrichScannedLR(json.data, dataUrl, appliedRotationDeg, rawText),
+            compressedDataUrl: dataUrl,
+          };
+        }
       }
+    } catch {
+      // Fall back to local Tesseract regex extraction if offline
     }
-  } catch {
-    // Fall back to local Tesseract regex extraction if offline
   }
 
   const fallback = fallbackRegexParseLR(rawText);
@@ -540,7 +543,8 @@ function detectPODShortageKeywords(text: string): { detected: boolean; reason: s
 
 export async function scanPODDocument(
   file: File,
-  onStatus?: (msg: string) => void
+  onStatus?: (msg: string) => void,
+  allowOnlineAi = false
 ): Promise<{ result: ScannedPODResult; compressedDataUrl: string }> {
   onStatus?.('Auto-rotating & compressing signed POD scan...');
   let { dataUrl, base64, mimeType, appliedRotationDeg } = await autoRotateAndCompressImage(file, 1200, 0.68);
@@ -569,45 +573,47 @@ export async function scanPODDocument(
     rawText = '';
   }
 
-  try {
-    onStatus?.('Verifying receiver signature, challan date & shortage/breakage notes...');
-    const resp = await fetch('/api/gemini/ocr-pod', {
-      method: 'POST',
-      headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify({
-        imageBase64: base64,
-        mimeType,
-        tesseractText: rawText,
-      }),
-    });
+  if (allowOnlineAi) {
+    try {
+      onStatus?.('Verifying receiver signature, challan date & shortage/breakage notes...');
+      const resp = await fetch('/api/gemini/ocr-pod', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({
+          imageBase64: base64,
+          mimeType,
+          tesseractText: rawText,
+        }),
+      });
 
-    if (resp.ok) {
-      const json = (await resp.json()) as { data?: ScannedPODResult };
-      if (json.data) {
-        const shortageCheck = detectPODShortageKeywords(`${json.data.remarks || ''} ${json.data.podRemarks || ''} ${rawText}`);
-        const detected = Boolean(json.data.shortageBreakageLeakageDetected || shortageCheck.detected);
-        const reason = json.data.shortageBreakageReason || shortageCheck.reason || '';
-        const podRemarks =
-          json.data.podRemarks ||
-          json.data.remarks ||
-          (detected ? `ALERT: ${reason}` : 'Clean POD received with signature/stamp.');
-        return {
-          result: {
-            ...json.data,
-            shortageBreakageLeakageDetected: detected,
-            shortageBreakageReason: reason,
-            podRemarks,
-            remarks: podRemarks,
-            rotatedDataUrl: dataUrl,
-            appliedRotationDeg,
-            rawTesseractText: rawText,
-          },
-          compressedDataUrl: dataUrl,
-        };
+      if (resp.ok) {
+        const json = (await resp.json()) as { data?: ScannedPODResult };
+        if (json.data) {
+          const shortageCheck = detectPODShortageKeywords(`${json.data.remarks || ''} ${json.data.podRemarks || ''} ${rawText}`);
+          const detected = Boolean(json.data.shortageBreakageLeakageDetected || shortageCheck.detected);
+          const reason = json.data.shortageBreakageReason || shortageCheck.reason || '';
+          const podRemarks =
+            json.data.podRemarks ||
+            json.data.remarks ||
+            (detected ? `ALERT: ${reason}` : 'Clean POD received with signature/stamp.');
+          return {
+            result: {
+              ...json.data,
+              shortageBreakageLeakageDetected: detected,
+              shortageBreakageReason: reason,
+              podRemarks,
+              remarks: podRemarks,
+              rotatedDataUrl: dataUrl,
+              appliedRotationDeg,
+              rawTesseractText: rawText,
+            },
+            compressedDataUrl: dataUrl,
+          };
+        }
       }
+    } catch {
+      // Offline fallback
     }
-  } catch {
-    // Offline fallback
   }
 
   const dateMatch = rawText.match(/(\d{2})[\/\-](\d{2})[\/\-](\d{4})/);
@@ -697,6 +703,7 @@ export async function extractKycFieldsFromDocument(params: {
   fileOrDataUrl: File | string;
   entityRole: 'Driver' | 'Broker' | 'Lorry Owner' | 'Vehicle';
   onStatus?: (msg: string) => void;
+  allowOnlineAi?: boolean;
 }): Promise<ScannedKYCResult> {
   let dataUrl = '';
   let base64 = '';
@@ -721,33 +728,35 @@ export async function extractKycFieldsFromDocument(params: {
     rawText = '';
   }
 
-  try {
-    params.onStatus?.(`Extracting ${params.entityRole} KYC fields via AI...`);
-    const resp = await fetch('/api/gemini/ocr-kyc', {
-      method: 'POST',
-      headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify({
-        imageBase64: base64,
-        mimeType,
-        entityRole: params.entityRole,
-        tesseractText: rawText,
-      }),
-    });
-    if (resp.ok) {
-      const json = (await resp.json()) as { data?: ScannedKYCResult };
-      if (json.data) {
-        return {
-          ...fallbackRegexParseKYC(rawText),
-          ...Object.fromEntries(
-            Object.entries(json.data).filter(([, v]) => typeof v === 'string' && v.trim() !== '')
-          ),
-          rawTesseractText: rawText,
-          dataUrl,
-        };
+  if (params.allowOnlineAi) {
+    try {
+      params.onStatus?.(`Extracting ${params.entityRole} KYC fields via AI...`);
+      const resp = await fetch('/api/gemini/ocr-kyc', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({
+          imageBase64: base64,
+          mimeType,
+          entityRole: params.entityRole,
+          tesseractText: rawText,
+        }),
+      });
+      if (resp.ok) {
+        const json = (await resp.json()) as { data?: ScannedKYCResult };
+        if (json.data) {
+          return {
+            ...fallbackRegexParseKYC(rawText),
+            ...Object.fromEntries(
+              Object.entries(json.data).filter(([, v]) => typeof v === 'string' && v.trim() !== '')
+            ),
+            rawTesseractText: rawText,
+            dataUrl,
+          };
+        }
       }
+    } catch {
+      // Offline fallback below
     }
-  } catch {
-    // Offline fallback below
   }
 
   return {

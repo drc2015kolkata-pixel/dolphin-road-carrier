@@ -3,8 +3,10 @@ import {
   AlertTriangle,
   Camera,
   CheckCircle2,
+  Download,
   Edit3,
   ExternalLink,
+  Eye,
   FileCode2,
   FilePlus2,
   Lock,
@@ -30,6 +32,7 @@ import {
   ExtraEwayBill,
   ExtraInsuranceItem,
   ExtraTaxInvoice,
+  LorryHire,
   MultiGoodsItem,
   MultiWeightRow,
   Party,
@@ -45,7 +48,12 @@ import {
   todayISO,
 } from '../lib/formatters';
 import { scanPhysicalLR } from '../lib/ocrEngine';
-import { validateIndianGstin, validateSafeUploadFile } from '../lib/gstinValidator';
+import {
+  GST_STATE_CODE_OPTIONS,
+  inferGstStateCodeAndName,
+  validateIndianGstin,
+  validateSafeUploadFile,
+} from '../lib/gstinValidator';
 import { GstinInputField } from './GstinInputField';
 import {
   addDropdownItem,
@@ -68,7 +76,12 @@ import {
   reserveNextSerialNumber,
   upsertDocument,
 } from '../lib/firestoreStore';
-import { GeneratedPdfResult, generateLR3CopyPDF } from '../lib/pdfEngine';
+import {
+  GeneratedPdfResult,
+  downloadPdfDirect,
+  generateLR3CopyPDF,
+  printPdfDirect,
+} from '../lib/pdfEngine';
 import { useDebouncedValue } from '../hooks/useDebounce';
 import { PaginatedDataTable, TableColumn } from './PaginatedDataTable';
 import { EditableSearchSelect, YesNoSelect } from './EditableSearchSelect';
@@ -89,6 +102,7 @@ import {
   RichEntityPicker,
 } from './RichEntityPicker';
 import { deleteIdbObject, loadIdbObject, saveIdbObject } from '../lib/indexedDbStore';
+import { ExpiryAlertBadge } from './ExpiryAlertBadge';
 
 interface ConsignmentModuleProps {
   ownerUid: string;
@@ -99,11 +113,13 @@ interface ConsignmentModuleProps {
   isMasterAdmin: boolean;
   readOnly?: boolean;
   consignments: ConsignmentNote[];
+  lorryHires?: LorryHire[];
   parties: Party[];
   vehicles: Vehicle[];
   drivers: Driver[];
   company: CompanySettings;
   onPreviewPdf: (pdf: GeneratedPdfResult, folder: DriveFolderName) => void;
+  onAutoUploadPdfToDrive?: (pdf: GeneratedPdfResult, category: 'LR_Copy', subFolder?: string) => Promise<void>;
   onSendCnToInvoice: (cn: ConsignmentNote) => void;
   onSwitchFy: (fy: string) => void;
   onShowConfirm: (opts: {
@@ -124,11 +140,13 @@ const ConsignmentModuleInner: React.FC<ConsignmentModuleProps> = ({
   isMasterAdmin,
   readOnly = false,
   consignments,
+  lorryHires = [],
   parties,
   vehicles,
   drivers,
   company,
   onPreviewPdf,
+  onAutoUploadPdfToDrive,
   onSendCnToInvoice,
   onSwitchFy,
   onShowConfirm,
@@ -161,10 +179,34 @@ const ConsignmentModuleInner: React.FC<ConsignmentModuleProps> = ({
     }
     return 'Kolkata';
   });
+  const nextSequentialCnNo = useMemo(() => {
+    const activeFyNorm = normalizeFyLabel(activeFy);
+    const prefix = (company.serialConfig?.ftlCnPrefix || branchPrefix || 'KOL').trim().toUpperCase();
+    const startNo = Number(company.serialConfig?.ftlCnStart || 147);
+    let maxNum = 0;
+    consignments.forEach((c) => {
+      const cFy = normalizeFyLabel(c.financialYear || resolveFinancialYearFromDate(c.cnDate));
+      if (cFy !== activeFyNorm) return;
+      const m = String(c.cnNo || '').match(/(\d+)(?=\/\d{2}-\d{2}|$)/);
+      if (m) {
+        const n = parseInt(m[1], 10);
+        if (Number.isFinite(n) && n > maxNum && n < 1000000) {
+          maxNum = n;
+        }
+      }
+    });
+    const nextNum = Math.max(startNo, maxNum > 0 ? maxNum + 1 : startNo);
+    return `${prefix}-${nextNum}/${fyShort}`;
+  }, [consignments, activeFy, company.serialConfig, branchPrefix, fyShort]);
+
   const [autoAtomicCn, setAutoAtomicCn] = useState(true);
-  const [cnNo, setCnNo] = useState(`${branchPrefix}-${147 + consignments.length}/${fyShort}`);
+  const [cnNo, setCnNo] = useState(() => nextSequentialCnNo);
   const [cnDate, setCnDate] = useState(todayISO());
   const [deliveryOffice, setDeliveryOffice] = useState('');
+  const [deliveryType, setDeliveryType] = useState<'Door Delivery' | 'Port Delivery' | 'Party Delivery' | 'Godown Delivery'>('Party Delivery');
+  const [freightMode, setFreightMode] = useState<'To Pay' | 'Paid' | 'To Be Billed'>('To Pay');
+  const [originGstStateCode, setOriginGstStateCode] = useState('19');
+  const [destGstStateCode, setDestGstStateCode] = useState('');
   const [stockTransfer, setStockTransfer] = useState(false);
 
   // Mandatory Billing Party & Credit Days Lock
@@ -389,9 +431,9 @@ const ConsignmentModuleInner: React.FC<ConsignmentModuleProps> = ({
 
   useEffect(() => {
     if (!editingId) {
-      setCnNo(`${branchPrefix}-${147 + consignments.length}/${fyShort}`);
+      setCnNo(nextSequentialCnNo);
     }
-  }, [activeFy, branchPrefix, consignments.length, editingId, fyShort]);
+  }, [editingId, nextSequentialCnNo]);
 
   useEffect(() => {
     let cancelled = false;
@@ -530,8 +572,10 @@ const ConsignmentModuleInner: React.FC<ConsignmentModuleProps> = ({
       setHighlightFreightWarning(false);
       setOcrStatus('Auto-rotating & scanning document (OCR + AI Vision)...');
       try {
-        const { result, compressedDataUrl } = await scanPhysicalLR(file, (msg) =>
-          setOcrStatus(msg)
+        const { result, compressedDataUrl } = await scanPhysicalLR(
+          file,
+          (msg) => setOcrStatus(msg),
+          Boolean(company?.backgroundAiEnabled)
         );
         if (compressedDataUrl) {
           setScannedLrDataUrl(compressedDataUrl.slice(0, 350000));
@@ -1015,9 +1059,13 @@ const ConsignmentModuleInner: React.FC<ConsignmentModuleProps> = ({
     setEditingBilled(false);
     setDivision('FTL');
     setAutoAtomicCn(true);
-    setCnNo(`${branchPrefix}-${147 + consignments.length}/${fyShort}`);
+    setCnNo(nextSequentialCnNo);
     setCnDate(todayISO());
     setDeliveryOffice('');
+    setDeliveryType('Party Delivery');
+    setFreightMode('To Pay');
+    setOriginGstStateCode('19');
+    setDestGstStateCode('');
     setStockTransfer(false);
     setBillingPartyName('');
     setSelectedBillingPartyId('');
@@ -1203,6 +1251,44 @@ const ConsignmentModuleInner: React.FC<ConsignmentModuleProps> = ({
     setDriverDlExpiry(cn.driverDlExpiry || '');
     setDriverMobile(cn.driverMobile || '');
     setDeliveryModeCode(((cn.deliveryModeCode || 'P') as 'P' | 'G' | 'D'));
+    setDeliveryType(
+      (cn.deliveryType ||
+        (cn.deliveryModeCode === 'D'
+          ? 'Door Delivery'
+          : cn.deliveryModeCode === 'G'
+            ? 'Godown Delivery'
+            : 'Party Delivery')) as
+        | 'Door Delivery'
+        | 'Port Delivery'
+        | 'Party Delivery'
+        | 'Godown Delivery'
+    );
+    setFreightMode(
+      (cn.freightMode ||
+        (cn.billToPartyFlag
+          ? 'To Be Billed'
+          : Number(cn.paidAmount || 0) > 0 && Number(cn.toPayAmount || 0) === 0
+            ? 'Paid'
+            : 'To Pay')) as 'To Pay' | 'Paid' | 'To Be Billed'
+    );
+    setOriginGstStateCode(
+      cn.originGstStateCode ||
+        inferGstStateCodeAndName({
+          gstin: cn.consignorGstin || '',
+          state: cn.fromState || '',
+          city: cn.fromCity || '',
+        }).code ||
+        '19'
+    );
+    setDestGstStateCode(
+      cn.destGstStateCode ||
+        inferGstStateCodeAndName({
+          gstin: cn.consigneeGstin || '',
+          state: cn.toState || '',
+          city: cn.toCity || '',
+        }).code ||
+        ''
+    );
     const rawGst = String(cn.gstPaidBy || 'Consignee').trim();
     setGstPaidBy(rawGst.startsWith('Consignee') ? 'Consignee' : rawGst);
     setGstPaidByCode(
@@ -1266,6 +1352,10 @@ const ConsignmentModuleInner: React.FC<ConsignmentModuleProps> = ({
     division,
     billedAtBranch: billedAtBranch.trim().slice(0, 80),
     deliveryOffice: deliveryOffice.trim().slice(0, 200),
+    deliveryType,
+    freightMode,
+    originGstStateCode: originGstStateCode.trim().slice(0, 10),
+    destGstStateCode: destGstStateCode.trim().slice(0, 10),
     stockTransfer,
     billingPartyName: billingPartyName.trim().slice(0, 180),
     billToPartyFlag,
@@ -1445,6 +1535,15 @@ const ConsignmentModuleInner: React.FC<ConsignmentModuleProps> = ({
       await upsertDocument('consignments', id, payload, !editingId);
       playVerifiedBeep();
 
+      if (onAutoUploadPdfToDrive) {
+        try {
+          const pdf = await generateLR3CopyPDF({ id, ...payload }, company);
+          void onAutoUploadPdfToDrive(pdf, 'LR_Copy');
+        } catch {
+          // Silent background upload fallback
+        }
+      }
+
       await logBranchActivity({
         action: editingId ? 'Updated LR / CN' : 'Created LR / CN',
         module: 'Consignment',
@@ -1472,7 +1571,7 @@ const ConsignmentModuleInner: React.FC<ConsignmentModuleProps> = ({
       id: editingId || 'preview',
       ...buildPayload(),
     };
-    const pdf = await generateLR3CopyPDF(tempCn, company);
+    const pdf = await generateLR3CopyPDF(tempCn, company, 'l', undefined, false);
     onPreviewPdf(pdf, 'LR Copy');
   };
 
@@ -1665,10 +1764,11 @@ const ConsignmentModuleInner: React.FC<ConsignmentModuleProps> = ({
                   <button
                     type="button"
                     onClick={() => handleLoadForEdit(cn)}
-                    className="p-1 rounded hover:bg-blue-50 text-slate-500 hover:text-blue-700 cursor-pointer"
-                    title="Edit LR"
+                    className="inline-flex items-center gap-1 px-2 py-1 rounded bg-amber-50 hover:bg-amber-100 text-amber-800 font-bold cursor-pointer"
+                    title="Rectify / Edit LR"
                   >
-                    <Edit3 className="w-3.5 h-3.5" />
+                    <Edit3 className="w-3 h-3" />
+                    Rectify
                   </button>
                   <button
                     type="button"
@@ -1839,6 +1939,25 @@ const ConsignmentModuleInner: React.FC<ConsignmentModuleProps> = ({
               : `New Consignment Note (Branch: ${activeBranchCode} · ${activeFy})`}
           </span>
           <div className="flex flex-wrap items-center gap-2.5">
+            <ExpiryAlertBadge
+              vehicles={vehicles}
+              drivers={drivers}
+              consignments={consignments}
+              lorryHires={lorryHires}
+              filterTruckNo={truckNo.trim() || undefined}
+              filterDriverName={driverName.trim() || undefined}
+              draftVehicle={{
+                truckNo,
+                driverName,
+                driverDlNo,
+                driverDlExpiry,
+                cnNo,
+                ewayBillNo,
+                ewayBillValidUpto,
+              }}
+              scopeLabel={truckNo.trim() ? truckNo.trim().toUpperCase() : 'LR / Fleet'}
+              compact
+            />
             <div className="w-40">
               <SearchableSelect
                 ariaLabel="Division Selector"
@@ -2049,13 +2168,13 @@ const ConsignmentModuleInner: React.FC<ConsignmentModuleProps> = ({
           </div>
           <div>
             <label className="block font-semibold text-slate-700 mb-1">
-              C/N Number {autoAtomicCn && !editingId ? '(Auto Assigned on Save)' : '*'}
+              C/N Number {(autoAtomicCn || company.lastSavedNoLock !== false) && !editingId ? '(Last Saved No + 1 Lock)' : '*'}
             </label>
             <input
               type="text"
               required={!autoAtomicCn || Boolean(editingId)}
-              disabled={autoAtomicCn && !editingId}
-              value={autoAtomicCn && !editingId ? `AUTO SERVER SERIAL (${fyShort})` : cnNo}
+              disabled={!editingId && (autoAtomicCn || company.lastSavedNoLock !== false)}
+              value={!editingId && (autoAtomicCn || company.lastSavedNoLock !== false) ? nextSequentialCnNo : cnNo}
               onChange={(e) => setCnNo(e.target.value)}
               className="w-full px-2.5 py-1.5 rounded border border-slate-300 font-mono-num disabled:bg-blue-50 disabled:text-blue-800 disabled:font-bold"
             />
@@ -2242,6 +2361,8 @@ const ConsignmentModuleInner: React.FC<ConsignmentModuleProps> = ({
                 onChange={(val) => {
                   setFromState(val);
                   setFromDistrict('');
+                  const inf = inferGstStateCodeAndName({ state: val });
+                  if (inf.code) setOriginGstStateCode(inf.code);
                 }}
                 options={stateOptions}
                 placeholder="19 - West Bengal"
@@ -2249,6 +2370,15 @@ const ConsignmentModuleInner: React.FC<ConsignmentModuleProps> = ({
                 onEditOption={(oldV, newV) => editDropdownItem(ownerUid, company, 'states', oldV, newV)}
                 onDeleteOption={(val) => deleteDropdownItem(ownerUid, company, 'states', val)}
               />
+              <div className="mt-1">
+                <SearchableSelect
+                  ariaLabel="Origin GST State Code"
+                  value={originGstStateCode}
+                  onChange={setOriginGstStateCode}
+                  options={GST_STATE_CODE_OPTIONS.map((s) => ({ value: s.code, label: `GST ${s.label}` }))}
+                  buttonClassName="text-[10px] py-1 font-mono-num"
+                />
+              </div>
             </div>
             <div>
               <label className="block font-semibold text-slate-700 mb-1">From District</label>
@@ -2295,6 +2425,8 @@ const ConsignmentModuleInner: React.FC<ConsignmentModuleProps> = ({
                 onChange={(val) => {
                   setToState(val);
                   setToDistrict('');
+                  const inf = inferGstStateCodeAndName({ state: val });
+                  if (inf.code) setDestGstStateCode(inf.code);
                 }}
                 options={stateOptions}
                 placeholder="Select State / Nepal / BD / Bhutan"
@@ -2302,6 +2434,15 @@ const ConsignmentModuleInner: React.FC<ConsignmentModuleProps> = ({
                 onEditOption={(oldV, newV) => editDropdownItem(ownerUid, company, 'states', oldV, newV)}
                 onDeleteOption={(val) => deleteDropdownItem(ownerUid, company, 'states', val)}
               />
+              <div className="mt-1">
+                <SearchableSelect
+                  ariaLabel="Destination GST State Code"
+                  value={destGstStateCode}
+                  onChange={setDestGstStateCode}
+                  options={GST_STATE_CODE_OPTIONS.map((s) => ({ value: s.code, label: `GST ${s.label}` }))}
+                  buttonClassName="text-[10px] py-1 font-mono-num"
+                />
+              </div>
             </div>
             <div>
               <label className="block font-semibold text-slate-700 mb-1">To District / ICP</label>
@@ -2582,14 +2723,29 @@ const ConsignmentModuleInner: React.FC<ConsignmentModuleProps> = ({
 
           <div>
             <label className="block font-semibold text-slate-700 mb-1">
-              Mode of Delivery [P / G / D] &amp; Risk [O / C / I]
+              Delivery Type &amp; Risk [O / C / I]
             </label>
             <div className="grid grid-cols-2 gap-1.5">
               <SearchableSelect
-                ariaLabel="Mode of Delivery P G D"
-                value={deliveryModeCode}
-                onChange={(val) => setDeliveryModeCode((val || 'P') as 'P' | 'G' | 'D')}
-                options={DELIVERY_MODE_CODES.map((c) => ({ value: c.code, label: c.label }))}
+                ariaLabel="Delivery Type"
+                value={deliveryType}
+                onChange={(val) => {
+                  const next = (val || 'Party Delivery') as
+                    | 'Door Delivery'
+                    | 'Port Delivery'
+                    | 'Party Delivery'
+                    | 'Godown Delivery';
+                  setDeliveryType(next);
+                  setDeliveryModeCode(
+                    next === 'Door Delivery' ? 'D' : next === 'Godown Delivery' ? 'G' : 'P'
+                  );
+                }}
+                options={[
+                  { value: 'Door Delivery', label: 'Door Delivery (D)' },
+                  { value: 'Port Delivery', label: 'Port Delivery (P)' },
+                  { value: 'Party Delivery', label: 'Party Delivery (P)' },
+                  { value: 'Godown Delivery', label: 'Godown Delivery (G)' },
+                ]}
               />
               <SearchableSelect
                 ariaLabel="Risk Taken By O C I"
@@ -2601,17 +2757,43 @@ const ConsignmentModuleInner: React.FC<ConsignmentModuleProps> = ({
           </div>
 
           <div>
-            <label className="block font-semibold text-slate-700 mb-1">GST Paid By [R / E / T]</label>
-            <SearchableSelect
-              ariaLabel="GST Paid By R E T"
-              value={gstPaidByCode}
-              onChange={(val) => {
-                const code = (val || 'E') as 'R' | 'E' | 'T';
-                setGstPaidByCode(code);
-                setGstPaidBy(code === 'R' ? 'Consignor' : code === 'T' ? 'Transporter' : 'Consignee');
-              }}
-              options={GST_PAID_BY_CODES.map((c) => ({ value: c.code, label: c.label }))}
-            />
+            <label className="block font-semibold text-slate-700 mb-1">Freight Mode &amp; GST Paid By [R/E/T]</label>
+            <div className="grid grid-cols-2 gap-1.5">
+              <SearchableSelect
+                ariaLabel="Freight Mode"
+                value={freightMode}
+                onChange={(val) => {
+                  const next = (val || 'To Pay') as 'To Pay' | 'Paid' | 'To Be Billed';
+                  setFreightMode(next);
+                  if (next === 'Paid') {
+                    setPaidAmount(totalFreight || '0');
+                    setToPayAmount('0');
+                    setBillToPartyFlag(false);
+                  } else if (next === 'To Pay') {
+                    setToPayAmount(totalFreight || '0');
+                    setPaidAmount('0');
+                    setBillToPartyFlag(false);
+                  } else {
+                    setBillToPartyFlag(true);
+                  }
+                }}
+                options={[
+                  { value: 'To Pay', label: 'To Pay' },
+                  { value: 'Paid', label: 'Paid' },
+                  { value: 'To Be Billed', label: 'To Be Billed' },
+                ]}
+              />
+              <SearchableSelect
+                ariaLabel="GST Paid By R E T"
+                value={gstPaidByCode}
+                onChange={(val) => {
+                  const code = (val || 'E') as 'R' | 'E' | 'T';
+                  setGstPaidByCode(code);
+                  setGstPaidBy(code === 'R' ? 'Consignor' : code === 'T' ? 'Transporter' : 'Consignee');
+                }}
+                options={GST_PAID_BY_CODES.map((c) => ({ value: c.code, label: c.label }))}
+              />
+            </div>
           </div>
 
           {/* Package Count & Mode (Supports MULTI) */}
@@ -3425,15 +3607,80 @@ const ConsignmentModuleInner: React.FC<ConsignmentModuleProps> = ({
               : `Ready: Bill To "${billingPartyName}" (${resolvedCreditDays} Days Credit)`}
           </span>
           <div className="flex flex-wrap items-center gap-2">
-            {editingId && (
+            {editingId ? (
               <button
                 type="button"
                 onClick={resetForm}
-                className="px-4 py-1.5 rounded-md border border-slate-300 bg-white text-xs font-semibold text-slate-700 hover:bg-slate-100 cursor-pointer"
+                className="px-3 py-1.5 rounded-md border border-slate-300 bg-white text-xs font-semibold text-slate-700 hover:bg-slate-100 cursor-pointer"
               >
                 Cancel Edit
               </button>
+            ) : (
+              filteredCNs.length > 0 && (
+                <button
+                  type="button"
+                  disabled={readOnly}
+                  onClick={() => {
+                    const target = filteredCNs.find((c) => isMasterAdmin || !c.billed);
+                    if (target) handleLoadForEdit(target);
+                  }}
+                  className="inline-flex items-center gap-1 px-2.5 py-1.5 rounded-md bg-amber-50 border border-amber-300 hover:bg-amber-100 text-amber-900 text-xs font-bold cursor-pointer disabled:opacity-40"
+                  title="Reload latest editable Consignment Note for Rectification (keeps serial no intact)"
+                >
+                  <Edit3 className="w-3.5 h-3.5" />
+                  <span>Rectify Last</span>
+                </button>
+              )
             )}
+            <button
+              type="button"
+              disabled={readOnly}
+              onClick={handleOneTapScanClick}
+              className="inline-flex items-center gap-1 px-2.5 py-1.5 rounded-md border border-emerald-300 bg-emerald-50 hover:bg-emerald-100 text-emerald-900 text-xs font-bold cursor-pointer disabled:opacity-50"
+              title="Scan Physical LR / Document"
+            >
+              <ScanLine className="w-3.5 h-3.5" />
+              <span>Scan</span>
+            </button>
+            <button
+              type="button"
+              onClick={async () => {
+                const snap: ConsignmentNote = { id: editingId || 'preview', ...buildPayload() };
+                const pdf = await generateLR3CopyPDF(snap, company, 'l', undefined, true);
+                onPreviewPdf(pdf, 'LR Copy');
+              }}
+              className="inline-flex items-center gap-1 px-2.5 py-1.5 rounded-md border border-slate-300 bg-white hover:bg-slate-100 text-slate-800 text-xs font-semibold cursor-pointer"
+              title="Preview 1-Page A4 Landscape LR Copy"
+            >
+              <Eye className="w-3.5 h-3.5" />
+              <span>Preview</span>
+            </button>
+            <button
+              type="button"
+              onClick={async () => {
+                const snap: ConsignmentNote = { id: editingId || 'preview', ...buildPayload() };
+                const pdf = await generateLR3CopyPDF(snap, company, 'l', undefined, true);
+                downloadPdfDirect(pdf);
+              }}
+              className="inline-flex items-center gap-1 px-2.5 py-1.5 rounded-md border border-blue-300 bg-blue-50 hover:bg-blue-100 text-blue-900 text-xs font-bold cursor-pointer"
+              title="Download Low-KB 1-Page LR PDF (<= 350 KB)"
+            >
+              <Download className="w-3.5 h-3.5" />
+              <span>Low-KB PDF</span>
+            </button>
+            <button
+              type="button"
+              onClick={async () => {
+                const snap: ConsignmentNote = { id: editingId || 'preview', ...buildPayload() };
+                const pdf = await generateLR3CopyPDF(snap, company, 'l', undefined, true);
+                printPdfDirect(pdf);
+              }}
+              className="inline-flex items-center gap-1 px-2.5 py-1.5 rounded-md border border-slate-300 bg-white hover:bg-slate-100 text-slate-800 text-xs font-semibold cursor-pointer"
+              title="Manual Print A4 Landscape LR Copy"
+            >
+              <Printer className="w-3.5 h-3.5" />
+              <span>Manual Print</span>
+            </button>
             <button
               type="button"
               onClick={() => {
@@ -3443,7 +3690,7 @@ const ConsignmentModuleInner: React.FC<ConsignmentModuleProps> = ({
                 }
                 void handleShareCnPdf({ id: editingId || 'preview', ...buildPayload() }, 'whatsapp');
               }}
-              className="inline-flex items-center gap-1.5 px-3 py-1.5 rounded-md bg-emerald-600 hover:bg-emerald-700 text-white text-xs font-bold cursor-pointer"
+              className="inline-flex items-center gap-1 px-2.5 py-1.5 rounded-md bg-emerald-600 hover:bg-emerald-700 text-white text-xs font-bold cursor-pointer"
               title="Share Real LR PDF on WhatsApp"
             >
               <MessageSquare className="w-3.5 h-3.5" />
@@ -3458,7 +3705,7 @@ const ConsignmentModuleInner: React.FC<ConsignmentModuleProps> = ({
                 }
                 void handleShareCnPdf({ id: editingId || 'preview', ...buildPayload() }, 'email');
               }}
-              className="inline-flex items-center gap-1.5 px-3 py-1.5 rounded-md bg-indigo-600 hover:bg-indigo-700 text-white text-xs font-bold cursor-pointer"
+              className="inline-flex items-center gap-1 px-2.5 py-1.5 rounded-md bg-indigo-600 hover:bg-indigo-700 text-white text-xs font-bold cursor-pointer"
               title="Share Real LR PDF via Email"
             >
               <Mail className="w-3.5 h-3.5" />
@@ -3468,7 +3715,7 @@ const ConsignmentModuleInner: React.FC<ConsignmentModuleProps> = ({
               type="button"
               disabled={saving || readOnly}
               onClick={(e) => void handleSave(e, true)}
-              className="inline-flex items-center gap-1.5 px-3.5 py-1.5 rounded-md bg-emerald-700 hover:bg-emerald-800 text-white text-xs font-bold cursor-pointer disabled:opacity-50"
+              className="inline-flex items-center gap-1.5 px-3 py-1.5 rounded-md bg-emerald-700 hover:bg-emerald-800 text-white text-xs font-bold cursor-pointer disabled:opacity-50"
             >
               <FilePlus2 className="w-3.5 h-3.5" />
               <span>Save &amp; Send to Bill</span>

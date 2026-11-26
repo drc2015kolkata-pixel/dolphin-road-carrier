@@ -83,6 +83,7 @@ import {
   StaffCommissionEntry,
   StaffPresence,
   TransactionRecord,
+  TripExpenseRecord,
   Vehicle,
 } from './types/erp';
 import {
@@ -127,7 +128,9 @@ import {
   uploadBlobToDriveFolder,
   uploadLogisticsBlobToDriveFolder,
   uploadPdfToDivisionVaultFolder,
+  uploadRoleOrganizedPdfToDrive,
 } from './lib/driveBackup';
+import type { LedgerRoleType } from './lib/tallyLedgerEngine';
 import {
   GeneratedPdfResult,
   generateInvoicePDF,
@@ -208,9 +211,7 @@ import {
   VoicePilotLang,
 } from './lib/voicePilot';
 
-const A4PreviewModal = lazy(() =>
-  import('./components/A4PreviewModal').then((m) => ({ default: m.A4PreviewModal }))
-);
+import { A4PreviewModal } from './components/A4PreviewModal';
 const MasterModule = lazy(() =>
   import('./components/MasterModule').then((m) => ({ default: m.MasterModule }))
 );
@@ -266,8 +267,27 @@ const LogisticsWorkspace = lazy(() =>
 const AllInOneEntrySheet = lazy(() =>
   import('./components/AllInOneEntrySheet').then((m) => ({ default: m.AllInOneEntrySheet }))
 );
+const RoleTallyLedgersModule = lazy(() =>
+  import('./components/RoleTallyLedgersModule').then((m) => ({ default: m.RoleTallyLedgersModule }))
+);
+const PartyDirectorySheet = lazy(() =>
+  import('./components/PartyDirectorySheet').then((m) => ({ default: m.PartyDirectorySheet }))
+);
+const UniversalPodScannerPage = lazy(() =>
+  import('./components/UniversalPodScannerPage').then((m) => ({ default: m.UniversalPodScannerPage }))
+);
 
-type SidebarNavId = SheetTabId | 'transactions';
+type SidebarNavId =
+  | SheetTabId
+  | 'transactions'
+  | 'sidebar_quotation'
+  | 'sidebar_194c'
+  | 'ledger_party'
+  | 'ledger_broker'
+  | 'ledger_owner'
+  | 'ledger_driver'
+  | 'ledger_vehicle'
+  | 'ledger_staff';
 
 interface SheetTabDef {
   id: SheetTabId;
@@ -278,17 +298,20 @@ const TAB_LABELS: Record<SheetTabId, string> = {
   dashboard: 'Dashboard',
   allInOne: 'BILTY & LORRY MASTER SHEET',
   master: 'MASTERS & LEDGERS',
+  partyDirectory: '1,000-Party Master Directory',
   lr: 'Consignment / LR',
   billing: 'PARTY TAX INVOICE (BILLING)',
   lorryHire: 'Lorry Hire & POD',
+  podScanner: 'POD & Low-KB Scanner',
   commission: 'Staff Commission',
   bankImport: 'Bank & TDS Import',
   accounts: 'Accounts',
+  roleLedgers: 'A–Z Role Tally Ledgers',
   reports: 'GST, STATUTORY VAULT & FILING HUB',
   mis: 'MIS Reports',
   staffAccess: 'Staff Sheet Access Control',
   backup: 'Backup / Restore',
-  settings: 'Settings',
+  settings: 'Company Parameters & Settings',
   guide: 'BILINGUAL OPERATING BOOK (অপারেটিং বুক)',
   about: 'About DRC',
 };
@@ -335,6 +358,7 @@ export default function App() {
   const [lorryHires, setLorryHires] = useState<LorryHire[]>([]);
   const [transactions, setTransactions] = useState<TransactionRecord[]>([]);
   const [declarations, setDeclarations] = useState<Declaration194C[]>([]);
+  const [tripExpenses, setTripExpenses] = useState<TripExpenseRecord[]>([]);
   const [staffAccounts, setStaffAccounts] = useState<StaffAccount[]>([]);
   const [staffCommissions, setStaffCommissions] = useState<StaffCommissionEntry[]>([]);
   const [bankReceipts, setBankReceipts] = useState<BankReceiptRecord[]>([]);
@@ -485,6 +509,9 @@ export default function App() {
   const [billingFocusNonce, setBillingFocusNonce] = useState(0);
   const [reportInitialTab, setReportInitialTab] = useState<ReportTab>('invoiceRegister');
   const [reportFocusNonce, setReportFocusNonce] = useState(0);
+  const [roleLedgerInitialRole, setRoleLedgerInitialRole] = useState<LedgerRoleType>('party');
+  const [roleLedgerInitialAccount, setRoleLedgerInitialAccount] = useState<string>('');
+  const [roleLedgerFocusNonce, setRoleLedgerFocusNonce] = useState(0);
 
   // Cross-module LR -> Invoice auto-paste handoff
   const [pendingCnForInvoice, setPendingCnForInvoice] = useState<ConsignmentNote | null>(null);
@@ -661,6 +688,7 @@ export default function App() {
       subscribeCollection<LorryHire>('lorry_hires', ownerUid, email, setLorryHires),
       subscribeCollection<TransactionRecord>('transactions', ownerUid, email, setTransactions),
       subscribeCollection<Declaration194C>('declarations', ownerUid, email, setDeclarations),
+      subscribeCollection<TripExpenseRecord>('trip_expenses', ownerUid, email, setTripExpenses),
       subscribeCollection<StaffAccount>('staff_accounts', ownerUid, email, setStaffAccounts),
       subscribeCollection<StaffCommissionEntry>('staff_commissions', ownerUid, email, setStaffCommissions),
       subscribeCollection<BankReceiptRecord>('bank_receipts', ownerUid, email, setBankReceipts),
@@ -859,12 +887,16 @@ export default function App() {
   }, []);
 
   const triggerAiDoctor = useCallback(
-    async (trigger: AiDoctorTrigger) => {
+    async (trigger: AiDoctorTrigger, forceOnlineAi?: boolean) => {
       setRunningAiDoctor(true);
       try {
         const rep = await runAiDeepFormulaAndBugRepair({
           trigger,
           activeFy,
+          allowOnlineAi:
+            typeof forceOnlineAi === 'boolean'
+              ? forceOnlineAi
+              : Boolean(companySettings.backgroundAiEnabled),
           allData: {
             consignments: consignments as unknown as Array<Record<string, unknown>>,
             lorryHires: lorryHires as unknown as Array<Record<string, unknown>>,
@@ -887,7 +919,17 @@ export default function App() {
         setRunningAiDoctor(false);
       }
     },
-    [activeFy, consignments, lorryHires, invoices, transactions, parties, logisticsDockets, logisticsInvoices]
+    [
+      activeFy,
+      companySettings.backgroundAiEnabled,
+      consignments,
+      lorryHires,
+      invoices,
+      transactions,
+      parties,
+      logisticsDockets,
+      logisticsInvoices,
+    ]
   );
 
   // Automatic Startup / 15-Day / 30-Day Embedded Gemini AI System Doctor
@@ -920,6 +962,7 @@ export default function App() {
       lorryHires,
       transactions,
       declarations,
+      tripExpenses,
       bankReceipts,
       staffCommissions,
       logisticsParties,
@@ -941,6 +984,7 @@ export default function App() {
       lorryHires,
       transactions,
       declarations,
+      tripExpenses,
       bankReceipts,
       staffCommissions,
       logisticsParties,
@@ -1134,6 +1178,13 @@ export default function App() {
         matchesSelectedFinancialYear(d.financialYear, d.declarationDate, activeFy)
       ),
     [declarations, filterByBranch, activeFy]
+  );
+  const visibleTripExpenses = useMemo(
+    () =>
+      filterByBranch(tripExpenses).filter((te) =>
+        matchesSelectedFinancialYear(te.financialYear, te.cnDate, activeFy)
+      ),
+    [tripExpenses, filterByBranch, activeFy]
   );
 
   // Scoped Express Parcel / PTL / Courier Logistics datasets (Branch + Active FY + Division)
@@ -1901,13 +1952,39 @@ export default function App() {
         mimeType: 'application/pdf',
       });
     } else {
-      await uploadBlobToDriveFolder({
-        accessToken: driveAccessToken,
-        folderName: folder,
-        fileName: pdf.fileName,
-        blob: pdf.blob,
-        mimeType: 'application/pdf',
-      });
+      const catMap: Record<
+        string,
+        'POD' | 'LR_Copy' | 'Bills_Invoices' | 'Quotations' | 'Declarations' | 'Bank_Statements' | 'PARTY'
+      > = {
+        POD_Scans: 'POD',
+        'LR Copy': 'LR_Copy',
+        Bills_Invoices: 'Bills_Invoices',
+        Quotations: 'Quotations',
+        Declarations: 'Declarations',
+        Bank_Statements: 'Bank_Statements',
+        Reports_Ledgers: 'PARTY',
+      };
+      const mappedCat = catMap[folder];
+      if (mappedCat) {
+        await uploadRoleOrganizedPdfToDrive({
+          accessToken: driveAccessToken,
+          fy: activeFy,
+          rootFolderName: companySettings.driveRootFolder,
+          category: mappedCat,
+          entitySubFolder: pdf.shareMeta?.partyName,
+          fileName: pdf.fileName,
+          blob: pdf.blob,
+          connectedEmail,
+        });
+      } else {
+        await uploadBlobToDriveFolder({
+          accessToken: driveAccessToken,
+          folderName: folder,
+          fileName: pdf.fileName,
+          blob: pdf.blob,
+          mimeType: 'application/pdf',
+        });
+      }
     }
   };
 
@@ -1928,6 +2005,7 @@ export default function App() {
   );
 
   const handleSidebarClick = (navId: SidebarNavId) => {
+    setSidebarOpen(false);
     if (navId === 'dashboard') {
       setDashboardFocusTx(false);
       openOrSwitchTab('dashboard');
@@ -1937,6 +2015,43 @@ export default function App() {
       setDashboardFocusTx(true);
       setFocusTransactionsNonce((n) => n + 1);
       openOrSwitchTab('dashboard');
+      return;
+    }
+    if (navId === 'sidebar_quotation') {
+      setDashboardFocusTx(false);
+      setBillingInitialSubTab('quotation');
+      setBillingFocusNonce((n) => n + 1);
+      openOrSwitchTab('billing');
+      return;
+    }
+    if (navId === 'sidebar_194c') {
+      setDashboardFocusTx(false);
+      setBillingInitialSubTab('194c');
+      setBillingFocusNonce((n) => n + 1);
+      openOrSwitchTab('billing');
+      return;
+    }
+    if (
+      navId === 'ledger_party' ||
+      navId === 'ledger_broker' ||
+      navId === 'ledger_owner' ||
+      navId === 'ledger_driver' ||
+      navId === 'ledger_vehicle' ||
+      navId === 'ledger_staff'
+    ) {
+      const roleMap: Record<string, LedgerRoleType> = {
+        ledger_party: 'party',
+        ledger_broker: 'broker',
+        ledger_owner: 'owner',
+        ledger_driver: 'driver',
+        ledger_vehicle: 'vehicle',
+        ledger_staff: 'staff',
+      };
+      setDashboardFocusTx(false);
+      setRoleLedgerInitialRole(roleMap[navId]);
+      setRoleLedgerInitialAccount('');
+      setRoleLedgerFocusNonce((n) => n + 1);
+      openOrSwitchTab('roleLedgers');
       return;
     }
     if (navId === 'staffAccess' || navId === 'backup') {
@@ -2274,36 +2389,96 @@ export default function App() {
     );
   }
 
+  const liveLastSavedNos = useMemo(() => {
+    const latestCn = [...visibleConsignments].sort((a, b) =>
+      `${b.cnDate || ''}_${b.cnNo || ''}`.localeCompare(`${a.cnDate || ''}_${a.cnNo || ''}`)
+    )[0];
+    const latestBill = [...visibleInvoices].sort((a, b) =>
+      `${b.invoiceDate || ''}_${b.invoiceNo || ''}`.localeCompare(`${a.invoiceDate || ''}_${a.invoiceNo || ''}`)
+    )[0];
+    const latestQuote = [...visibleQuotations].sort((a, b) =>
+      `${b.quotationDate || ''}_${b.quotationNo || ''}`.localeCompare(`${a.quotationDate || ''}_${a.quotationNo || ''}`)
+    )[0];
+    const latestDecl = [...visibleDeclarations].sort((a, b) =>
+      (b.declarationDate || '').localeCompare(a.declarationDate || '')
+    )[0];
+    const latestPodHire = [...visibleLorryHires]
+      .filter((lh) => lh.podReceived || lh.podReceiveDate)
+      .sort((a, b) => (b.podReceiveDate || b.cnDate || '').localeCompare(a.podReceiveDate || a.cnDate || ''))[0];
+    const latestTx = [...visibleTransactions].sort((a, b) =>
+      `${b.txDate || ''}_${b.txCode || ''}`.localeCompare(`${a.txDate || ''}_${a.txCode || ''}`)
+    )[0];
+
+    return {
+      cnNo: latestCn?.cnNo || '—',
+      cnParty: latestCn?.billingPartyName || latestCn?.consignorName || '—',
+      billNo: latestBill?.invoiceNo || '—',
+      billParty: latestBill?.partyName || '—',
+      quoteNo: latestQuote?.quotationNo || '—',
+      quoteParty: latestQuote?.partyName || '—',
+      declDate: latestDecl?.declarationDate ? formatDateDDMMYYYY(latestDecl.declarationDate) : '—',
+      declParty: latestDecl?.partyName || '—',
+      podRef: latestPodHire ? `POD-${latestPodHire.cnNo}` : latestTx?.txCode || '—',
+      podPartyTruck: latestPodHire
+        ? `${latestPodHire.truckNo} (${latestPodHire.ownerName || latestPodHire.brokerName || 'Truck'})`
+        : latestTx
+        ? `${latestTx.partyName} (${latestTx.paymentMode})`
+        : '—',
+    };
+  }, [
+    visibleConsignments,
+    visibleInvoices,
+    visibleQuotations,
+    visibleDeclarations,
+    visibleLorryHires,
+    visibleTransactions,
+  ]);
+
   const sidebarItems: Array<{
     id: SidebarNavId;
     label: string;
+    group: 'Operations' | 'Separate Role Ledgers' | 'Masters & Vault';
     icon: React.ComponentType<{ className?: string }>;
     perm?: SheetTabId;
     highlightClass?: string;
   }> = [
-    { id: 'dashboard', label: 'Dashboard', icon: LayoutDashboard, perm: 'dashboard' },
-    { id: 'allInOne', label: 'A. Bilty & Lorry Master Sheet', icon: ClipboardList, perm: 'allInOne' },
-    { id: 'billing', label: 'B. Party Tax Invoice (Billing)', icon: FileSpreadsheet, perm: 'billing' },
-    { id: 'master', label: 'C. Masters & Ledgers', icon: Building2, perm: 'master' },
-    { id: 'bankImport', label: 'Bank Credit Reader & 194C', icon: Landmark, perm: 'bankImport' },
-    { id: 'reports', label: 'D. GST, Statutory Vault & ITR', icon: FileBarChart2, perm: 'reports' },
-    { id: 'guide', label: 'Bilingual Operating Book', icon: BookOpen },
-    { id: 'lr', label: 'CN / LR Register', icon: ScanLine, perm: 'lr' },
-    { id: 'lorryHire', label: 'Lorry Hire & POD', icon: Truck, perm: 'lorryHire' },
-    { id: 'commission', label: 'Staff Details & Chart', icon: Coins, perm: 'commission' },
-    { id: 'accounts', label: 'Tally Party Accounts', icon: BookOpen, perm: 'accounts' },
-    { id: 'transactions', label: 'Transactions Daybook', icon: ArrowLeftRight, perm: 'accounts' },
-    { id: 'mis', label: 'MIS & Profit/Loss', icon: PieChart, perm: 'mis' },
-    { id: 'settings', label: 'Settings & Bank API', icon: Settings, perm: 'settings' },
-    { id: 'backup', label: 'Backup / Restore', icon: DatabaseBackup, perm: 'backup' },
+    // Operations
+    { id: 'dashboard', label: 'Dashboard (Clean Home)', group: 'Operations', icon: LayoutDashboard, perm: 'dashboard' },
+    { id: 'lr', label: 'Consignment Note (LR/CN)', group: 'Operations', icon: ScanLine, perm: 'lr' },
+    { id: 'billing', label: 'Tax Invoice / Bill', group: 'Operations', icon: FileSpreadsheet, perm: 'billing' },
+    { id: 'sidebar_quotation', label: 'Quotation (2-Page Legal)', group: 'Operations', icon: ClipboardList, perm: 'billing' },
+    { id: 'sidebar_194c', label: 'Section 194C Declaration', group: 'Operations', icon: ShieldCheck, perm: 'billing' },
+    { id: 'podScanner', label: 'POD & Low-KB Scanner', group: 'Operations', icon: PackageCheck, perm: 'lorryHire' },
+    { id: 'lorryHire', label: 'Lorry Hire Settlement', group: 'Operations', icon: Truck, perm: 'lorryHire' },
+    { id: 'transactions', label: 'Vouchers & Cash/Bank', group: 'Operations', icon: ArrowLeftRight, perm: 'accounts' },
+    { id: 'bankImport', label: 'Credit/Debit Notes & Bank', group: 'Operations', icon: Landmark, perm: 'bankImport' },
+    { id: 'allInOne', label: 'A. Bilty & Lorry Master Sheet', group: 'Operations', icon: ClipboardList, perm: 'allInOne' },
+    { id: 'reports', label: 'D. GST, Statutory Vault & ITR', group: 'Operations', icon: FileBarChart2, perm: 'reports' },
+    // Separate Role Ledgers (A–Z 100% Coverage)
+    { id: 'ledger_party', label: 'Party Account Ledger (Tally)', group: 'Separate Role Ledgers', icon: BookOpen, perm: 'accounts' },
+    { id: 'ledger_broker', label: 'Broker Ledger & Trip Sheet', group: 'Separate Role Ledgers', icon: Users, perm: 'accounts' },
+    { id: 'ledger_owner', label: 'Lorry Owner Ledger & Trip Sheet', group: 'Separate Role Ledgers', icon: Building2, perm: 'accounts' },
+    { id: 'ledger_driver', label: 'Driver Ledger & Trip Sheet', group: 'Separate Role Ledgers', icon: Users, perm: 'accounts' },
+    { id: 'ledger_vehicle', label: 'Vehicle Ledger & Trip Sheet', group: 'Separate Role Ledgers', icon: Truck, perm: 'accounts' },
+    { id: 'ledger_staff', label: 'Staff Dual-Ledger (Adv & Comm.)', group: 'Separate Role Ledgers', icon: Coins, perm: 'commission' },
+    // Masters & Vault
+    { id: 'master', label: 'Unified Master Sheet (O/D/V/B)', group: 'Masters & Vault', icon: Building2, perm: 'master' },
+    { id: 'partyDirectory', label: '1,000-Party Directory', group: 'Masters & Vault', icon: Users, perm: 'master' },
+    { id: 'commission', label: 'Staff Details & Chart Entry', group: 'Masters & Vault', icon: Coins, perm: 'commission' },
+    { id: 'accounts', label: 'Tally Accounts & Daybook', group: 'Masters & Vault', icon: BookOpen, perm: 'accounts' },
+    { id: 'mis', label: 'MIS & Profit/Loss', group: 'Masters & Vault', icon: PieChart, perm: 'mis' },
+    { id: 'backup', label: 'Raw DBF Archive & Sync', group: 'Masters & Vault', icon: DatabaseBackup, perm: 'backup' },
+    { id: 'settings', label: 'Company Parameters & Stamp Manager', group: 'Masters & Vault', icon: Settings, perm: 'settings' },
     {
       id: 'staffAccess',
       label: 'Staff Access Control',
+      group: 'Masters & Vault',
       icon: KeyRound,
       perm: 'staffAccess',
       highlightClass: 'bg-amber-500/20 border border-amber-300/40 text-amber-100',
     },
-    { id: 'about', label: 'About', icon: Info },
+    { id: 'guide', label: 'Bilingual Operating Book', group: 'Masters & Vault', icon: BookOpen },
+    { id: 'about', label: 'About', group: 'Masters & Vault', icon: Info },
   ];
 
   const activeOperatorLabel = activeStaffSession
@@ -2418,8 +2593,10 @@ export default function App() {
   return (
     <ErrorBoundary>
       <div
-        className={`min-h-screen w-full max-w-full overflow-x-clip flex flex-col bg-[#E2E8F0] text-slate-900 select-none ${
-          rotateMode === 'landscape' ? 'drc-css-landscape-fallback' : ''
+        className={`min-h-screen w-full max-w-full flex flex-col bg-[#E2E8F0] text-slate-900 select-none ${
+          rotateMode === 'landscape'
+            ? 'drc-css-landscape-fallback overflow-y-auto overflow-x-auto'
+            : 'overflow-x-clip'
         }`}
       >
       {voiceFeedbackMsg && (
@@ -2439,6 +2616,19 @@ export default function App() {
       {isFormFocused && !bannerExpanded ? (
         <header className="sticky top-0 z-30 w-full min-h-[36px] bg-[#0B3B8C] text-white border-b border-blue-900 px-2 sm:px-3 py-0.5 flex flex-wrap items-center justify-between gap-1.5 shadow-sm no-print">
           <div className="flex items-center gap-1.5 min-w-0">
+            {businessMode === 'FTL' && (
+              <button
+                type="button"
+                onClick={() => setSidebarOpen((v) => !v)}
+                className="inline-flex items-center gap-1 px-2 py-0.5 rounded bg-white/15 hover:bg-white/25 text-white text-[11px] font-extrabold cursor-pointer whitespace-nowrap shrink-0"
+                aria-expanded={sidebarOpen}
+                aria-label="Toggle Menu Sidebar"
+                title={sidebarOpen ? 'Hide DRC Menu' : 'Open DRC Menu'}
+              >
+                {sidebarOpen ? <X className="w-3.5 h-3.5" /> : <Menu className="w-3.5 h-3.5" />}
+                <span className="hidden sm:inline">Menu</span>
+              </button>
+            )}
             <button
               type="button"
               onClick={handleReturnToCurrentBusinessDashboard}
@@ -3570,7 +3760,7 @@ export default function App() {
         <aside
           className={`${
             sidebarOpen ? 'fixed inset-y-0 left-0 z-50 flex' : 'hidden'
-          } w-60 shrink-0 flex-col justify-between bg-gradient-to-b from-[#0D47A1] via-[#1565C0] to-[#0A347A] text-white shadow-2xl no-print`}
+          } w-64 shrink-0 flex-col justify-between bg-gradient-to-b from-[#0D47A1] via-[#1565C0] to-[#0A347A] text-white shadow-2xl no-print`}
           aria-label="Primary Navigation Sidebar"
         >
           <div className="p-2.5 space-y-1 overflow-y-auto">
@@ -3588,34 +3778,54 @@ export default function App() {
               </button>
             </div>
 
-            {sidebarItems
-              .filter((item) => !item.perm || hasPermission(item.perm))
-              .map((item) => {
-                const Icon = item.icon;
-                const isActive =
-                  item.id === 'transactions'
-                    ? activeTab === 'dashboard' && dashboardFocusTx
-                    : item.id === 'dashboard'
-                    ? activeTab === 'dashboard' && !dashboardFocusTx
-                    : activeTab === item.id;
-                return (
-                  <button
-                    key={item.id}
-                    type="button"
-                    onClick={() => handleSidebarClick(item.id)}
-                    className={`w-full flex items-center gap-2.5 px-3 py-2 rounded-lg text-xs font-semibold transition-all cursor-pointer ${
-                      isActive
-                        ? 'bg-gradient-to-r from-[#2563EB] to-[#1D4ED8] text-white shadow-sm ring-1 ring-white/25'
-                        : item.highlightClass
-                        ? `${item.highlightClass} hover:bg-amber-500/35`
-                        : 'text-blue-100 hover:bg-white/10 hover:text-white'
-                    }`}
-                  >
-                    <Icon className="w-4 h-4 shrink-0" />
-                    <span className="truncate">{item.label}</span>
-                  </button>
-                );
-              })}
+            {(['Operations', 'Separate Role Ledgers', 'Masters & Vault'] as const).map((groupName) => {
+              const groupItems = sidebarItems.filter(
+                (item) => item.group === groupName && (!item.perm || hasPermission(item.perm))
+              );
+              if (groupItems.length === 0) return null;
+              return (
+                <div key={groupName} className="pt-1.5">
+                  <div className="px-2.5 py-1 text-[10px] font-extrabold uppercase tracking-wider text-amber-200/90">
+                    {groupName}
+                  </div>
+                  <div className="space-y-0.5">
+                    {groupItems.map((item) => {
+                      const Icon = item.icon;
+                      const isActive =
+                        item.id === 'transactions'
+                          ? activeTab === 'dashboard' && dashboardFocusTx
+                          : item.id === 'dashboard'
+                          ? activeTab === 'dashboard' && !dashboardFocusTx
+                          : item.id === 'sidebar_quotation'
+                          ? activeTab === 'billing' && billingInitialSubTab === 'quotation'
+                          : item.id === 'sidebar_194c'
+                          ? activeTab === 'billing' && billingInitialSubTab === '194c'
+                          : item.id.startsWith('ledger_')
+                          ? activeTab === 'roleLedgers' &&
+                            roleLedgerInitialRole === item.id.replace('ledger_', '')
+                          : activeTab === item.id;
+                      return (
+                        <button
+                          key={item.id}
+                          type="button"
+                          onClick={() => handleSidebarClick(item.id)}
+                          className={`w-full flex items-center gap-2.5 px-3 py-1.5 rounded-lg text-xs font-semibold transition-all cursor-pointer ${
+                            isActive
+                              ? 'bg-gradient-to-r from-[#2563EB] to-[#1D4ED8] text-white shadow-sm ring-1 ring-white/25'
+                              : item.highlightClass
+                              ? `${item.highlightClass} hover:bg-amber-500/35`
+                              : 'text-blue-100 hover:bg-white/10 hover:text-white'
+                          }`}
+                        >
+                          <Icon className="w-3.5 h-3.5 shrink-0" />
+                          <span className="truncate">{item.label}</span>
+                        </button>
+                      );
+                    })}
+                  </div>
+                </div>
+              );
+            })}
 
             <div className="pt-2 mt-2 border-t border-white/15 space-y-1.5">
               <button
@@ -3749,8 +3959,36 @@ export default function App() {
             })}
           </div>
 
+          {/* Live Last Saved No Status Badge Strip (Visible at top of every page) */}
+          <div className="bg-white border-b border-slate-200 px-3 py-1 flex flex-wrap items-center gap-x-4 gap-y-1 text-[11px] text-slate-700 no-print">
+            <span>
+              <strong className="text-blue-800">Last CN:</strong>{' '}
+              <span className="font-mono-num font-bold text-slate-900">{liveLastSavedNos.cnNo}</span> ({liveLastSavedNos.cnParty})
+            </span>
+            <span>
+              <strong className="text-emerald-800">Last Bill:</strong>{' '}
+              <span className="font-mono-num font-bold text-slate-900">{liveLastSavedNos.billNo}</span> ({liveLastSavedNos.billParty})
+            </span>
+            <span>
+              <strong className="text-amber-800">Last Quote:</strong>{' '}
+              <span className="font-mono-num font-bold text-slate-900">{liveLastSavedNos.quoteNo}</span> ({liveLastSavedNos.quoteParty})
+            </span>
+            <span>
+              <strong className="text-purple-800">Last 194C:</strong>{' '}
+              <span className="font-mono-num font-bold text-slate-900">{liveLastSavedNos.declDate}</span> ({liveLastSavedNos.declParty})
+            </span>
+            <span>
+              <strong className="text-cyan-800">Last POD/Vch:</strong>{' '}
+              <span className="font-mono-num font-bold text-slate-900">{liveLastSavedNos.podRef}</span> ({liveLastSavedNos.podPartyTruck})
+            </span>
+          </div>
+
           {/* Active Workspace Module */}
-          <div className="flex-1 p-2.5 sm:p-3 md:p-4 overflow-y-auto overflow-x-clip">
+          <div
+            className={`flex-1 p-2.5 sm:p-3 md:p-4 overflow-y-auto ${
+              rotateMode === 'landscape' ? 'overflow-x-auto' : 'overflow-x-clip'
+            }`}
+          >
             {driveBannerError && (
               <div className="mb-3 px-4 py-2.5 rounded-lg bg-amber-50 border border-amber-300 text-amber-900 text-xs font-medium flex items-center justify-between gap-2">
                 <span>{driveBannerError}</span>
@@ -3780,9 +4018,26 @@ export default function App() {
                 }
                 transactions={visibleTransactions}
                 parties={parties}
+                invoices={visibleInvoices}
+                vehicles={vehicles}
+                drivers={drivers}
+                consignments={visibleConsignments}
+                lorryHires={visibleLorryHires}
                 company={companySettings}
+                lastSavedNos={liveLastSavedNos}
                 focusTransactionsNonce={focusTransactionsNonce}
                 onOpenTab={openOrSwitchTab}
+                onOpenPodScanner={() => openOrSwitchTab('podScanner')}
+                onOpenMasterVehicles={() => {
+                  setMasterInitialTab('vehicles');
+                  setMasterFocusNonce((n) => n + 1);
+                  openOrSwitchTab('master');
+                }}
+                onOpenMasterDrivers={() => {
+                  setMasterInitialTab('drivers');
+                  setMasterFocusNonce((n) => n + 1);
+                  openOrSwitchTab('master');
+                }}
                 onPreviewPdf={handlePreviewPdf}
                 onShowConfirm={handleShowConfirm}
               />
@@ -3836,6 +4091,7 @@ export default function App() {
                 transactions={visibleTransactions}
                 company={companySettings}
                 initialTab={masterInitialTab}
+                onOpenPodScanner={() => openOrSwitchTab('podScanner')}
                 onPreviewPdf={handlePreviewPdf}
                 onShowConfirm={handleShowConfirm}
               />
@@ -3851,6 +4107,7 @@ export default function App() {
                 isMasterAdmin={isEffectiveMasterAdmin}
                 readOnly={getSheetAccess('lr') === 'view'}
                 consignments={visibleConsignments}
+                lorryHires={visibleLorryHires}
                 parties={parties}
                 vehicles={vehicles}
                 drivers={drivers}
@@ -3926,6 +4183,7 @@ export default function App() {
                 currentStaffCode={activeStaffCode}
                 currentBranchCode={activeOperationalBranch}
                 readOnly={getSheetAccess('commission') === 'view'}
+                onOpenPodScanner={() => openOrSwitchTab('podScanner')}
                 onOpenPreview={(pdf) => handlePreviewPdf(pdf, 'Reports_Ledgers')}
               />
             )}
@@ -3941,6 +4199,7 @@ export default function App() {
                 currentBranchCode={activeOperationalBranch}
                 driveAccessToken={driveAccessToken}
                 readOnly={getSheetAccess('bankImport') === 'view'}
+                onOpenPodScanner={() => openOrSwitchTab('podScanner')}
                 onOpenPreview={(pdf) => handlePreviewPdf(pdf, 'Reports_Ledgers')}
               />
             )}
@@ -3951,6 +4210,83 @@ export default function App() {
                 ownerUid={workspaceUid}
                 currentStaffCode={activeStaffCode}
                 currentBranchCode={activeOperationalBranch}
+              />
+            )}
+
+            {activeTab === 'roleLedgers' && (
+              <RoleTallyLedgersModule
+                key={`rl_${roleLedgerInitialRole}_${roleLedgerFocusNonce}`}
+                ownerUid={workspaceUid}
+                activeFy={activeFy}
+                company={companySettings}
+                hasCustomSettings={settingsDocs.some((d) => d.id === 'company')}
+                parties={parties}
+                vehicles={vehicles}
+                drivers={drivers}
+                consignments={visibleConsignments}
+                invoices={visibleInvoices}
+                lorryHires={visibleLorryHires}
+                transactions={visibleTransactions}
+                bankReceipts={bankReceipts}
+                staffAccounts={staffAccounts}
+                staffCommissions={staffCommissions}
+                tripExpenses={visibleTripExpenses}
+                hasDriveToken={Boolean(driveAccessToken)}
+                driveAccessToken={driveAccessToken}
+                connectedDriveEmail={connectedEmail}
+                initialRole={roleLedgerInitialRole}
+                initialAccountName={roleLedgerInitialAccount}
+                onPreviewPdf={handlePreviewPdf}
+                onOpenPodScanner={() => openOrSwitchTab('podScanner')}
+                onRectifyVoucher={(vType, vNo) => {
+                  if (vType === 'Sales' || vType === 'Credit Note' || vType === 'Debit Note') {
+                    setBillingInitialSubTab('invoice');
+                    setBillingFocusNonce((n) => n + 1);
+                    openOrSwitchTab('billing');
+                  } else {
+                    setMasterInitialTab('parties');
+                    setMasterFocusNonce((n) => n + 1);
+                    openOrSwitchTab('master');
+                  }
+                  void vNo;
+                }}
+                onRectifyLorryHire={() => openOrSwitchTab('lorryHire')}
+              />
+            )}
+
+            {activeTab === 'partyDirectory' && (
+              <PartyDirectorySheet
+                parties={parties}
+                company={companySettings}
+                activeFy={activeFy}
+                onEditParty={() => {
+                  setMasterInitialTab('parties');
+                  setMasterFocusNonce((n) => n + 1);
+                  openOrSwitchTab('master');
+                }}
+                onOpenPartyLedger={(pName) => {
+                  setRoleLedgerInitialRole('party');
+                  setRoleLedgerInitialAccount(pName);
+                  setRoleLedgerFocusNonce((n) => n + 1);
+                  openOrSwitchTab('roleLedgers');
+                }}
+                onOpenPodScanner={() => openOrSwitchTab('podScanner')}
+                onPreviewPdf={handlePreviewPdf}
+              />
+            )}
+
+            {activeTab === 'podScanner' && (
+              <UniversalPodScannerPage
+                ownerUid={workspaceUid}
+                activeFy={activeFy}
+                businessMode={businessMode}
+                company={companySettings}
+                lorryHires={visibleLorryHires}
+                consignments={visibleConsignments}
+                hasDriveToken={Boolean(driveAccessToken)}
+                driveAccessToken={driveAccessToken}
+                connectedDriveEmail={connectedEmail}
+                onPreviewPdf={handlePreviewPdf}
               />
             )}
 
@@ -3969,6 +4305,8 @@ export default function App() {
                 bankReceipts={bankReceipts}
                 parties={parties}
                 drivers={drivers}
+                vehicles={vehicles}
+                tripExpenses={visibleTripExpenses}
                 company={companySettings}
                 driveAccessToken={driveAccessToken}
                 onConnectDrive={() => handleGoogleDriveConnect(true)}
@@ -4024,7 +4362,21 @@ export default function App() {
                 aiDoctorReport={aiDoctorReport}
                 runningAiDoctor={runningAiDoctor}
                 onRunAiDoctor={async () => {
-                  await triggerAiDoctor('manual');
+                  if (!companySettings.backgroundAiEnabled) {
+                    handleShowConfirm({
+                      title: 'Enable Online Gemini AI Check?',
+                      description:
+                        'Background Online AI is currently OFF by default (0 API Quota). Select Yes to run an online Gemini deep formula audit now, or Cancel to stay offline.',
+                      confirmLabel: 'Yes, Run Online AI',
+                      variant: 'primary',
+                      onConfirm: async () => {
+                        await triggerAiDoctor('manual', true);
+                      },
+                    });
+                    await triggerAiDoctor('manual', false);
+                    return;
+                  }
+                  await triggerAiDoctor('manual', true);
                 }}
                 onAcknowledgeNewDevice={handleAcknowledgeNewDevice}
                 onManualSyncNow={async () => {
@@ -4237,27 +4589,25 @@ export default function App() {
       )}
 
       {/* Live A4 PDF Preview Modal with Dynamic Portrait / Landscape Rebuild & Share Actions */}
-      <Suspense fallback={null}>
-        <A4PreviewModal
-          pdf={previewPdf?.pdf || null}
-          driveFolder={previewPdf?.folder || 'Bills_Invoices'}
-          hasDriveToken={Boolean(driveAccessToken)}
-          parties={parties}
-          company={companySettings}
-          onClose={handleClosePreviewPdf}
-          onSaveToDrive={handleSavePdfToDrive}
-          onConnectDrive={() => handleGoogleDriveConnect(true)}
-          onReplacePdf={(nextPdf) =>
-            setPreviewPdf((prev) => {
-              if (!prev) return null;
-              if (prev.pdf.blobUrl && prev.pdf.blobUrl !== nextPdf.blobUrl) {
-                URL.revokeObjectURL(prev.pdf.blobUrl);
-              }
-              return { ...prev, pdf: nextPdf };
-            })
-          }
-        />
-      </Suspense>
+      <A4PreviewModal
+        pdf={previewPdf?.pdf || null}
+        driveFolder={previewPdf?.folder || 'Bills_Invoices'}
+        hasDriveToken={Boolean(driveAccessToken)}
+        parties={parties}
+        company={companySettings}
+        onClose={handleClosePreviewPdf}
+        onSaveToDrive={handleSavePdfToDrive}
+        onConnectDrive={() => handleGoogleDriveConnect(true)}
+        onReplacePdf={(nextPdf) =>
+          setPreviewPdf((prev) => {
+            if (!prev) return null;
+            if (prev.pdf.blobUrl && prev.pdf.blobUrl !== nextPdf.blobUrl) {
+              URL.revokeObjectURL(prev.pdf.blobUrl);
+            }
+            return { ...prev, pdf: nextPdf };
+          })
+        }
+      />
 
       {/* Startup & Monthly Auto-Formula Health Guard + Anti-Tamper Shield Modal */}
       {formulaHealthModalOpen && (

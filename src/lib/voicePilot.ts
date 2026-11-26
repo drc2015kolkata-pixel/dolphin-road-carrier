@@ -26,6 +26,7 @@ export interface VoiceDraftFields {
 export interface VoiceCommandIntent {
   transcript: string;
   blockedAction?: 'save' | 'print';
+  explicitPrintCopies?: 1 | 2;
   targetTab?: SheetTabId;
   targetBusinessMode?: BusinessMode;
   targetSubTab?: string;
@@ -206,16 +207,30 @@ export function parseVoiceCommandIntent(rawTranscript: string): VoiceCommandInte
   const transcript = String(rawTranscript || '').trim();
   const lower = transcript.toLowerCase();
 
-  // Strictly refuse auto-save or auto-print via voice per security policy
-  if (/\b(print|প্রিন্ট|ছাপাও)\b/i.test(lower)) {
+  // Explicit Voice Print 1 sheet / 2 copies (never auto-save; ambiguous print stays blocked)
+  if (/(print|প্রিন্ট|ছাপাও)/i.test(lower)) {
+    const isTwo =
+      /\b(2|two|double|duplicate)\b/i.test(lower) || /(২|দুই|ডাবল|দুটি|দুটো)/.test(lower);
+    const isOne =
+      /\b(1|one|single)\b/i.test(lower) || /(১|এক|একটি|একটা|সিঙ্গেল)/.test(lower);
+    if (isTwo || isOne) {
+      const copies: 1 | 2 = isTwo ? 2 : 1;
+      return {
+        transcript,
+        explicitPrintCopies: copies,
+        draftFields: {},
+        spokenReplyBn: `আপনার নির্দেশ অনুযায়ী ${copies === 2 ? '২ কপি' : '১ কপি'} ম্যানুয়াল প্রিন্ট ডায়ালগ খোলা হচ্ছে।`,
+        spokenReplyEn: `Opening manual print dialog for ${copies} ${copies === 2 ? 'copies' : 'sheet'}.`,
+      };
+    }
     return {
       transcript,
       blockedAction: 'print',
       draftFields: {},
       spokenReplyBn:
-        'নিরাপত্তা নীতি অনুযায়ী ভয়েস কমান্ড দিয়ে অটো-প্রিন্ট করা হয় না। দয়া করে স্ক্রিনে তথ্য দেখে নিজে প্রিন্ট বাটনে ক্লিক করুন।',
+        'ভয়েস দিয়ে প্রিন্ট করতে স্পষ্টভাবে "প্রিন্ট ১ কপি" বা "প্রিন্ট ২ কপি" বলুন, অথবা স্ক্রিনের Print বাটনে ক্লিক করুন।',
       spokenReplyEn:
-        'For safety, auto-printing by voice is disabled. Please verify details on screen and click Print manually.',
+        'To print by voice, say clearly "Print 1 sheet" or "Print 2 copies", or click Print manually on screen.',
     };
   }
   if (/\b(save|submit|সেভ|সংরক্ষণ)\b/i.test(lower)) {
@@ -243,6 +258,12 @@ export function parseVoiceCommandIntent(rawTranscript: string): VoiceCommandInte
   // Screen navigation
   if (/\b(all in one|master sheet|bilty|lr|cn|বিল্টি|এলআর|এন্ট্রি শিট|মাস্টার শিট)\b/i.test(lower)) {
     targetTab = 'allInOne';
+  } else if (/\b(party directory|1000|directory|পার্টি ডিরেক্টরি|সব পার্টি)\b/i.test(lower)) {
+    targetTab = 'partyDirectory';
+  } else if (/\b(pod scanner|scanner|scan pod|পিওডি স্ক্যান|স্ক্যানার)\b/i.test(lower)) {
+    targetTab = 'podScanner';
+  } else if (/\b(tally ledger|role ledger|all ledger|ট্যালি লেজার|হিসাব খাতা|স্টাফ লেজার)\b/i.test(lower)) {
+    targetTab = 'roleLedgers';
   } else if (/\b(quotation|quote|কোটেশন|দরপত্র)\b/i.test(lower)) {
     targetTab = 'billing';
     targetSubTab = 'quotation';
@@ -266,6 +287,8 @@ export function parseVoiceCommandIntent(rawTranscript: string): VoiceCommandInte
     targetSubTab = 'parties';
   } else if (/\b(lorry hire|lorry|pod|লরি|ভাড়া)\b/i.test(lower)) {
     targetTab = 'lorryHire';
+  } else if (/\b(settings|parameter|branding|stamp|সেটিংস|লোগো|স্ট্যাম্প)\b/i.test(lower)) {
+    targetTab = 'settings';
   } else if (/\b(gst|report|reports|gstr|রিপোর্ট|জিএসটি)\b/i.test(lower)) {
     targetTab = 'reports';
   } else if (/\b(guide|book|help|গাইড|নিয়ম)\b/i.test(lower)) {

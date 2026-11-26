@@ -1,15 +1,18 @@
 import React, { useEffect, useMemo, useState } from 'react';
 import {
   CheckCircle2,
+  Download,
   Edit3,
+  Eye,
   Keyboard,
   Landmark,
   Lock,
-  MessageCircle,
   Plus,
   Printer,
+  ScanLine,
   Search,
   Settings2,
+  Share2,
   Smartphone,
   Trash2,
   Unlock,
@@ -18,9 +21,14 @@ import {
 } from 'lucide-react';
 import { logBranchActivity, removeDocument, upsertDocument } from '../lib/firestoreStore';
 import { formatDateDDMMYYYY, formatINR, todayISO } from '../lib/formatters';
-import { GeneratedPdfResult, generateFoxproStatementPDF, printPdfDirect } from '../lib/pdfEngine';
+import {
+  downloadPdfDirect,
+  GeneratedPdfResult,
+  generateFoxproStatementPDF,
+  printPdfDirect,
+} from '../lib/pdfEngine';
 import { playVerifiedBeep } from '../lib/audioFeedback';
-import { buildWhatsAppShareHref, triggerExternalShareLink } from '../lib/shareUtils';
+import { sharePdfDirect } from '../lib/shareUtils';
 import {
   BUSINESS_MODE_META,
   BusinessMode,
@@ -69,6 +77,7 @@ interface StaffCommissionModuleProps {
   prefillChallanNo?: string;
   prefillTruckNo?: string;
   compact?: boolean;
+  onOpenPodScanner?: () => void;
   onOpenPreview: (pdf: GeneratedPdfResult) => void;
 }
 
@@ -84,6 +93,7 @@ export const StaffCommissionModule: React.FC<StaffCommissionModuleProps> = ({
   prefillChallanNo = '',
   prefillTruckNo = '',
   compact = false,
+  onOpenPodScanner,
   onOpenPreview,
 }) => {
   const wheelRates = useMemo(
@@ -456,17 +466,17 @@ export const StaffCommissionModule: React.FC<StaffCommissionModuleProps> = ({
     setDeleteTarget(null);
   };
 
-  const handlePrintPdf = async () => {
-    const pdf = await generateFoxproStatementPDF(
+  const buildCommissionPdf = async () =>
+    generateFoxproStatementPDF(
       {
         title: 'STAFF COMMISSION & ADVANCE LEDGER',
-        subtitle: `Staff: ${staffFilter === 'ALL' ? 'All Booking Staff' : staffFilter}   |   Season: ${activeFy}`,
-        fileName: `Staff_Commission_Ledger_${activeFy.replace(/\s+/g, '_')}.pdf`,
+        subtitle: `Staff: ${staffFilter === 'ALL' ? 'All Booking Staff' : staffFilter} | FY: ${activeFy}`,
+        fileName: `Staff_Commission_${activeFy.replace(/\s+/g, '_')}.pdf`,
         orientation: 'l',
         summaryLines: [
-          { label: 'Total Commission', value: `Rs. ${formatINR(ledgerRows.totalCommission)}` },
-          { label: 'Advance Taken', value: `Rs. ${formatINR(ledgerRows.totalAdvanceTaken)}` },
-          { label: 'Net Paid', value: `Rs. ${formatINR(ledgerRows.totalPaid)}` },
+          { label: 'Commission Earned', value: `Rs. ${formatINR(ledgerRows.totalCommission)}` },
+          { label: 'Advances Taken', value: `Rs. ${formatINR(ledgerRows.totalAdvanceTaken)}` },
+          { label: 'Total Paid', value: `Rs. ${formatINR(ledgerRows.totalPaid)}` },
           { label: 'Closing Balance', value: `Rs. ${formatINR(ledgerRows.netBalance)}` },
         ],
         columns: [
@@ -504,6 +514,9 @@ export const StaffCommissionModule: React.FC<StaffCommissionModuleProps> = ({
       },
       company
     );
+
+  const handlePrintPdf = async () => {
+    const pdf = await buildCommissionPdf();
     onOpenPreview(pdf);
   };
 
@@ -547,64 +560,73 @@ export const StaffCommissionModule: React.FC<StaffCommissionModuleProps> = ({
               <Settings2 className="w-3.5 h-3.5 text-[#0D47A1]" />
               Edit Wheel Rates
             </button>
+            {!readOnly && ledgerRows.rows.length > 0 && (
+              <button
+                type="button"
+                onClick={() => handleEditRow(ledgerRows.rows[ledgerRows.rows.length - 1])}
+                className="inline-flex items-center gap-1 px-2.5 py-1.5 rounded-lg bg-amber-50 border border-amber-300 text-amber-900 text-xs font-bold hover:bg-amber-100 cursor-pointer"
+              >
+                <Edit3 className="w-3.5 h-3.5" />
+                Rectify
+              </button>
+            )}
             <button
               type="button"
               onClick={() => void handlePrintPdf()}
-              className="inline-flex items-center gap-1.5 px-3 py-1.5 rounded-lg bg-[#0D47A1] hover:bg-blue-900 text-white text-xs font-bold cursor-pointer"
+              className="inline-flex items-center gap-1 px-2.5 py-1.5 rounded-lg bg-[#0D47A1] hover:bg-blue-900 text-white text-xs font-bold cursor-pointer"
             >
-              <Printer className="w-3.5 h-3.5" />
-              Preview / Low-MB PDF
+              <Eye className="w-3.5 h-3.5" />
+              Preview
+            </button>
+            {onOpenPodScanner && (
+              <button
+                type="button"
+                onClick={onOpenPodScanner}
+                className="inline-flex items-center gap-1 px-2.5 py-1.5 rounded-lg bg-amber-500 hover:bg-amber-400 text-slate-950 text-xs font-extrabold cursor-pointer"
+              >
+                <ScanLine className="w-3.5 h-3.5" />
+                Scan
+              </button>
+            )}
+            <button
+              type="button"
+              onClick={async () => {
+                const pdf = await buildCommissionPdf();
+                downloadPdfDirect(pdf);
+              }}
+              className="inline-flex items-center gap-1 px-2.5 py-1.5 rounded-lg bg-emerald-600 hover:bg-emerald-700 text-white text-xs font-bold cursor-pointer"
+            >
+              <Download className="w-3.5 h-3.5" />
+              Low-KB PDF
             </button>
             <button
               type="button"
-              onClick={() =>
-                void generateFoxproStatementPDF(
-                  {
-                    title: 'STAFF COMMISSION & ADVANCE LEDGER',
-                    subtitle: `Staff: ${staffFilter === 'ALL' ? 'All Booking Staff' : staffFilter} | FY: ${activeFy}`,
-                    fileName: `Staff_Commission_${activeFy.replace(/\s+/g, '_')}.pdf`,
-                    orientation: 'l',
-                    columns: [
-                      { label: 'DATE', widthPct: 12 },
-                      { label: 'STAFF NAME', widthPct: 22 },
-                      { label: 'CHALLAN / TRUCK', widthPct: 18 },
-                      { label: 'TYPE / WHEELS', widthPct: 18 },
-                      { label: 'COMMISSION (+)', widthPct: 10, align: 'right' },
-                      { label: 'ADV / PAID (-)', widthPct: 10, align: 'right' },
-                      { label: 'BALANCE', widthPct: 10, align: 'right' },
-                    ],
-                    rows: ledgerRows.rows.map((r) => ({
-                      line1: [
-                        formatDateDDMMYYYY(r.entryDate),
-                        r.staffName,
-                        `${r.challanNo || '-'} ${r.truckNo ? `/ ${r.truckNo}` : ''}`,
-                        `${r.wheelType} (${r.entryType})`,
-                        r.entryType === 'Commission' ? formatINR(r.amount) : '-',
-                        r.entryType !== 'Commission' ? formatINR(r.amount) : '-',
-                        formatINR(r.runningBalance),
-                      ],
-                    })),
-                  },
-                  company
-                ).then((pdf) => printPdfDirect(pdf))
-              }
-              className="inline-flex items-center gap-1.5 px-3 py-1.5 rounded-lg bg-amber-400 hover:bg-amber-300 text-slate-950 text-xs font-extrabold cursor-pointer"
+              onClick={async () => {
+                const pdf = await buildCommissionPdf();
+                printPdfDirect(pdf);
+              }}
+              className="inline-flex items-center gap-1 px-2.5 py-1.5 rounded-lg bg-amber-400 hover:bg-amber-300 text-slate-950 text-xs font-extrabold cursor-pointer"
             >
               <Printer className="w-3.5 h-3.5" />
-              Print
+              Manual Print
             </button>
             <button
               type="button"
-              onClick={() =>
-                triggerExternalShareLink(
-                  buildWhatsAppShareHref({
-                    message: `DRC Staff Ledger (${staffFilter} · ${activeFy})\nDay Total: Rs. ${formatINR(ledgerRows.dayTotal)}\nMonth Total: Rs. ${formatINR(ledgerRows.monthTotal)}\nClosing Balance: Rs. ${formatINR(ledgerRows.netBalance)}`,
-                  })
-                )
-              }
-              className="inline-flex items-center gap-1.5 px-3 py-1.5 rounded-lg bg-green-600 hover:bg-green-700 text-white text-xs font-bold cursor-pointer"
+              onClick={async () => {
+                const pdf = await buildCommissionPdf();
+                const res = await sharePdfDirect({
+                  pdf,
+                  channel: 'whatsapp',
+                  partyName: staffFilter === 'ALL' ? 'All Booking Staff' : staffFilter,
+                  docNo: activeFy,
+                  docLabel: 'Staff Commission & Advance Ledger',
+                  company,
+                });
+                setBannerMsg(res.message);
+              }}
+              className="inline-flex items-center gap-1 px-2.5 py-1.5 rounded-lg bg-green-600 hover:bg-green-700 text-white text-xs font-bold cursor-pointer"
             >
-              <MessageCircle className="w-3.5 h-3.5" />
+              <Share2 className="w-3.5 h-3.5" />
               Share
             </button>
           </div>

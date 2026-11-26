@@ -27,6 +27,8 @@ import {
   LorryHire,
   Party,
   TransactionRecord,
+  TripExpenseRecord,
+  Vehicle,
 } from '../types/erp';
 import { daysSinceDate, formatDateDDMMYYYY, formatINR, normalizeFyLabel, todayISO } from '../lib/formatters';
 import {
@@ -59,6 +61,7 @@ import { GstFilingHubModule } from './GstFilingHubModule';
 import { PdfStoreVaultPanel } from './PdfStoreVaultPanel';
 import { EntityQuickPreviewCard, formatPartyDetailsLine } from './RichEntityPicker';
 import { SearchableSelect } from './SearchableSelect';
+import { TripProfitCalculatorPanel } from './TripProfitCalculatorPanel';
 
 interface ReportsMisModuleProps {
   ownerUid: string;
@@ -73,6 +76,8 @@ interface ReportsMisModuleProps {
   bankReceipts?: BankReceiptRecord[];
   parties: Party[];
   drivers?: Driver[];
+  vehicles?: Vehicle[];
+  tripExpenses?: TripExpenseRecord[];
   company: CompanySettings;
   driveAccessToken?: string | null;
   onConnectDrive?: () => Promise<void>;
@@ -96,6 +101,7 @@ export type ReportTab =
   | 'purchaseRegister'
   | 'cnWise'
   | 'lorryWise'
+  | 'tripProfit'
   | 'aging'
   | 'partyFollowUp'
   | 'accountBook'
@@ -123,6 +129,8 @@ const ReportsMisModuleInner: React.FC<ReportsMisModuleProps> = ({
   bankReceipts = [],
   parties,
   drivers = [],
+  vehicles = [],
+  tripExpenses = [],
   company,
   driveAccessToken = null,
   onConnectDrive,
@@ -1263,9 +1271,7 @@ const ReportsMisModuleInner: React.FC<ReportsMisModuleProps> = ({
     });
   };
 
-  const handleAskAI = async (e: React.FormEvent) => {
-    e.preventDefault();
-    if (!aiQuery.trim()) return;
+  const executeAskAi = async () => {
     setAiLoading(true);
     setAiAnswer(null);
     try {
@@ -1290,6 +1296,25 @@ const ReportsMisModuleInner: React.FC<ReportsMisModuleProps> = ({
     } finally {
       setAiLoading(false);
     }
+  };
+
+  const handleAskAI = async (e: React.FormEvent) => {
+    e.preventDefault();
+    if (!aiQuery.trim()) return;
+    if (!company.backgroundAiEnabled) {
+      onShowConfirm({
+        title: 'Run Online Gemini AI Advisor?',
+        description:
+          'Background Online AI is currently OFF by default (0 API Quota). Select Yes to connect online Gemini AI for this MIS query, or No/Cancel to keep Online AI OFF.',
+        confirmLabel: 'Yes, Run Online AI',
+        variant: 'primary',
+        onConfirm: async () => {
+          await executeAskAi();
+        },
+      });
+      return;
+    }
+    await executeAskAi();
   };
 
   const buildCurrentPdf = async (): Promise<GeneratedPdfResult> => {
@@ -1673,6 +1698,7 @@ const ReportsMisModuleInner: React.FC<ReportsMisModuleProps> = ({
     { id: 'purchaseRegister', label: 'Purchase / Lorry Hire' },
     { id: 'cnWise', label: 'CN-Wise P&L' },
     { id: 'lorryWise', label: 'Lorry-Wise P&L' },
+    { id: 'tripProfit', label: 'Trip Expense & Net Profit' },
     { id: 'aging', label: 'Payment Aging' },
     { id: 'partyFollowUp', label: '15/30d Alerts & Party Load' },
     { id: 'accountBook', label: 'Account Book' },
@@ -1687,7 +1713,8 @@ const ReportsMisModuleInner: React.FC<ReportsMisModuleProps> = ({
     tab !== 'aiAdvisor' &&
     tab !== 'partyFollowUp' &&
     tab !== 'gstFilingHub' &&
-    tab !== 'pdfVault';
+    tab !== 'pdfVault' &&
+    tab !== 'tripProfit';
 
   return (
     <div className="space-y-4">
@@ -1723,7 +1750,7 @@ const ReportsMisModuleInner: React.FC<ReportsMisModuleProps> = ({
             </div>
           )}
 
-          {tab !== 'aiAdvisor' && tab !== 'gstFilingHub' && tab !== 'pdfVault' && (
+          {tab !== 'aiAdvisor' && tab !== 'gstFilingHub' && tab !== 'pdfVault' && tab !== 'tripProfit' && (
             <>
               <button
                 type="button"
@@ -2670,6 +2697,22 @@ const ReportsMisModuleInner: React.FC<ReportsMisModuleProps> = ({
             )}
           </form>
         </div>
+      )}
+      {/* TAB: TRIP EXPENSE & NET PROFIT CALCULATOR */}
+      {tab === 'tripProfit' && (
+        <TripProfitCalculatorPanel
+          ownerUid={ownerUid}
+          activeFy={activeFy}
+          company={company}
+          consignments={consignments}
+          lorryHires={lorryHires}
+          invoices={invoices}
+          transactions={transactions}
+          tripExpenses={tripExpenses}
+          vehicles={vehicles}
+          readOnly={readOnly}
+          onPreviewPdf={onPreviewPdf}
+        />
       )}
     </div>
   );

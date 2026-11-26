@@ -3,19 +3,26 @@ import {
   ArrowLeftRight,
   Banknote,
   BookOpen,
+  Camera,
   ChevronDown,
   ChevronUp,
   ClipboardList,
   DatabaseBackup,
+  Download,
+  Edit3,
   Eraser,
+  Eye,
   FileBarChart2,
   FileSpreadsheet,
   Landmark,
+  Layers,
   Lock,
   Printer,
   Save,
+  ScanLine,
   Search,
   Settings,
+  Share2,
   ShieldCheck,
   Star,
   Trash2,
@@ -25,9 +32,14 @@ import {
 } from 'lucide-react';
 import {
   CompanySettings,
+  ConsignmentNote,
+  Driver,
+  Invoice,
+  LorryHire,
   Party,
   SheetTabId,
   TransactionRecord,
+  Vehicle,
 } from '../types/erp';
 import {
   formatDateDDMMYYYY,
@@ -49,7 +61,13 @@ import {
   upsertDocument,
 } from '../lib/firestoreStore';
 import { buildAutomaticNarration, formatReferenceChain } from '../lib/paymentNarration';
-import { generateTableReportPDF, GeneratedPdfResult } from '../lib/pdfEngine';
+import {
+  downloadPdfDirect,
+  generateTableReportPDF,
+  GeneratedPdfResult,
+  printPdfDirect,
+} from '../lib/pdfEngine';
+import { sharePdfDirect } from '../lib/shareUtils';
 import { useDebouncedValue } from '../hooks/useDebounce';
 import { PaginatedDataTable, TableColumn } from './PaginatedDataTable';
 import {
@@ -59,6 +77,20 @@ import {
 } from './RichEntityPicker';
 import { SearchableSelect } from './SearchableSelect';
 import { EditableSearchSelect } from './EditableSearchSelect';
+import { ExpiryAlertBadge } from './ExpiryAlertBadge';
+
+export interface DashboardLastSavedNos {
+  cnNo: string;
+  cnParty: string;
+  billNo: string;
+  billParty: string;
+  quoteNo: string;
+  quoteParty: string;
+  declDate: string;
+  declParty: string;
+  podRef: string;
+  podPartyTruck: string;
+}
 
 interface DashboardHomeProps {
   ownerUid: string;
@@ -71,9 +103,18 @@ interface DashboardHomeProps {
   customersCount: number;
   transactions: TransactionRecord[];
   parties: Party[];
+  invoices?: Invoice[];
+  vehicles?: Vehicle[];
+  drivers?: Driver[];
+  consignments?: ConsignmentNote[];
+  lorryHires?: LorryHire[];
   company: CompanySettings;
+  lastSavedNos?: DashboardLastSavedNos;
   focusTransactionsNonce?: number;
   onOpenTab: (tab: SheetTabId) => void;
+  onOpenPodScanner?: () => void;
+  onOpenMasterVehicles?: () => void;
+  onOpenMasterDrivers?: () => void;
   onPreviewPdf: (pdf: GeneratedPdfResult, folder: 'Reports_Ledgers') => void;
   onShowConfirm: (opts: {
     title: string;
@@ -95,9 +136,18 @@ const DashboardHomeInner: React.FC<DashboardHomeProps> = ({
   customersCount,
   transactions,
   parties,
+  invoices = [],
+  vehicles = [],
+  drivers = [],
+  consignments = [],
+  lorryHires = [],
   company,
+  lastSavedNos,
   focusTransactionsNonce = 0,
   onOpenTab,
+  onOpenPodScanner,
+  onOpenMasterVehicles,
+  onOpenMasterDrivers,
   onPreviewPdf,
   onShowConfirm,
 }) => {
@@ -114,6 +164,10 @@ const DashboardHomeInner: React.FC<DashboardHomeProps> = ({
   const [utrNo, setUtrNo] = useState('');
   const [chequeNo, setChequeNo] = useState('');
   const [referenceNo, setReferenceNo] = useState('');
+  const [selectedInvoiceIds, setSelectedInvoiceIds] = useState<string[]>([]);
+  const [editingTxId, setEditingTxId] = useState<string | null>(null);
+  const [editingTxCode, setEditingTxCode] = useState<string>('');
+  const [voucherMsg, setVoucherMsg] = useState<string | null>(null);
   const [saving, setSaving] = useState(false);
   const [seeding, setSeeding] = useState(false);
 
@@ -121,13 +175,53 @@ const DashboardHomeInner: React.FC<DashboardHomeProps> = ({
   const debouncedSearch = useDebouncedValue(searchQuery, 200);
   const [selectedTxId, setSelectedTxId] = useState<string | null>(null);
   const [quickActionsOpen, setQuickActionsOpen] = useState(true);
+  const [txSectionOpen, setTxSectionOpen] = useState(false);
   const txSectionRef = useRef<HTMLDivElement | null>(null);
 
   useEffect(() => {
     if (focusTransactionsNonce > 0) {
-      txSectionRef.current?.scrollIntoView({ behavior: 'smooth', block: 'start' });
+      setTxSectionOpen(true);
+      window.setTimeout(() => {
+        txSectionRef.current?.scrollIntoView({ behavior: 'smooth', block: 'start' });
+      }, 60);
     }
   }, [focusTransactionsNonce]);
+
+  const partyUnpaidInvoices = useMemo(() => {
+    const cleanParty = partyName.trim().toLowerCase();
+    return invoices
+      .filter((inv) => {
+        const due = Math.round((Number(inv.grandTotal || 0) - Number(inv.paidAmount || 0)) * 100) / 100;
+        if (due <= 0.5) return false;
+        if (!cleanParty) return true;
+        return String(inv.partyName || '').trim().toLowerCase() === cleanParty;
+      })
+      .sort((a, b) => (b.invoiceDate || '').localeCompare(a.invoiceDate || ''));
+  }, [invoices, partyName]);
+
+  const selectedInvoicesList = useMemo(
+    () => partyUnpaidInvoices.filter((inv) => selectedInvoiceIds.includes(inv.id)),
+    [partyUnpaidInvoices, selectedInvoiceIds]
+  );
+
+  const toggleBillCheckbox = (inv: Invoice) => {
+    const exists = selectedInvoiceIds.includes(inv.id);
+    const nextIds = exists
+      ? selectedInvoiceIds.filter((id) => id !== inv.id)
+      : [...selectedInvoiceIds, inv.id];
+    setSelectedInvoiceIds(nextIds);
+    const nextBills = partyUnpaidInvoices.filter((i) => nextIds.includes(i.id));
+    if (nextBills.length > 0) {
+      const dueSum = nextBills.reduce(
+        (s, i) => s + Math.max(0, Number(i.grandTotal || 0) - Number(i.paidAmount || 0)),
+        0
+      );
+      setAmount(String(Math.round(dueSum * 100) / 100));
+      if (!partyName.trim() && nextBills[0].partyName) {
+        setPartyName(nextBills[0].partyName);
+      }
+    }
+  };
 
   const ledgerHeadOptions = useMemo(
     () =>
@@ -156,8 +250,23 @@ const DashboardHomeInner: React.FC<DashboardHomeProps> = ({
         utrNo,
         chequeNo,
         referenceNo,
+        linkedInvoiceNo:
+          selectedInvoicesList.length > 0
+            ? selectedInvoicesList.map((i) => i.invoiceNo).join(', ')
+            : undefined,
       }),
-    [txType, partyName, amount, ledgerAccount, paymentMode, upiRefId, utrNo, chequeNo, referenceNo]
+    [
+      txType,
+      partyName,
+      amount,
+      ledgerAccount,
+      paymentMode,
+      upiRefId,
+      utrNo,
+      chequeNo,
+      referenceNo,
+      selectedInvoicesList,
+    ]
   );
 
   const { totalIncome, totalExpense, cashBalance, bankBalance } = useMemo(() => {
@@ -208,21 +317,28 @@ const DashboardHomeInner: React.FC<DashboardHomeProps> = ({
     if (!partyName.trim() || !Number.isFinite(numAmt) || numAmt <= 0) return;
 
     setSaving(true);
+    setVoucherMsg(null);
     try {
-      const { formattedNo: txCode } = await reserveNextSerialNumber({
-        type: 'tx',
-        fy: activeFy,
-        branchCode: activeBranchCode,
-        staffCode: activeStaffCode,
-        ownerUid,
-      });
+      const txCode =
+        editingTxId && editingTxCode
+          ? editingTxCode
+          : (
+              await reserveNextSerialNumber({
+                type: 'tx',
+                fy: activeFy,
+                branchCode: activeBranchCode,
+                staffCode: activeStaffCode,
+                ownerUid,
+              })
+            ).formattedNo;
 
       const primaryRef = (upiRefId || utrNo || chequeNo || referenceNo).trim();
+      const linkedNos = selectedInvoicesList.map((i) => i.invoiceNo);
       const finalNarration = (
         narrationManual && narration.trim() ? narration.trim() : autoGeneratedNarration
       ).slice(0, 300);
 
-      const id = makeSafeDocId('tx');
+      const id = editingTxId || makeSafeDocId('tx');
       await upsertDocument(
         'transactions',
         id,
@@ -241,25 +357,53 @@ const DashboardHomeInner: React.FC<DashboardHomeProps> = ({
           utrNo: utrNo.trim().slice(0, 80),
           chequeNo: chequeNo.trim().slice(0, 40),
           linkedCnNo: '',
-          linkedInvoiceNo: '',
+          linkedInvoiceNo: linkedNos.join(', '),
+          linkedInvoiceNos: linkedNos,
           branchCode: activeBranchCode,
           createdByStaff: activeStaffCode,
           ownerUid,
         },
-        true
+        !editingTxId
       );
 
+      // Multi-bill settlement: allocate voucher amount across all checked Tax Invoices
+      if (txType === 'Income' && selectedInvoicesList.length > 0 && !editingTxId) {
+        let remainingToApply = Math.round(numAmt * 100) / 100;
+        for (const inv of selectedInvoicesList) {
+          if (remainingToApply <= 0) break;
+          const total = Number(inv.grandTotal || 0);
+          const alreadyPaid = Number(inv.paidAmount || 0);
+          const due = Math.max(0, Math.round((total - alreadyPaid) * 100) / 100);
+          const applyHere = Math.min(due > 0 ? due : remainingToApply, remainingToApply);
+          const nextPaid = Math.min(total, Math.round((alreadyPaid + applyHere) * 100) / 100);
+          const nextStatus: Invoice['status'] = nextPaid >= total - 1 ? 'Paid' : 'Partial';
+          await upsertDocument(
+            'invoices',
+            inv.id,
+            {
+              paidAmount: nextPaid,
+              status: nextStatus,
+            },
+            false
+          );
+          remainingToApply = Math.max(0, Math.round((remainingToApply - applyHere) * 100) / 100);
+        }
+      }
+
       await logBranchActivity({
-        action: `Recorded ${txType}`,
+        action: editingTxId ? `Rectified ${txType}` : `Recorded ${txType}`,
         module: 'Accounts',
         docRefCode: txCode,
-        summary: `${txType} ₹${formatINR(numAmt)} · ${partyName.trim()} (${paymentMode}${primaryRef ? ` · ${primaryRef}` : ''})`,
+        summary: `${txType} ₹${formatINR(numAmt)} · ${partyName.trim()} (${paymentMode}${primaryRef ? ` · ${primaryRef}` : ''})${linkedNos.length ? ` · Bills: ${linkedNos.join(', ')}` : ''}`,
         staffCode: activeStaffCode,
         staffName: activeStaffName,
         branchCode: activeBranchCode,
         ownerUid,
       });
 
+      setVoucherMsg(
+        `${editingTxId ? 'Rectified' : 'Saved'} Voucher ${txCode} (₹${formatINR(numAmt)})${linkedNos.length ? ` · Settled Bills: ${linkedNos.join(', ')}` : ''}.`
+      );
       setPartyName('');
       setSelectedPartyId('');
       setAmount('');
@@ -269,6 +413,9 @@ const DashboardHomeInner: React.FC<DashboardHomeProps> = ({
       setUtrNo('');
       setChequeNo('');
       setReferenceNo('');
+      setSelectedInvoiceIds([]);
+      setEditingTxId(null);
+      setEditingTxCode('');
     } finally {
       setSaving(false);
     }
@@ -288,10 +435,38 @@ const DashboardHomeInner: React.FC<DashboardHomeProps> = ({
     setUtrNo('');
     setChequeNo('');
     setReferenceNo('');
+    setSelectedInvoiceIds([]);
+    setEditingTxId(null);
+    setEditingTxCode('');
+    setVoucherMsg(null);
   };
 
-  const handlePrintTransactions = async () => {
-    const pdf = await generateTableReportPDF({
+  const handleRectifyVoucher = () => {
+    const target =
+      (selectedTxId ? transactions.find((t) => t.id === selectedTxId) : undefined) ||
+      filteredTransactions[0] ||
+      transactions[0];
+    if (!target) return;
+    setEditingTxId(target.id);
+    setEditingTxCode(target.txCode || '');
+    setTxType(target.txType);
+    setLedgerAccount(target.ledgerAccount || 'Customer A/c');
+    setPartyName(target.partyName || '');
+    setAmount(String(target.amount || ''));
+    setTxDate(target.txDate || todayISO());
+    setNarration(target.narration || '');
+    setNarrationManual(Boolean(target.narration));
+    setPaymentMode(target.paymentMode || 'UPI');
+    setUpiRefId(target.upiRefId || '');
+    setUtrNo(target.utrNo || '');
+    setChequeNo(target.chequeNo || '');
+    setReferenceNo(target.referenceNo || '');
+    setSelectedInvoiceIds([]);
+    setVoucherMsg(`Rectifying Voucher ${target.txCode} (${target.partyName}). Edit and click Save.`);
+  };
+
+  const buildTransactionsPdf = async () =>
+    generateTableReportPDF({
       title: 'Transaction Records Register',
       subtitle: `Printed on ${formatDateDDMMYYYY(todayISO())}`,
       headers: ['ID', 'Date', 'Type', 'Party Name', 'Amount (Rs)', 'Mode', 'Narration'],
@@ -307,6 +482,9 @@ const DashboardHomeInner: React.FC<DashboardHomeProps> = ({
       company,
       fileName: `Transaction_Records_${todayISO()}.pdf`,
     });
+
+  const handlePrintTransactions = async () => {
+    const pdf = await buildTransactionsPdf();
     onPreviewPdf(pdf, 'Reports_Ledgers');
   };
 
@@ -513,7 +691,157 @@ const DashboardHomeInner: React.FC<DashboardHomeProps> = ({
         </div>
       </div>
 
-      {/* Middle Split: New Transaction + Truck Banner */}
+      {/* Clean Last Saved No Status Cards + Essential Primary Actions */}
+      <div className="bg-white rounded-xl border border-slate-200 shadow-sm p-3.5 sm:p-4 space-y-3">
+        <div className="flex flex-wrap items-center justify-between gap-2">
+          <div>
+            <h2 className="text-sm sm:text-base font-extrabold text-slate-900 flex items-center gap-2">
+              <Layers className="w-4 h-4 text-[#0D47A1]" />
+              Live Sequential Number Tracker &amp; Primary Actions ({activeFy})
+            </h2>
+            <p className="text-[11px] text-slate-500">
+              Clean full-screen dashboard · Open [ ☰ Menu ] top-left anytime for all Operations, 6 Role Ledgers &amp; Masters.
+            </p>
+          </div>
+          <div className="flex flex-wrap items-center gap-2">
+            <ExpiryAlertBadge
+              vehicles={vehicles}
+              drivers={drivers}
+              consignments={consignments}
+              lorryHires={lorryHires}
+              compact
+              onOpenMasterVehicles={onOpenMasterVehicles || (() => onOpenTab('master'))}
+              onOpenMasterDrivers={onOpenMasterDrivers || (() => onOpenTab('master'))}
+              onOpenLrScreen={() => onOpenTab('lr')}
+            />
+            <button
+              type="button"
+              onClick={() => setTxSectionOpen((v) => !v)}
+              className={`inline-flex items-center gap-1.5 px-3 py-1.5 rounded-lg text-xs font-bold border transition-colors cursor-pointer ${
+                txSectionOpen
+                  ? 'bg-[#0D47A1] text-white border-[#0D47A1]'
+                  : 'bg-slate-50 hover:bg-blue-50 text-slate-800 border-slate-300'
+              }`}
+            >
+              <ArrowLeftRight className="w-3.5 h-3.5" />
+              <span>
+                {txSectionOpen
+                  ? `Hide Quick Voucher & Records (${filteredTransactions.length})`
+                  : `Quick Voucher & Transaction Records (${filteredTransactions.length})`}
+              </span>
+              {txSectionOpen ? <ChevronUp className="w-3.5 h-3.5" /> : <ChevronDown className="w-3.5 h-3.5" />}
+            </button>
+          </div>
+        </div>
+
+        {/* Last Saved No Status Cards */}
+        {lastSavedNos && (
+          <div className="grid grid-cols-1 sm:grid-cols-2 lg:grid-cols-5 gap-2.5 text-xs">
+            <button
+              type="button"
+              onClick={() => onOpenTab('lr')}
+              className="p-2.5 rounded-lg border border-blue-200 bg-blue-50/70 hover:bg-blue-100/70 text-left cursor-pointer transition-colors"
+            >
+              <div className="text-[10px] font-bold text-blue-700 uppercase">Last CN / LR No</div>
+              <div className="font-mono-num font-extrabold text-slate-900 text-sm truncate">
+                {lastSavedNos.cnNo || '—'}
+              </div>
+              <div className="text-[11px] text-slate-600 truncate">{lastSavedNos.cnParty || 'No CN saved yet'}</div>
+            </button>
+
+            <button
+              type="button"
+              onClick={() => onOpenTab('billing')}
+              className="p-2.5 rounded-lg border border-emerald-200 bg-emerald-50/70 hover:bg-emerald-100/70 text-left cursor-pointer transition-colors"
+            >
+              <div className="text-[10px] font-bold text-emerald-700 uppercase">Last Bill / Tax Invoice</div>
+              <div className="font-mono-num font-extrabold text-slate-900 text-sm truncate">
+                {lastSavedNos.billNo || '—'}
+              </div>
+              <div className="text-[11px] text-slate-600 truncate">{lastSavedNos.billParty || 'No Bill saved yet'}</div>
+            </button>
+
+            <button
+              type="button"
+              onClick={() => onOpenTab('billing')}
+              className="p-2.5 rounded-lg border border-amber-200 bg-amber-50/70 hover:bg-amber-100/70 text-left cursor-pointer transition-colors"
+            >
+              <div className="text-[10px] font-bold text-amber-800 uppercase">Last Quotation No</div>
+              <div className="font-mono-num font-extrabold text-slate-900 text-sm truncate">
+                {lastSavedNos.quoteNo || '—'}
+              </div>
+              <div className="text-[11px] text-slate-600 truncate">{lastSavedNos.quoteParty || 'No Quote saved yet'}</div>
+            </button>
+
+            <button
+              type="button"
+              onClick={() => onOpenTab('billing')}
+              className="p-2.5 rounded-lg border border-purple-200 bg-purple-50/70 hover:bg-purple-100/70 text-left cursor-pointer transition-colors"
+            >
+              <div className="text-[10px] font-bold text-purple-700 uppercase">Last 194C Declaration</div>
+              <div className="font-mono-num font-extrabold text-slate-900 text-sm truncate">
+                {lastSavedNos.declDate || '—'}
+              </div>
+              <div className="text-[11px] text-slate-600 truncate">{lastSavedNos.declParty || 'No 194C saved yet'}</div>
+            </button>
+
+            <button
+              type="button"
+              onClick={() => onOpenTab('podScanner')}
+              className="p-2.5 rounded-lg border border-cyan-200 bg-cyan-50/70 hover:bg-cyan-100/70 text-left cursor-pointer transition-colors"
+            >
+              <div className="text-[10px] font-bold text-cyan-800 uppercase">Last POD / Voucher</div>
+              <div className="font-mono-num font-extrabold text-slate-900 text-sm truncate">
+                {lastSavedNos.podRef || '—'}
+              </div>
+              <div className="text-[11px] text-slate-600 truncate">{lastSavedNos.podPartyTruck || 'No POD/Voucher yet'}</div>
+            </button>
+          </div>
+        )}
+
+        {/* Essential Primary Actions Only (4 Clean Buttons) */}
+        <div className="grid grid-cols-2 lg:grid-cols-4 gap-2.5 text-xs pt-1">
+          <button
+            type="button"
+            onClick={() => onOpenTab('lr')}
+            className="flex items-center gap-2.5 px-3.5 py-2.5 rounded-xl border border-blue-300 bg-[#0D47A1] hover:bg-[#0A3882] text-white font-bold text-left transition-colors cursor-pointer"
+          >
+            <ClipboardList className="w-4 h-4 text-amber-300 shrink-0" />
+            <span>New Consignment (LR/CN)</span>
+          </button>
+
+          <button
+            type="button"
+            onClick={() => onOpenTab('billing')}
+            className="flex items-center gap-2.5 px-3.5 py-2.5 rounded-xl border border-emerald-300 bg-emerald-700 hover:bg-emerald-800 text-white font-bold text-left transition-colors cursor-pointer"
+          >
+            <FileSpreadsheet className="w-4 h-4 text-amber-200 shrink-0" />
+            <span>Tax Invoice &amp; Quote</span>
+          </button>
+
+          <button
+            type="button"
+            onClick={() => onOpenTab('podScanner')}
+            className="flex items-center gap-2.5 px-3.5 py-2.5 rounded-xl border border-cyan-300 bg-cyan-700 hover:bg-cyan-800 text-white font-bold text-left transition-colors cursor-pointer"
+          >
+            <Camera className="w-4 h-4 text-amber-200 shrink-0" />
+            <span>POD &amp; Low-KB Scanner</span>
+          </button>
+
+          <button
+            type="button"
+            onClick={() => onOpenTab('roleLedgers')}
+            className="flex items-center gap-2.5 px-3.5 py-2.5 rounded-xl border border-slate-300 bg-slate-900 hover:bg-slate-800 text-white font-bold text-left transition-colors cursor-pointer"
+          >
+            <BookOpen className="w-4 h-4 text-amber-300 shrink-0" />
+            <span>A–Z Role Tally Ledgers</span>
+          </button>
+        </div>
+      </div>
+
+      {/* Middle Split: Collapsible New Transaction + Truck Banner */}
+      {txSectionOpen && (
+      <div ref={txSectionRef} className="space-y-4 scroll-mt-20">
       <div className="grid grid-cols-1 lg:grid-cols-12 gap-4 items-stretch">
         {/* New Transaction Card */}
         <form
@@ -698,30 +1026,145 @@ const DashboardHomeInner: React.FC<DashboardHomeProps> = ({
             </div>
           </div>
 
-          <div className="px-4 py-3 bg-slate-50 border-t border-slate-200 flex items-center justify-end gap-2.5 mt-auto">
+          {/* Multi-Bill Voucher Checkboxes (Unpaid / Partial Tax Invoices) */}
+          {txType === 'Income' && partyUnpaidInvoices.length > 0 && (
+            <div className="mx-4 mb-3 p-2.5 rounded-lg bg-blue-50/70 border border-blue-200 text-xs">
+              <div className="flex items-center justify-between mb-1.5">
+                <span className="font-extrabold text-blue-950">
+                  Multi-Bill Settlement Checkboxes ({selectedInvoiceIds.length} Selected · {partyUnpaidInvoices.length} Pending)
+                </span>
+                {selectedInvoiceIds.length > 0 && (
+                  <button
+                    type="button"
+                    onClick={() => setSelectedInvoiceIds([])}
+                    className="text-[11px] font-bold text-blue-700 hover:underline cursor-pointer"
+                  >
+                    Clear Bills
+                  </button>
+                )}
+              </div>
+              <div className="max-h-28 overflow-y-auto grid grid-cols-1 sm:grid-cols-2 gap-1.5">
+                {partyUnpaidInvoices.slice(0, 20).map((inv) => {
+                  const checked = selectedInvoiceIds.includes(inv.id);
+                  const due = Math.max(0, Number(inv.grandTotal || 0) - Number(inv.paidAmount || 0));
+                  return (
+                    <label
+                      key={inv.id}
+                      className={`flex items-center justify-between gap-2 px-2 py-1 rounded border cursor-pointer text-[11px] ${
+                        checked
+                          ? 'bg-emerald-50 border-emerald-400 text-emerald-950 font-bold'
+                          : 'bg-white border-slate-200 text-slate-700 hover:bg-slate-50'
+                      }`}
+                    >
+                      <span className="inline-flex items-center gap-1.5 truncate">
+                        <input
+                          type="checkbox"
+                          checked={checked}
+                          onChange={() => toggleBillCheckbox(inv)}
+                        />
+                        <span className="font-mono-num font-bold">{inv.invoiceNo}</span>
+                        <span className="truncate text-[10px] opacity-75">{inv.partyName}</span>
+                      </span>
+                      <span className="font-mono-num font-bold text-rose-700 shrink-0">
+                        Due ₹{formatINR(due)}
+                      </span>
+                    </label>
+                  );
+                })}
+              </div>
+            </div>
+          )}
+
+          {voucherMsg && (
+            <div className="mx-4 mb-2 px-3 py-1.5 rounded bg-emerald-50 border border-emerald-200 text-emerald-900 text-[11px] font-bold">
+              {voucherMsg}
+            </div>
+          )}
+
+          <div className="px-4 py-3 bg-slate-50 border-t border-slate-200 flex flex-wrap items-center justify-end gap-1.5 mt-auto">
             <button
               type="submit"
               disabled={saving}
-              className="inline-flex items-center gap-1.5 px-4 py-1.5 rounded-md bg-gradient-to-b from-[#1976D2] to-[#0D47A1] hover:from-[#1565C0] hover:to-[#0A367A] text-white text-xs font-bold shadow-sm transition-colors cursor-pointer disabled:opacity-60"
+              className="inline-flex items-center gap-1 px-3 py-1.5 rounded-md bg-gradient-to-b from-[#1976D2] to-[#0D47A1] hover:from-[#1565C0] hover:to-[#0A367A] text-white text-xs font-bold shadow-sm transition-colors cursor-pointer disabled:opacity-60"
             >
               <Save className="w-3.5 h-3.5" />
-              <span>{saving ? 'Saving...' : 'Save'}</span>
+              <span>{saving ? 'Saving...' : editingTxId ? 'Update Save' : 'Save'}</span>
+            </button>
+            <button
+              type="button"
+              onClick={handleRectifyVoucher}
+              disabled={transactions.length === 0}
+              className="inline-flex items-center gap-1 px-2.5 py-1.5 rounded-md bg-amber-50 border border-amber-300 hover:bg-amber-100 text-amber-900 text-xs font-bold transition-colors cursor-pointer disabled:opacity-50"
+            >
+              <Edit3 className="w-3.5 h-3.5" />
+              <span>Rectify</span>
+            </button>
+            <button
+              type="button"
+              onClick={() => void handlePrintTransactions()}
+              className="inline-flex items-center gap-1 px-2.5 py-1.5 rounded-md bg-white border border-slate-300 hover:bg-slate-100 text-[#0D47A1] text-xs font-bold transition-colors cursor-pointer"
+            >
+              <Eye className="w-3.5 h-3.5" />
+              <span>Preview</span>
+            </button>
+            {onOpenPodScanner && (
+              <button
+                type="button"
+                onClick={onOpenPodScanner}
+                className="inline-flex items-center gap-1 px-2.5 py-1.5 rounded-md bg-amber-500 hover:bg-amber-400 text-slate-950 text-xs font-extrabold transition-colors cursor-pointer"
+              >
+                <ScanLine className="w-3.5 h-3.5" />
+                <span>Scan</span>
+              </button>
+            )}
+            <button
+              type="button"
+              onClick={async () => {
+                const pdf = await buildTransactionsPdf();
+                downloadPdfDirect(pdf);
+              }}
+              className="inline-flex items-center gap-1 px-2.5 py-1.5 rounded-md bg-emerald-600 hover:bg-emerald-700 text-white text-xs font-bold transition-colors cursor-pointer"
+            >
+              <Download className="w-3.5 h-3.5" />
+              <span>Low-KB PDF</span>
+            </button>
+            <button
+              type="button"
+              onClick={async () => {
+                const pdf = await buildTransactionsPdf();
+                printPdfDirect(pdf);
+              }}
+              className="inline-flex items-center gap-1 px-2.5 py-1.5 rounded-md bg-white border border-slate-300 hover:bg-slate-100 text-slate-700 text-xs font-semibold transition-colors cursor-pointer"
+            >
+              <Printer className="w-3.5 h-3.5 text-slate-700" />
+              <span>Manual Print</span>
+            </button>
+            <button
+              type="button"
+              onClick={async () => {
+                const pdf = await buildTransactionsPdf();
+                const res = await sharePdfDirect({
+                  pdf,
+                  channel: 'whatsapp',
+                  partyName: partyName || 'Accounts Register',
+                  docNo: activeFy,
+                  docLabel: 'Voucher Register',
+                  company,
+                });
+                setVoucherMsg(res.message);
+              }}
+              className="inline-flex items-center gap-1 px-2.5 py-1.5 rounded-md bg-green-600 hover:bg-green-700 text-white text-xs font-bold transition-colors cursor-pointer"
+            >
+              <Share2 className="w-3.5 h-3.5" />
+              <span>Share</span>
             </button>
             <button
               type="button"
               onClick={handleClear}
-              className="inline-flex items-center gap-1.5 px-4 py-1.5 rounded-md bg-white border border-slate-300 hover:bg-slate-100 text-slate-700 text-xs font-semibold transition-colors cursor-pointer"
+              className="inline-flex items-center gap-1 px-2.5 py-1.5 rounded-md bg-white border border-slate-300 hover:bg-slate-100 text-slate-700 text-xs font-semibold transition-colors cursor-pointer"
             >
               <Eraser className="w-3.5 h-3.5 text-amber-600" />
               <span>Clear</span>
-            </button>
-            <button
-              type="button"
-              onClick={handlePrintTransactions}
-              className="inline-flex items-center gap-1.5 px-4 py-1.5 rounded-md bg-white border border-slate-300 hover:bg-slate-100 text-slate-700 text-xs font-semibold transition-colors cursor-pointer"
-            >
-              <Printer className="w-3.5 h-3.5 text-slate-700" />
-              <span>Print</span>
             </button>
           </div>
         </form>
@@ -812,7 +1255,7 @@ const DashboardHomeInner: React.FC<DashboardHomeProps> = ({
       </div>
 
       {/* Bottom Split: Paginated Transaction Records + Collapsible Quick Actions */}
-      <div ref={txSectionRef} className="grid grid-cols-1 lg:grid-cols-12 gap-4 items-start scroll-mt-20">
+      <div className="grid grid-cols-1 lg:grid-cols-12 gap-4 items-start">
         <div
           className={`${
             quickActionsOpen ? 'lg:col-span-9' : 'lg:col-span-12'
@@ -962,6 +1405,8 @@ const DashboardHomeInner: React.FC<DashboardHomeProps> = ({
           </div>
         )}
       </div>
+      </div>
+      )}
     </div>
   );
 };

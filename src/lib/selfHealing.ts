@@ -643,8 +643,9 @@ export async function runAiDeepFormulaAndBugRepair(params: {
     logisticsInvoices?: Array<Record<string, unknown>>;
   };
   persistCollectionPatch?: (collection: string, docId: string, patch: Record<string, unknown>) => Promise<void> | void;
+  allowOnlineAi?: boolean;
 }): Promise<AiDoctorReport> {
-  const { allData, trigger, activeFy, persistCollectionPatch } = params;
+  const { allData, trigger, activeFy, persistCollectionPatch, allowOnlineAi = false } = params;
   const fixesAppliedEn: string[] = [];
   const fixesAppliedBn: string[] = [];
   const remainingAnomalies: string[] = [];
@@ -796,55 +797,57 @@ export async function runAiDeepFormulaAndBugRepair(params: {
 
   let report: AiDoctorReport | null = null;
 
-  try {
-    const resp = await fetch('/api/gemini/system-doctor', {
-      method: 'POST',
-      headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify({
-        divisionMetrics,
-        formulaFixesApplied: fixesAppliedEn,
-        remainingAnomalies,
-        runtimeErrors,
-        activeFy,
-      }),
-    });
-    if (resp.ok) {
-      const json = (await resp.json()) as {
-        data?: {
-          healthScore?: number;
-          statusLabel?: string;
-          summaryEn?: string;
-          summaryBn?: string;
-          fixesAppliedEn?: string[];
-          fixesAppliedBn?: string[];
-          recommendationsEn?: string[];
-          recommendationsBn?: string[];
+  if (allowOnlineAi) {
+    try {
+      const resp = await fetch('/api/gemini/system-doctor', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({
+          divisionMetrics,
+          formulaFixesApplied: fixesAppliedEn,
+          remainingAnomalies,
+          runtimeErrors,
+          activeFy,
+        }),
+      });
+      if (resp.ok) {
+        const json = (await resp.json()) as {
+          data?: {
+            healthScore?: number;
+            statusLabel?: string;
+            summaryEn?: string;
+            summaryBn?: string;
+            fixesAppliedEn?: string[];
+            fixesAppliedBn?: string[];
+            recommendationsEn?: string[];
+            recommendationsBn?: string[];
+          };
         };
-      };
-      if (json.data) {
-        report = {
-          ranAt: Date.now(),
-          trigger,
-          healthScore: Number(json.data.healthScore ?? 98),
-          statusLabel: json.data.statusLabel || (repairedCount > 0 ? 'Auto-Healed' : '100% Error-Free'),
-          usedGemini: true,
-          repairedCount,
-          runtimeErrorsCaptured: runtimeErrors.length,
-          summaryEn: json.data.summaryEn || fixesAppliedEn[0],
-          summaryBn: json.data.summaryBn || fixesAppliedBn[0],
-          fixesAppliedEn: json.data.fixesAppliedEn?.length ? json.data.fixesAppliedEn : fixesAppliedEn,
-          fixesAppliedBn: json.data.fixesAppliedBn?.length ? json.data.fixesAppliedBn : fixesAppliedBn,
-          recommendationsEn: json.data.recommendationsEn || remainingAnomalies,
-          recommendationsBn:
-            json.data.recommendationsBn ||
-            (contactIssues.length > 0
-              ? [`${contactIssues.length}টি পার্টির GSTIN / PAN / ফোন নম্বর মাস্টার শীটে আপডেট করুন।`]
-              : ['সব সিস্টেম সুরক্ষিত রয়েছে — নিয়মিত Google Drive ব্যাকআপ চালু রাখুন।']),
-        };
+        if (json.data) {
+          report = {
+            ranAt: Date.now(),
+            trigger,
+            healthScore: Number(json.data.healthScore ?? 98),
+            statusLabel: json.data.statusLabel || (repairedCount > 0 ? 'Auto-Healed' : '100% Error-Free'),
+            usedGemini: true,
+            repairedCount,
+            runtimeErrorsCaptured: runtimeErrors.length,
+            summaryEn: json.data.summaryEn || fixesAppliedEn[0],
+            summaryBn: json.data.summaryBn || fixesAppliedBn[0],
+            fixesAppliedEn: json.data.fixesAppliedEn?.length ? json.data.fixesAppliedEn : fixesAppliedEn,
+            fixesAppliedBn: json.data.fixesAppliedBn?.length ? json.data.fixesAppliedBn : fixesAppliedBn,
+            recommendationsEn: json.data.recommendationsEn || remainingAnomalies,
+            recommendationsBn:
+              json.data.recommendationsBn ||
+              (contactIssues.length > 0
+                ? [`${contactIssues.length}টি পার্টির GSTIN / PAN / ফোন নম্বর মাস্টার শীটে আপডেট করুন।`]
+                : ['সব সিস্টেম সুরক্ষিত রয়েছে — নিয়মিত Google Drive ব্যাকআপ চালু রাখুন।']),
+          };
+        }
       }
+    } catch {
+      // Offline deterministic fallback below
     }
-  } catch {
-    // Offline deterministic fallback below
   }
 
   if (!report) {

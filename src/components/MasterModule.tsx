@@ -8,16 +8,20 @@ import {
   Edit3,
   Eye,
   FileText,
+  Lock,
   Mail,
   MessageSquare,
   Plus,
   Printer,
   Save,
+  ScanLine,
   Search,
+  Share2,
   ShieldCheck,
   Sparkles,
   Trash2,
   Truck,
+  Unlock,
   Upload,
   Usb,
   UserCheck,
@@ -41,7 +45,11 @@ import { daysUntilDate, formatDateDDMMYYYY, formatINR, makeSafeDocId, normalizeF
 import { bulkUpsertDocuments, removeDocument, upsertDocument } from '../lib/firestoreStore';
 import { scanPartiesForContactIssues, validateAndNormalizeContact } from '../lib/selfHealing';
 import { playAlertBeep, playVerifiedBeep } from '../lib/audioFeedback';
-import { validateIndianGstin } from '../lib/gstinValidator';
+import {
+  GST_STATE_CODE_OPTIONS,
+  inferGstStateCodeAndName,
+  validateIndianGstin,
+} from '../lib/gstinValidator';
 import { GstinInputField } from './GstinInputField';
 import {
   analyzeAndSeparateMisclassifiedParties,
@@ -99,6 +107,9 @@ interface MasterModuleProps {
   transactions?: TransactionRecord[];
   company?: CompanySettings;
   initialTab?: MasterTabId;
+  initialEditParty?: Party | null;
+  onClearInitialEditParty?: () => void;
+  onOpenPodScanner?: () => void;
   onPreviewPdf?: (pdf: GeneratedPdfResult, folder: DriveFolderName) => void;
   onShowConfirm: (opts: {
     title: string;
@@ -156,6 +167,9 @@ const MasterModuleInner: React.FC<MasterModuleProps> = ({
   transactions = [],
   company,
   initialTab = 'parties',
+  initialEditParty = null,
+  onClearInitialEditParty,
+  onOpenPodScanner,
   onPreviewPdf,
   onShowConfirm,
 }) => {
@@ -193,19 +207,29 @@ const MasterModuleInner: React.FC<MasterModuleProps> = ({
 
   // General Party form + Inline Edit state
   const [editingPartyId, setEditingPartyId] = useState<string | null>(null);
+  const [pCode, setPCode] = useState('');
   const [pName, setPName] = useState('');
   const [pType, setPType] = useState<Party['partyType']>('Customer');
   const [pAddr, setPAddr] = useState('');
+  const [pCity, setPCity] = useState('');
   const [pPinCode, setPPinCode] = useState('');
   const [pCountry, setPCountry] = useState<SupportedCountry>('India');
+  const [pStateCode, setPStateCode] = useState('19');
+  const [pStateName, setPStateName] = useState('West Bengal');
   const [pGstin, setPGstin] = useState('');
   const [pPan, setPPan] = useState('');
   const [pPhone, setPPhone] = useState('');
   const [pEmail, setPEmail] = useState('');
+  const [pContactPerson, setPContactPerson] = useState('');
   const [pPreferredChannel, setPPreferredChannel] = useState<'WhatsApp Only' | 'Email Only' | 'Both'>('WhatsApp Only');
   const [pContactWarn, setPContactWarn] = useState<string | null>(null);
   const [pOpening, setPOpening] = useState('0');
   const [pBalType, setPBalType] = useState<'Dr' | 'Cr'>('Dr');
+
+  const [blockLocks, setBlockLocks] = useState<Record<'owners' | 'brokers' | 'vehicles' | 'drivers', boolean>>(() => {
+    const locked = Boolean(effectiveCompany.autoLockMasterBlocks);
+    return { owners: locked, brokers: locked, vehicles: locked, drivers: locked };
+  });
 
   const contactHealth = useMemo(() => scanPartiesForContactIssues(parties), [parties]);
 
@@ -254,6 +278,8 @@ const MasterModuleInner: React.FC<MasterModuleProps> = ({
   const [vFit, setVFit] = useState('');
   const [vIns, setVIns] = useState('');
   const [vPermit, setVPermit] = useState('');
+  const [vNatPermit, setVNatPermit] = useState('');
+  const [vRc, setVRc] = useState('');
   const [vRoadTax, setVRoadTax] = useState('');
   const [vPuc, setVPuc] = useState('');
 
@@ -411,15 +437,20 @@ const MasterModuleInner: React.FC<MasterModuleProps> = ({
     setEditingPartyId(null);
     setPickerPartyId('');
     setPickerPartyText('');
+    setPCode('');
     setPName('');
     setPType('Customer');
     setPAddr('');
+    setPCity('');
     setPPinCode('');
     setPCountry('India');
+    setPStateCode('19');
+    setPStateName('West Bengal');
     setPGstin('');
     setPPan('');
     setPPhone('');
     setPEmail('');
+    setPContactPerson('');
     setPPreferredChannel('WhatsApp Only');
     setPOpening('0');
     setPBalType('Dr');
@@ -430,15 +461,21 @@ const MasterModuleInner: React.FC<MasterModuleProps> = ({
     setEditingPartyId(p.id);
     setPickerPartyId(p.id);
     setPickerPartyText(p.name);
+    setPCode(p.partyCode || '');
     setPName(p.name || '');
     setPType(p.partyType || 'Customer');
     setPAddr(p.address || '');
+    setPCity(p.city || extractCityFromAddress(p.address) || '');
     setPPinCode(p.pinCode || '');
     setPCountry((p.country as SupportedCountry) || 'India');
+    const inferred = inferGstStateCodeAndName({ gstin: p.gstin || '', address: p.address || '' });
+    setPStateCode(p.gstStateCode || p.stateCode || inferred.code || '19');
+    setPStateName(p.gstStateName || p.stateName || inferred.name || 'West Bengal');
     setPGstin(p.gstin || '');
     setPPan(p.pan || '');
     setPPhone(p.phone || '');
     setPEmail(p.email || '');
+    setPContactPerson(p.contactPerson || '');
     setPPreferredChannel(
       (p.preferredChannel as 'WhatsApp Only' | 'Email Only' | 'Both') || 'WhatsApp Only'
     );
@@ -446,6 +483,14 @@ const MasterModuleInner: React.FC<MasterModuleProps> = ({
     setPBalType(p.balanceType || 'Dr');
     setPContactWarn(null);
   };
+
+  useEffect(() => {
+    if (!initialEditParty) return;
+    setTab('parties');
+    loadPartyForEdit(initialEditParty);
+    onClearInitialEditParty?.();
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [initialEditParty]);
 
   const resetOwnerForm = () => {
     setEditingOwnerId(null);
@@ -539,6 +584,8 @@ const MasterModuleInner: React.FC<MasterModuleProps> = ({
     setVFit('');
     setVIns('');
     setVPermit('');
+    setVNatPermit('');
+    setVRc('');
     setVRoadTax('');
     setVPuc('');
     setVKycImg('');
@@ -560,6 +607,8 @@ const MasterModuleInner: React.FC<MasterModuleProps> = ({
     setVFit(v.fitnessExpiry || '');
     setVIns(v.insuranceExpiry || '');
     setVPermit(v.permitExpiry || '');
+    setVNatPermit(v.nationalPermitExpiry || '');
+    setVRc(v.rcExpiry || '');
     setVRoadTax(v.roadTaxExpiry || '');
     setVPuc(v.pucExpiry || '');
   };
@@ -646,19 +695,28 @@ const MasterModuleInner: React.FC<MasterModuleProps> = ({
     const op = Number(pOpening) || 0;
     const targetId = editingPartyId || makeSafeDocId('party');
     const isNew = !editingPartyId;
+    const inferredState = inferGstStateCodeAndName({ gstin: guard.normalizedGstin, address: pAddr.trim() });
+    const finalStateCode = (pStateCode || inferredState.code || '').trim();
+    const matchedStateOpt = GST_STATE_CODE_OPTIONS.find((s) => s.code === finalStateCode);
+    const finalStateName = pStateName.trim() || matchedStateOpt?.name || inferredState.name || '';
     await upsertDocument(
       'parties',
       targetId,
       {
+        partyCode: pCode.trim().toUpperCase(),
         name: pName.trim(),
         partyType: pType,
         address: pAddr.trim(),
+        city: (pCity.trim() || extractCityFromAddress(pAddr) || '').trim(),
         pinCode: pPinCode.trim(),
         country: pCountry,
+        gstStateCode: finalStateCode,
+        gstStateName: finalStateName,
         gstin: guard.normalizedGstin,
         pan: guard.normalizedPan,
         phone: guard.normalizedPhone,
         email: guard.normalizedEmail,
+        contactPerson: pContactPerson.trim(),
         preferredChannel: pPreferredChannel,
         openingBalance: op,
         currentBalance: op,
@@ -780,6 +838,8 @@ const MasterModuleInner: React.FC<MasterModuleProps> = ({
         fitnessExpiry: vFit,
         insuranceExpiry: vIns,
         permitExpiry: vPermit,
+        nationalPermitExpiry: vNatPermit,
+        rcExpiry: vRc,
         roadTaxExpiry: vRoadTax,
         pucExpiry: vPuc,
         ownerUid,
@@ -852,6 +912,7 @@ const MasterModuleInner: React.FC<MasterModuleProps> = ({
         fileOrDataUrl: enhanced.dataUrl,
         entityRole: role,
         onStatus: (m) => setKycScanStatus(m),
+        allowOnlineAi: Boolean(company?.backgroundAiEnabled),
       });
 
       let populatedCount = 0;
@@ -1629,9 +1690,59 @@ const MasterModuleInner: React.FC<MasterModuleProps> = ({
     else downloadPdfDirect(pdf);
   };
 
+  const handlePartyMasterAction = async (
+    action: 'preview' | 'print' | 'download' | 'share'
+  ) => {
+    const pdf = await generateFoxproStatementPDF(
+      {
+        title: `PARTY / CUSTOMER MASTER REGISTER (${filteredParties.length})`,
+        subtitle: `Financial Year: ${activeFy} · Printed ${formatDateDDMMYYYY(todayISO())}`,
+        fileName: `DRC_Party_Master_${activeFy.replace(/\s+/g, '_')}.pdf`,
+        orientation: 'l',
+        columns: [
+          { label: 'PARTY NAME', widthPct: 30, align: 'left' },
+          { label: 'TYPE', widthPct: 12, align: 'left' },
+          { label: 'GSTIN / PAN', widthPct: 20, align: 'left' },
+          { label: 'PHONE', widthPct: 14, align: 'left' },
+          { label: 'CITY / STATE', widthPct: 12, align: 'left' },
+          { label: 'BALANCE', widthPct: 12, align: 'right' },
+        ],
+        rows: filteredParties.slice(0, 500).map((p) => ({
+          line1: [
+            p.name,
+            p.partyType,
+            `${p.gstin || '-'} / ${p.pan || '-'}`,
+            p.phone || '-',
+            p.city || p.stateName || '-',
+            `${formatINR(p.currentBalance)} ${p.balanceType}`,
+          ],
+        })),
+      },
+      effectiveCompany,
+      'l'
+    );
+    if (action === 'preview' && onPreviewPdf) {
+      onPreviewPdf(pdf, 'Reports_Ledgers');
+    } else if (action === 'print') {
+      printPdfDirect(pdf);
+    } else if (action === 'share') {
+      const shareRes = await sharePdfDirect({
+        pdf,
+        channel: 'whatsapp',
+        partyName: pName || 'Party Master Register',
+        docNo: activeFy,
+        docLabel: 'Party Master Register',
+        company: effectiveCompany,
+      });
+      setStatusMsg(shareRes.message);
+    } else {
+      downloadPdfDirect(pdf);
+    }
+  };
+
   const handleSheetAction = async (
     sheetKind: 'drivers' | 'owners' | 'brokers' | 'vehicles',
-    action: 'preview' | 'print' | 'download',
+    action: 'preview' | 'print' | 'download' | 'share',
     singleProfileId?: string
   ) => {
     const pdf = await buildSheetPdf(sheetKind, singleProfileId);
@@ -1639,6 +1750,16 @@ const MasterModuleInner: React.FC<MasterModuleProps> = ({
       onPreviewPdf(pdf, 'Reports_Ledgers');
     } else if (action === 'print') {
       printPdfDirect(pdf);
+    } else if (action === 'share') {
+      const shareRes = await sharePdfDirect({
+        pdf,
+        channel: 'whatsapp',
+        partyName: `DRC ${sheetKind.toUpperCase()} Master`,
+        docNo: activeFy,
+        docLabel: `${sheetKind.toUpperCase()} Master Sheet`,
+        company: effectiveCompany,
+      });
+      setStatusMsg(shareRes.message);
     } else {
       downloadPdfDirect(pdf);
     }
@@ -1646,29 +1767,66 @@ const MasterModuleInner: React.FC<MasterModuleProps> = ({
 
   const renderTopRightSheetButtons = (sheetKind: 'drivers' | 'owners' | 'brokers' | 'vehicles') => (
     <div className="flex flex-wrap items-center gap-1.5">
+      {!readOnly && (
+        <button
+          type="button"
+          onClick={() => {
+            if (sheetKind === 'owners' && ownersList[0]) loadOwnerForEdit(ownersList[0]);
+            else if (sheetKind === 'brokers' && brokersList[0]) loadBrokerForEdit(brokersList[0]);
+            else if (sheetKind === 'vehicles' && vehicles[0]) loadVehicleForEdit(vehicles[0]);
+            else if (sheetKind === 'drivers' && drivers[0]) loadDriverForEdit(drivers[0]);
+          }}
+          className="inline-flex items-center gap-1 px-2 py-1 rounded bg-amber-100 hover:bg-amber-200 text-amber-950 text-[11px] font-bold cursor-pointer whitespace-nowrap"
+        >
+          <Edit3 className="w-3 h-3" />
+          Rectify
+        </button>
+      )}
       <button
         type="button"
         onClick={() => void handleSheetAction(sheetKind, 'preview')}
-        className="inline-flex items-center gap-1 px-2.5 py-1 rounded bg-white/15 hover:bg-white/25 text-white text-[11px] font-bold cursor-pointer whitespace-nowrap"
+        className="inline-flex items-center gap-1 px-2 py-1 rounded bg-white text-[#0D47A1] hover:bg-blue-50 text-[11px] font-bold cursor-pointer whitespace-nowrap"
       >
         <Eye className="w-3.5 h-3.5" />
-        Print Preview
+        Preview
       </button>
       <button
         type="button"
-        onClick={() => void handleSheetAction(sheetKind, 'print')}
-        className="inline-flex items-center gap-1 px-2.5 py-1 rounded bg-amber-500 hover:bg-amber-600 text-white text-[11px] font-bold cursor-pointer whitespace-nowrap"
+        onClick={() => {
+          if (onOpenPodScanner) {
+            onOpenPodScanner();
+          } else {
+            kycFileInputRef.current?.click();
+          }
+        }}
+        className="inline-flex items-center gap-1 px-2 py-1 rounded bg-amber-400 hover:bg-amber-300 text-slate-950 text-[11px] font-extrabold cursor-pointer whitespace-nowrap"
       >
-        <Printer className="w-3.5 h-3.5" />
-        Print Out
+        <ScanLine className="w-3.5 h-3.5" />
+        Scan
       </button>
       <button
         type="button"
         onClick={() => void handleSheetAction(sheetKind, 'download')}
-        className="inline-flex items-center gap-1 px-2.5 py-1 rounded bg-emerald-600 hover:bg-emerald-700 text-white text-[11px] font-bold cursor-pointer whitespace-nowrap"
+        className="inline-flex items-center gap-1 px-2 py-1 rounded bg-emerald-600 hover:bg-emerald-700 text-white text-[11px] font-bold cursor-pointer whitespace-nowrap"
       >
         <Download className="w-3.5 h-3.5" />
-        Download PDF
+        Low-KB PDF
+      </button>
+      <button
+        type="button"
+        onClick={() => void handleSheetAction(sheetKind, 'print')}
+        className="inline-flex items-center gap-1 px-2 py-1 rounded bg-white/15 hover:bg-white/25 text-white text-[11px] font-bold cursor-pointer whitespace-nowrap"
+      >
+        <Printer className="w-3.5 h-3.5" />
+        Manual Print
+      </button>
+      <button
+        type="button"
+        onClick={() => void handleSheetAction(sheetKind, 'share')}
+        className="inline-flex items-center gap-1 px-2 py-1 rounded bg-green-600 hover:bg-green-700 text-white text-[11px] font-bold cursor-pointer whitespace-nowrap"
+      >
+        <Share2 className="w-3.5 h-3.5" />
+        Share
       </button>
     </div>
   );
@@ -2286,6 +2444,62 @@ const MasterModuleInner: React.FC<MasterModuleProps> = ({
         </div>
       </div>
 
+      {/* Unified Master Sequence Strip + Auto-Lock Sheet Control */}
+      <div className="bg-blue-50/80 border border-blue-200 rounded-xl px-3.5 py-2 flex flex-wrap items-center justify-between gap-2 text-xs">
+        <div className="flex flex-wrap items-center gap-1.5">
+          <span className="font-extrabold text-blue-950 mr-1">Unified Master Chain:</span>
+          {([
+            { id: 'owners', label: '1. Lorry Owner' },
+            { id: 'drivers', label: '2. Driver' },
+            { id: 'vehicles', label: '3. Vehicles' },
+            { id: 'brokers', label: '4. Broker' },
+          ] as Array<{ id: 'owners' | 'drivers' | 'vehicles' | 'brokers'; label: string }>).map((step, idx) => (
+            <React.Fragment key={step.id}>
+              {idx > 0 && <span className="text-slate-400 font-bold">&rarr;</span>}
+              <button
+                type="button"
+                onClick={() => setTab(step.id)}
+                className={`px-2 py-0.5 rounded font-bold cursor-pointer ${
+                  tab === step.id
+                    ? 'bg-[#0D47A1] text-white'
+                    : 'bg-white border border-blue-200 text-blue-900 hover:bg-blue-100'
+                }`}
+              >
+                {step.label}
+              </button>
+            </React.Fragment>
+          ))}
+        </div>
+        {tab !== 'parties' && (
+          <button
+            type="button"
+            onClick={() =>
+              setBlockLocks((prev) => ({
+                ...prev,
+                [tab]: !prev[tab as 'owners' | 'brokers' | 'vehicles' | 'drivers'],
+              }))
+            }
+            className={`inline-flex items-center gap-1.5 px-2.5 py-1 rounded font-extrabold cursor-pointer ${
+              blockLocks[tab as 'owners' | 'brokers' | 'vehicles' | 'drivers']
+                ? 'bg-amber-100 border border-amber-300 text-amber-900 hover:bg-amber-200'
+                : 'bg-emerald-100 border border-emerald-300 text-emerald-900 hover:bg-emerald-200'
+            }`}
+          >
+            {blockLocks[tab as 'owners' | 'brokers' | 'vehicles' | 'drivers'] ? (
+              <>
+                <Lock className="w-3.5 h-3.5" />
+                Auto-Locked &middot; Click to Unlock
+              </>
+            ) : (
+              <>
+                <Unlock className="w-3.5 h-3.5" />
+                Unlocked &middot; Click to Auto-Lock
+              </>
+            )}
+          </button>
+        )}
+      </div>
+
       {statusMsg && (
         <div className="px-4 py-2 rounded-lg bg-emerald-50 border border-emerald-200 text-emerald-900 text-xs font-bold flex items-center justify-between gap-2">
           <span className="inline-flex items-center gap-1.5">
@@ -2468,10 +2682,58 @@ const MasterModuleInner: React.FC<MasterModuleProps> = ({
               <span>
                 {editingPartyId ? `Edit Party: ${pName}` : 'Add Party / Customer / Consignor / Consignee'}
               </span>
-              <span className="inline-flex items-center gap-1.5 text-[11px] bg-white/15 px-2.5 py-0.5 rounded">
-                <ShieldCheck className="w-3.5 h-3.5 text-emerald-300" />
-                Auto-Stable Contact Guard: {Math.max(0, parties.length - contactHealth.length)} Verified · {contactHealth.length} Flagged
-              </span>
+              <div className="flex flex-wrap items-center gap-1.5 text-[11px]">
+                <span className="inline-flex items-center gap-1 bg-white/15 px-2 py-0.5 rounded">
+                  <ShieldCheck className="w-3.5 h-3.5 text-emerald-300" />
+                  {Math.max(0, parties.length - contactHealth.length)} Verified
+                </span>
+                {!readOnly && parties[0] && (
+                  <button
+                    type="button"
+                    onClick={() => loadPartyForEdit(parties[0])}
+                    className="inline-flex items-center gap-1 px-2 py-1 rounded bg-amber-100 hover:bg-amber-200 text-amber-950 font-bold cursor-pointer"
+                  >
+                    <Edit3 className="w-3 h-3" /> Rectify
+                  </button>
+                )}
+                <button
+                  type="button"
+                  onClick={() => void handlePartyMasterAction('preview')}
+                  className="inline-flex items-center gap-1 px-2 py-1 rounded bg-white text-[#0D47A1] hover:bg-blue-50 font-bold cursor-pointer"
+                >
+                  <Eye className="w-3 h-3" /> Preview
+                </button>
+                {onOpenPodScanner && (
+                  <button
+                    type="button"
+                    onClick={onOpenPodScanner}
+                    className="inline-flex items-center gap-1 px-2 py-1 rounded bg-amber-400 hover:bg-amber-300 text-slate-950 font-extrabold cursor-pointer"
+                  >
+                    <ScanLine className="w-3 h-3" /> Scan
+                  </button>
+                )}
+                <button
+                  type="button"
+                  onClick={() => void handlePartyMasterAction('download')}
+                  className="inline-flex items-center gap-1 px-2 py-1 rounded bg-emerald-600 hover:bg-emerald-700 text-white font-bold cursor-pointer"
+                >
+                  <Download className="w-3 h-3" /> Low-KB PDF
+                </button>
+                <button
+                  type="button"
+                  onClick={() => void handlePartyMasterAction('print')}
+                  className="inline-flex items-center gap-1 px-2 py-1 rounded bg-white/15 hover:bg-white/25 text-white font-bold cursor-pointer"
+                >
+                  <Printer className="w-3 h-3" /> Manual Print
+                </button>
+                <button
+                  type="button"
+                  onClick={() => void handlePartyMasterAction('share')}
+                  className="inline-flex items-center gap-1 px-2 py-1 rounded bg-green-600 hover:bg-green-700 text-white font-bold cursor-pointer"
+                >
+                  <Share2 className="w-3 h-3" /> Share
+                </button>
+              </div>
             </div>
             {pContactWarn && (
               <div className="mx-4 mt-3 px-3 py-2 rounded-lg bg-red-50 border border-red-300 text-xs font-bold text-red-800 flex items-center gap-2">
@@ -2480,6 +2742,16 @@ const MasterModuleInner: React.FC<MasterModuleProps> = ({
               </div>
             )}
             <div className="p-4 grid grid-cols-1 md:grid-cols-4 gap-3 text-xs">
+              <div>
+                <label className="block font-semibold text-slate-700 mb-1">Party Code</label>
+                <input
+                  type="text"
+                  value={pCode}
+                  onChange={(e) => setPCode(e.target.value.toUpperCase())}
+                  placeholder="PTY-001"
+                  className="w-full px-2.5 py-1.5 rounded border border-slate-300 font-mono-num uppercase"
+                />
+              </div>
               <div className="md:col-span-2">
                 <label className="block font-semibold text-slate-700 mb-1">Party Name *</label>
                 <input
@@ -2505,6 +2777,16 @@ const MasterModuleInner: React.FC<MasterModuleProps> = ({
                     { value: 'Vendor', label: 'Vendor / Fuel' },
                   ]}
                   triggerClassName="!py-1.5"
+                />
+              </div>
+              <div>
+                <label className="block font-semibold text-slate-700 mb-1">Contact Person</label>
+                <input
+                  type="text"
+                  value={pContactPerson}
+                  onChange={(e) => setPContactPerson(e.target.value)}
+                  placeholder="Account / Dispatch Head"
+                  className="w-full px-2.5 py-1.5 rounded border border-slate-300"
                 />
               </div>
               <div>
@@ -2565,11 +2847,21 @@ const MasterModuleInner: React.FC<MasterModuleProps> = ({
                 />
               </div>
               <div className="md:col-span-2">
-                <label className="block font-semibold text-slate-700 mb-1">Address / City (Auto-fills PIN &amp; Country)</label>
+                <label className="block font-semibold text-slate-700 mb-1">Address (Auto-fills PIN &amp; Country)</label>
                 <input
                   type="text"
                   value={pAddr}
-                  onChange={(e) => setPAddr(e.target.value)}
+                  onChange={(e) => {
+                    const nextAddr = e.target.value;
+                    setPAddr(nextAddr);
+                    if (!pGstin.trim()) {
+                      const inf = inferGstStateCodeAndName({ address: nextAddr });
+                      if (inf.code) {
+                        setPStateCode(inf.code);
+                        setPStateName(inf.name);
+                      }
+                    }
+                  }}
                   placeholder="e.g. Baranagar, Kolkata / Petrapole / Dhaka / Birgunj / Thimphu"
                   className="w-full px-2.5 py-1.5 rounded border border-slate-300"
                 />
@@ -2583,10 +2875,44 @@ const MasterModuleInner: React.FC<MasterModuleProps> = ({
                 />
               </div>
               <div>
+                <label className="block font-semibold text-slate-700 mb-1">City / Town</label>
+                <input
+                  type="text"
+                  value={pCity}
+                  onChange={(e) => setPCity(e.target.value)}
+                  placeholder="Kolkata / Siliguri"
+                  className="w-full px-2.5 py-1.5 rounded border border-slate-300"
+                />
+              </div>
+              <div>
+                <label className="block font-semibold text-slate-700 mb-1">GST State Code (01–38)</label>
+                <SearchableSelect
+                  ariaLabel="Party GST State Code"
+                  value={pStateCode}
+                  onChange={(code) => {
+                    setPStateCode(code);
+                    const opt = GST_STATE_CODE_OPTIONS.find((s) => s.code === code);
+                    setPStateName(opt?.name || '');
+                  }}
+                  options={GST_STATE_CODE_OPTIONS.map((s) => ({
+                    value: s.code,
+                    label: s.label,
+                  }))}
+                  triggerClassName="!py-1.5 !font-mono-num"
+                />
+              </div>
+              <div>
                 <GstinInputField
                   label="GSTIN"
                   value={pGstin}
-                  onChange={setPGstin}
+                  onChange={(val) => {
+                    setPGstin(val);
+                    const inf = inferGstStateCodeAndName({ gstin: val, address: pAddr });
+                    if (inf.code) {
+                      setPStateCode(inf.code);
+                      setPStateName(inf.name);
+                    }
+                  }}
                   placeholder="15-char GSTIN (optional)"
                 />
               </div>
@@ -2718,6 +3044,22 @@ const MasterModuleInner: React.FC<MasterModuleProps> = ({
               {renderTopRightSheetButtons('owners')}
             </div>
             {renderKycScanToolbar('Lorry Owner')}
+            {blockLocks.owners && (
+              <div className="mx-4 mt-3 px-3 py-2 rounded-lg bg-amber-50 border border-amber-300 text-amber-900 text-xs font-bold flex items-center justify-between gap-2">
+                <span className="inline-flex items-center gap-1.5">
+                  <Lock className="w-3.5 h-3.5 text-amber-700" />
+                  Lorry Owner Block Auto-Locked to prevent accidental edits.
+                </span>
+                <button
+                  type="button"
+                  onClick={() => setBlockLocks((prev) => ({ ...prev, owners: false }))}
+                  className="px-2.5 py-1 rounded bg-amber-600 hover:bg-amber-700 text-white text-[11px] font-bold cursor-pointer"
+                >
+                  Unlock to Edit
+                </button>
+              </div>
+            )}
+            <fieldset disabled={readOnly || blockLocks.owners} className="contents">
             <div className="p-4 grid grid-cols-1 md:grid-cols-4 gap-3 text-xs">
               <div>
                 <label className="block font-semibold text-slate-700 mb-1">Owner Name *</label>
@@ -2834,13 +3176,14 @@ const MasterModuleInner: React.FC<MasterModuleProps> = ({
               )}
               <button
                 type="submit"
-                disabled={readOnly}
+                disabled={readOnly || blockLocks.owners}
                 className="inline-flex items-center gap-1.5 px-4 py-1.5 rounded-md bg-blue-700 hover:bg-blue-800 text-white text-xs font-bold cursor-pointer disabled:opacity-50"
               >
                 <Save className="w-3.5 h-3.5" />
                 {editingOwnerId ? 'Update Lorry Owner' : 'Save Lorry Owner'}
               </button>
             </div>
+            </fieldset>
           </form>
 
           <div className="bg-white rounded-xl border border-slate-200 shadow-sm overflow-hidden">
@@ -2919,6 +3262,22 @@ const MasterModuleInner: React.FC<MasterModuleProps> = ({
               {renderTopRightSheetButtons('brokers')}
             </div>
             {renderKycScanToolbar('Broker')}
+            {blockLocks.brokers && (
+              <div className="mx-4 mt-3 px-3 py-2 rounded-lg bg-amber-50 border border-amber-300 text-amber-900 text-xs font-bold flex items-center justify-between gap-2">
+                <span className="inline-flex items-center gap-1.5">
+                  <Lock className="w-3.5 h-3.5 text-amber-700" />
+                  Broker Block Auto-Locked to prevent accidental edits.
+                </span>
+                <button
+                  type="button"
+                  onClick={() => setBlockLocks((prev) => ({ ...prev, brokers: false }))}
+                  className="px-2.5 py-1 rounded bg-amber-600 hover:bg-amber-700 text-white text-[11px] font-bold cursor-pointer"
+                >
+                  Unlock to Edit
+                </button>
+              </div>
+            )}
+            <fieldset disabled={readOnly || blockLocks.brokers} className="contents">
             <div className="p-4 grid grid-cols-1 md:grid-cols-4 gap-3 text-xs">
               <div>
                 <label className="block font-semibold text-slate-700 mb-1">Broker Name *</label>
@@ -3046,13 +3405,14 @@ const MasterModuleInner: React.FC<MasterModuleProps> = ({
               )}
               <button
                 type="submit"
-                disabled={readOnly}
+                disabled={readOnly || blockLocks.brokers}
                 className="inline-flex items-center gap-1.5 px-4 py-1.5 rounded-md bg-blue-700 hover:bg-blue-800 text-white text-xs font-bold cursor-pointer disabled:opacity-50"
               >
                 <Save className="w-3.5 h-3.5" />
                 {editingBrokerId ? 'Update Broker' : 'Save Broker'}
               </button>
             </div>
+            </fieldset>
           </form>
 
           <div className="bg-white rounded-xl border border-slate-200 shadow-sm overflow-hidden">
@@ -3129,6 +3489,22 @@ const MasterModuleInner: React.FC<MasterModuleProps> = ({
               {renderTopRightSheetButtons('vehicles')}
             </div>
             {renderKycScanToolbar('Vehicle')}
+            {blockLocks.vehicles && (
+              <div className="mx-4 mt-3 px-3 py-2 rounded-lg bg-amber-50 border border-amber-300 text-amber-900 text-xs font-bold flex items-center justify-between gap-2">
+                <span className="inline-flex items-center gap-1.5">
+                  <Lock className="w-3.5 h-3.5 text-amber-700" />
+                  Lorry Register Block Auto-Locked to prevent accidental edits.
+                </span>
+                <button
+                  type="button"
+                  onClick={() => setBlockLocks((prev) => ({ ...prev, vehicles: false }))}
+                  className="px-2.5 py-1 rounded bg-amber-600 hover:bg-amber-700 text-white text-[11px] font-bold cursor-pointer"
+                >
+                  Unlock to Edit
+                </button>
+              </div>
+            )}
+            <fieldset disabled={readOnly || blockLocks.vehicles} className="contents">
             <div className="p-4 grid grid-cols-1 md:grid-cols-4 gap-3 text-xs">
               <div>
                 <label className="block font-semibold text-slate-700 mb-1">Truck No *</label>
@@ -3262,6 +3638,24 @@ const MasterModuleInner: React.FC<MasterModuleProps> = ({
                   className="w-full px-2.5 py-1.5 rounded border border-slate-300 font-mono-num"
                 />
               </div>
+              <div>
+                <label className="block font-semibold text-slate-700 mb-1">RC Expiry</label>
+                <input
+                  type="date"
+                  value={vRc}
+                  onChange={(e) => setVRc(e.target.value)}
+                  className="w-full px-2.5 py-1.5 rounded border border-slate-300 font-mono-num"
+                />
+              </div>
+              <div>
+                <label className="block font-semibold text-slate-700 mb-1">National Permit Expiry</label>
+                <input
+                  type="date"
+                  value={vNatPermit}
+                  onChange={(e) => setVNatPermit(e.target.value)}
+                  className="w-full px-2.5 py-1.5 rounded border border-slate-300 font-mono-num"
+                />
+              </div>
             </div>
             <div className="px-4 py-3 bg-slate-50 border-t border-slate-200 flex justify-end gap-2">
               {editingVehicleId && (
@@ -3275,13 +3669,14 @@ const MasterModuleInner: React.FC<MasterModuleProps> = ({
               )}
               <button
                 type="submit"
-                disabled={readOnly}
+                disabled={readOnly || blockLocks.vehicles}
                 className="inline-flex items-center gap-1.5 px-4 py-1.5 rounded-md bg-blue-700 hover:bg-blue-800 text-white text-xs font-bold cursor-pointer disabled:opacity-50"
               >
                 <Save className="w-3.5 h-3.5" />
                 {editingVehicleId ? 'Update Vehicle' : 'Save Vehicle'}
               </button>
             </div>
+            </fieldset>
           </form>
 
           <div className="bg-white rounded-xl border border-slate-200 shadow-sm overflow-hidden">
@@ -3358,6 +3753,22 @@ const MasterModuleInner: React.FC<MasterModuleProps> = ({
               {renderTopRightSheetButtons('drivers')}
             </div>
             {renderKycScanToolbar('Driver')}
+            {blockLocks.drivers && (
+              <div className="mx-4 mt-3 px-3 py-2 rounded-lg bg-amber-50 border border-amber-300 text-amber-900 text-xs font-bold flex items-center justify-between gap-2">
+                <span className="inline-flex items-center gap-1.5">
+                  <Lock className="w-3.5 h-3.5 text-amber-700" />
+                  Driver Block Auto-Locked to prevent accidental edits.
+                </span>
+                <button
+                  type="button"
+                  onClick={() => setBlockLocks((prev) => ({ ...prev, drivers: false }))}
+                  className="px-2.5 py-1 rounded bg-amber-600 hover:bg-amber-700 text-white text-[11px] font-bold cursor-pointer"
+                >
+                  Unlock to Edit
+                </button>
+              </div>
+            )}
+            <fieldset disabled={readOnly || blockLocks.drivers} className="contents">
             <div className="p-4 grid grid-cols-1 md:grid-cols-4 gap-3 text-xs">
               <div>
                 <label className="block font-semibold text-slate-700 mb-1">Driver Name *</label>
@@ -3475,13 +3886,14 @@ const MasterModuleInner: React.FC<MasterModuleProps> = ({
               )}
               <button
                 type="submit"
-                disabled={readOnly}
+                disabled={readOnly || blockLocks.drivers}
                 className="inline-flex items-center gap-1.5 px-4 py-1.5 rounded-md bg-blue-700 hover:bg-blue-800 text-white text-xs font-bold cursor-pointer disabled:opacity-50"
               >
                 <Save className="w-3.5 h-3.5" />
                 {editingDriverId ? 'Update Driver' : 'Save Driver'}
               </button>
             </div>
+            </fieldset>
           </form>
 
           <div className="bg-white rounded-xl border border-slate-200 shadow-sm overflow-hidden">

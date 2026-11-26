@@ -82,10 +82,17 @@ export interface StaffAccount {
 export interface Party {
   id: string;
   name: string;
+  partyCode?: string;
   partyType: 'Customer' | 'Consignor' | 'Consignee' | 'TruckOwner' | 'Broker' | 'Vendor';
   address?: string;
+  city?: string;
   pinCode?: string;
   country?: 'India' | 'Bangladesh' | 'Nepal' | 'Bhutan' | string;
+  stateCode?: string;
+  stateName?: string;
+  gstStateCode?: string;
+  gstStateName?: string;
+  contactPerson?: string;
   gstin?: string;
   pan?: string;
   aadhaarNo?: string;
@@ -118,6 +125,8 @@ export interface Vehicle {
   fitnessExpiry?: string;
   insuranceExpiry?: string;
   permitExpiry?: string;
+  nationalPermitExpiry?: string;
+  rcExpiry?: string;
   roadTaxExpiry?: string;
   pucExpiry?: string;
   ownerUid: string;
@@ -315,6 +324,10 @@ export interface ConsignmentNote {
   driverDlExpiry?: string;
   driverMobile?: string;
   deliveryModeCode?: 'P' | 'G' | 'D' | string;
+  deliveryType?: 'Door Delivery' | 'Port Delivery' | 'Party Delivery' | 'Godown Delivery' | string;
+  freightMode?: 'To Pay' | 'Paid' | 'To Be Billed' | string;
+  originGstStateCode?: string;
+  destGstStateCode?: string;
   gstPaidBy?: string;
   gstPaidByCode?: 'R' | 'E' | 'T' | string;
   riskTakenBy?: 'O' | 'C' | 'I' | string;
@@ -380,7 +393,10 @@ export interface Invoice {
   partyName: string;
   partyAddress?: string;
   partyGstin?: string;
+  partyStateCode?: string;
+  partyStateName?: string;
   partyPan?: string;
+  creditDebitReason?: string;
   billingCountry?: 'India' | 'Nepal' | 'Bangladesh' | 'Bhutan' | string;
   sac?: string;
   reverseCharge?: boolean;
@@ -424,6 +440,17 @@ export interface Invoice {
   updatedAt?: unknown;
 }
 
+export interface QuotationRouteRow {
+  slNo: number;
+  origin: string;
+  destination: string;
+  vehicleType: string;
+  loadCapacity: string;
+  freightRate: number;
+  detentionExtra: string;
+  remarks: string;
+}
+
 export interface Quotation {
   id: string;
   quotationNo: string;
@@ -456,6 +483,7 @@ export interface Quotation {
   entryPoint?: string;
   entryPointPinCode?: string;
   entryPointCountry?: string;
+  routeRates?: QuotationRouteRow[];
   branchCode?: string;
   createdByStaff?: string;
   ownerUid: string;
@@ -526,6 +554,8 @@ export interface LorryHire {
   podReceiveDate?: string;
   podImageDataUrl?: string;
   podFileName?: string;
+  podScanDataUrl?: string;
+  podScanFileName?: string;
   podRemarks?: string;
   balancePaid: boolean;
   balancePaidDate?: string;
@@ -557,6 +587,33 @@ export interface TransactionRecord {
   tdsAmount?: number;
   linkedCnNo?: string;
   linkedInvoiceNo?: string;
+  linkedInvoiceNos?: string[];
+  branchCode?: string;
+  createdByStaff?: string;
+  ownerUid: string;
+  createdAt?: unknown;
+  updatedAt?: unknown;
+}
+
+export interface TripExpenseRecord {
+  id: string;
+  cnId?: string;
+  cnNo: string;
+  cnDate: string;
+  financialYear?: string;
+  truckNo: string;
+  partyName?: string;
+  route?: string;
+  freightRevenue: number;
+  lorryHire: number;
+  dieselExpense: number;
+  tollFastag: number;
+  driverBhatta: number;
+  brokerCommission: number;
+  unloadingMisc: number;
+  totalDeductions: number;
+  netProfit: number;
+  remarks?: string;
   branchCode?: string;
   createdByStaff?: string;
   ownerUid: string;
@@ -704,6 +761,8 @@ export interface BankReceiptRecord {
   grossSettled: number;
   matchedInvoiceId?: string;
   matchedInvoiceNo?: string;
+  matchedInvoiceIds?: string[];
+  matchedInvoiceNos?: string[];
   billAmount?: number;
   balanceRemaining?: number;
   appliedToInvoice: boolean;
@@ -783,6 +842,30 @@ export interface CompanySettings {
   panCardPhotoDataUrl?: string;
   bholeBabaPhotoDataUrl?: string;
   khatuShyamPhotoDataUrl?: string;
+  logoDataUrl?: string;
+  watermarkDataUrl?: string;
+  driveRootFolder?: string;
+  defaultVoiceLang?: 'bn' | 'en' | 'off';
+  backgroundAiEnabled?: boolean;
+  lastSavedNoLock?: boolean;
+  autoLockMasterBlocks?: boolean;
+  taxSlabs?: number[];
+  quotationCustomTerms?: string;
+  declarationCustomTerms?: string;
+  serialConfig?: {
+    ftlCnPrefix?: string;
+    ftlCnStart?: number;
+    ftlBillPrefix?: string;
+    ftlBillStart?: number;
+    ftlQuotePrefix?: string;
+    ftlQuoteStart?: number;
+    logisticsPrefix?: string;
+    logisticsStart?: number;
+    ptlPrefix?: string;
+    ptlStart?: number;
+    courierPrefix?: string;
+    courierStart?: number;
+  };
   autoLockMinutes?: number;
   lockSourceInspection?: boolean;
   last90DayAutoFixAt?: number;
@@ -794,12 +877,15 @@ export type SheetTabId =
   | 'dashboard'
   | 'allInOne'
   | 'master'
+  | 'partyDirectory'
   | 'lr'
   | 'billing'
   | 'lorryHire'
+  | 'podScanner'
   | 'commission'
   | 'bankImport'
   | 'accounts'
+  | 'roleLedgers'
   | 'reports'
   | 'mis'
   | 'backup'
@@ -1171,6 +1257,7 @@ export const DEFAULT_COMPANY_SETTINGS: Omit<CompanySettings, 'ownerUid' | 'updat
   fyOpeningBalances: {},
   autoLockMinutes: 5,
   lockSourceInspection: true,
+  backgroundAiEnabled: false,
 };
 
 export const SCHEMA_LIMITS = {

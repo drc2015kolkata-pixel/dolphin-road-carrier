@@ -43,6 +43,88 @@ export const GST_STATE_NAMES: Record<string, string> = {
   '97': 'Other Territory',
 };
 
+export interface GstStateCodeOption {
+  code: string;
+  name: string;
+  label: string;
+}
+
+export const GST_STATE_CODE_OPTIONS: GstStateCodeOption[] = Object.entries(GST_STATE_NAMES)
+  .sort((a, b) => a[0].localeCompare(b[0]))
+  .map(([code, name]) => ({
+    code,
+    name,
+    label: `${code} - ${name}`,
+  }));
+
+const CITY_OR_STATE_TO_GST_CODE: Array<[RegExp, string]> = [
+  [/\b(kolkata|howrah|hooghly|dankuni|haldia|siliguri|durgapur|asansol|kharagpur|malda|raiganj|cooch\s*behar|alipurduar|petrapole|jaigaon|baranagar|barasat|bardhaman|burdwan|west\s*bengal|wb)\b/i, '19'],
+  [/\b(delhi|new\s*delhi)\b/i, '07'],
+  [/\b(mumbai|pune|nagpur|nashik|thane|bhiwandi|maharashtra)\b/i, '27'],
+  [/\b(ahmedabad|surat|vadodara|rajkot|gandhidham|kandla|mundra|gujarat)\b/i, '24'],
+  [/\b(chennai|coimbatore|madurai|hosur|tirupur|tamil\s*nadu)\b/i, '33'],
+  [/\b(bengaluru|bangalore|hubli|mangalore|karnataka)\b/i, '29'],
+  [/\b(hyderabad|secunderabad|telangana)\b/i, '36'],
+  [/\b(visakhapatnam|vizag|vijayawada|andhra\s*pradesh)\b/i, '37'],
+  [/\b(bhubaneswar|cuttack|rourkela|paradeep|angul|odisha|orissa)\b/i, '21'],
+  [/\b(ranchi|jamshedpur|dhanbad|bokaro|jharkhand)\b/i, '20'],
+  [/\b(patna|muzaffarpur|gaya|raxaul|bihar)\b/i, '10'],
+  [/\b(guwahati|dibrugarh|silchar|jorhat|tinsukia|assam)\b/i, '18'],
+  [/\b(varanasi|lucknow|kanpur|noida|ghaziabad|agra|uttar\s*pradesh|up)\b/i, '09'],
+  [/\b(jaipur|udaipur|jodhpur|kota|bhiwadi|rajasthan)\b/i, '08'],
+  [/\b(raipur|bilaspur|bhilai|korba|chhattisgarh)\b/i, '22'],
+  [/\b(indore|bhopal|jabalpur|gwalior|madhya\s*pradesh|mp)\b/i, '23'],
+  [/\b(gurugram|gurgaon|faridabad|ambala|panipat|haryana)\b/i, '06'],
+  [/\b(ludhiana|amritsar|jalandhar|punjab)\b/i, '03'],
+  [/\b(kochi|ernakulam|trivandrum|kerala)\b/i, '32'],
+  [/\b(agartala|tripura)\b/i, '16'],
+  [/\b(shillong|meghalaya)\b/i, '17'],
+  [/\b(gangtok|rangpo|sikkim)\b/i, '11'],
+  [/\b(haridwar|dehradun|rudrapur|uttarakhand)\b/i, '05'],
+  [/\b(jammu|srinagar|jammu\s*&?\s*kashmir)\b/i, '01'],
+  [/\b(shimla|baddi|himachal\s*pradesh)\b/i, '02'],
+  [/\b(chandigarh)\b/i, '04'],
+  [/\b(panaji|margao|goa)\b/i, '30'],
+];
+
+export function inferGstStateCodeAndName(params: {
+  gstin?: string;
+  stateCode?: string;
+  state?: string;
+  city?: string;
+  address?: string;
+  country?: string;
+}): { code: string; name: string; formatted: string } {
+  const country = String(params.country || 'India').trim();
+  if (country && country.toLowerCase() !== 'india') {
+    return { code: '96', name: `Export (${country})`, formatted: `96 - Export (${country})` };
+  }
+  const cleanGst = String(params.gstin || '').trim().toUpperCase();
+  if (/^\d{2}/.test(cleanGst)) {
+    const code = cleanGst.slice(0, 2);
+    const name = GST_STATE_NAMES[code] || '';
+    if (name) return { code, name, formatted: `${code} - ${name}` };
+  }
+  const explicit = String(params.stateCode || '').trim().padStart(2, '0');
+  if (GST_STATE_NAMES[explicit]) {
+    const name = GST_STATE_NAMES[explicit];
+    return { code: explicit, name, formatted: `${explicit} - ${name}` };
+  }
+  const stPrefix = String(params.state || '').trim().match(/^(\d{2})\b/);
+  if (stPrefix && GST_STATE_NAMES[stPrefix[1]]) {
+    const name = GST_STATE_NAMES[stPrefix[1]];
+    return { code: stPrefix[1], name, formatted: `${stPrefix[1]} - ${name}` };
+  }
+  const haystack = `${params.state || ''} ${params.city || ''} ${params.address || ''}`.trim();
+  for (const [regex, code] of CITY_OR_STATE_TO_GST_CODE) {
+    if (regex.test(haystack)) {
+      const name = GST_STATE_NAMES[code] || '';
+      return { code, name, formatted: `${code} - ${name}` };
+    }
+  }
+  return { code: '', name: '', formatted: '' };
+}
+
 export interface GstinValidationResult {
   valid: boolean;
   isEmpty: boolean;

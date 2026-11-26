@@ -38,6 +38,7 @@ import {
   LorryHire,
   Party,
   Quotation,
+  QuotationRouteRow,
 } from '../types/erp';
 import {
   amountToIndianWords,
@@ -103,6 +104,7 @@ import { PinCountryInputs, useAutoPinLookup } from './CityPinCountryAutoFill';
 import { resolvePinSync, SupportedCountry } from '../lib/postalPinLookup';
 import { VoiceDraftFields } from '../lib/voicePilot';
 import { deleteIdbObject, loadIdbObject, saveIdbObject } from '../lib/indexedDbStore';
+import { buildAutoCreditDebitNoteForRectifiedInvoice } from '../lib/autoCreditDebitNote';
 
 interface BillingQuotesModuleProps {
   ownerUid: string;
@@ -126,6 +128,11 @@ interface BillingQuotesModuleProps {
   pendingCnForInvoice: ConsignmentNote | null;
   onClearPendingCn: () => void;
   onPreviewPdf: (pdf: GeneratedPdfResult, folder: DriveFolderName) => void;
+  onAutoUploadPdfToDrive?: (
+    pdf: GeneratedPdfResult,
+    category: 'Bills_Invoices' | 'Quotations' | 'Declarations',
+    subFolder?: string
+  ) => Promise<void>;
   onShowConfirm: (opts: {
     title: string;
     description: string;
@@ -173,6 +180,7 @@ const BillingQuotesModuleInner: React.FC<BillingQuotesModuleProps> = ({
   pendingCnForInvoice,
   onClearPendingCn,
   onPreviewPdf,
+  onAutoUploadPdfToDrive,
   onShowConfirm,
 }) => {
   const [subTab, setSubTab] = useState<'invoice' | 'quotation' | '194c'>(() => {
@@ -239,12 +247,37 @@ const BillingQuotesModuleInner: React.FC<BillingQuotesModuleProps> = ({
   const branchTag = activeBranchCode && activeBranchCode !== 'ALL' ? activeBranchCode.slice(0, 3) : 'KOL';
   const defaultBranchLabel =
     activeBranchCode && activeBranchCode !== 'ALL' ? activeBranchCode : 'KOLKATA';
+
+  const nextSequentialBillInfo = useMemo(() => {
+    const activeFyNorm = normalizeFyLabel(activeFy);
+    const prefix = (company.serialConfig?.ftlBillPrefix || branchTag || 'KOL').trim().toUpperCase();
+    const startNo = Number(company.serialConfig?.ftlBillStart || 105);
+    let maxNum = 0;
+    invoices.forEach((inv) => {
+      if (inv.docKind && inv.docKind !== 'Tax Invoice') return;
+      const invFy = normalizeFyLabel(inv.financialYear || getDynamicFinancialYear(inv.invoiceDate));
+      if (invFy !== activeFyNorm) return;
+      const bid = Number(inv.billId || 0);
+      if (Number.isFinite(bid) && bid > maxNum && bid < 1000000) maxNum = bid;
+      const m = String(inv.invoiceNo || '').match(/(\d+)(?=\/\d{2}-\d{2}|$)/);
+      if (m) {
+        const n = parseInt(m[1], 10);
+        if (Number.isFinite(n) && n > maxNum && n < 1000000) maxNum = n;
+      }
+    });
+    const seqNum = Math.max(startNo, maxNum > 0 ? maxNum + 1 : startNo);
+    return {
+      seqNum,
+      formattedNo: `${prefix}/${seqNum}/${fyShort}`,
+    };
+  }, [invoices, activeFy, company.serialConfig, branchTag, fyShort]);
+
   const [editingInvoiceId, setEditingInvoiceId] = useState<string | null>(null);
   const [editingOriginalPaidAmount, setEditingOriginalPaidAmount] = useState(0);
   const [invDivision, setInvDivision] = useState<'FTL' | 'LOGISTICS'>('FTL');
   const [autoAtomicInvoice, setAutoAtomicInvoice] = useState(true);
   const [billedAtBranch, setBilledAtBranch] = useState(defaultBranchLabel);
-  const [billId, setBillId] = useState(() => String(105 + invoices.length));
+  const [billId, setBillId] = useState(() => String(nextSequentialBillInfo.seqNum));
   const [billedByCode, setBilledByCode] = useState<'B' | 'P'>('B');
   const [docKind, setDocKind] = useState<'Tax Invoice' | 'Credit Note' | 'Debit Note'>('Tax Invoice');
   const [againstInvoiceId, setAgainstInvoiceId] = useState('');
@@ -258,7 +291,7 @@ const BillingQuotesModuleInner: React.FC<BillingQuotesModuleProps> = ({
   const [savedFingerprint, setSavedFingerprint] = useState('');
   const [syncCounter, setSyncCounter] = useState(0);
   const [lastSavedInvoiceId, setLastSavedInvoiceId] = useState<string | null>(null);
-  const [invoiceNo, setInvoiceNo] = useState(`${branchTag}/${105 + invoices.length}/${fyShort}`);
+  const [invoiceNo, setInvoiceNo] = useState(() => nextSequentialBillInfo.formattedNo);
   const [invoiceDate, setInvoiceDate] = useState(todayISO());
   const [dueDate, setDueDate] = useState(() => {
     const d = new Date();
@@ -823,9 +856,12 @@ const BillingQuotesModuleInner: React.FC<BillingQuotesModuleProps> = ({
 
   const hasUnsavedChanges = savedFingerprint !== currentInvoiceFingerprint;
 
-  const canPrintOrShareCurrentForm = Boolean(
-    invoiceMandatoryReady && finalizeBill && !hasUnsavedChanges && (editingInvoiceId || lastSavedInvoiceId)
-  );
+  useEffect(() => {
+    if (!editingInvoiceId && docKind === 'Tax Invoice') {
+      setBillId(String(nextSequentialBillInfo.seqNum));
+      setInvoiceNo(nextSequentialBillInfo.formattedNo);
+    }
+  }, [editingInvoiceId, docKind, nextSequentialBillInfo]);
 
   const resolveCnBillingParty = (c: ConsignmentNote): string =>
     (c.billingPartyName || c.consignorName || '').trim();
@@ -1375,9 +1411,13 @@ const BillingQuotesModuleInner: React.FC<BillingQuotesModuleProps> = ({
       setScanMsg(
         `Generated ${createdInvoices.length} Separate Tax Invoice(s) (1 per Truck No): ${summaryList}`
       );
-      if (createdInvoices.length > 0) {
-        const pdf = await generateInvoicePDF(createdInvoices[0], company, includeAnnexure, 'p', copyCount);
-        onPreviewPdf(pdf, 'Bills_Invoices');
+      if (createdInvoices.length > 0 && onAutoUploadPdfToDrive) {
+        try {
+          const pdf = await generateInvoicePDF(createdInvoices[0], company, includeAnnexure, 'p', copyCount);
+          void onAutoUploadPdfToDrive(pdf, 'Bills_Invoices');
+        } catch {
+          // Silent background upload fallback
+        }
       }
       resetInvoiceForm();
     } finally {
@@ -1552,9 +1592,35 @@ const BillingQuotesModuleInner: React.FC<BillingQuotesModuleProps> = ({
       setScanMsg(uploadCheck.reason || 'Blocked unsupported file.');
       return;
     }
-    setScanMsg('Scanning physical LR copy in background worker...');
+    setScanMsg('Scanning physical document in background worker...');
     try {
-      const { result } = await scanPhysicalLR(file, (m) => setScanMsg(m));
+      const { result } = await scanPhysicalLR(
+        file,
+        (m) => setScanMsg(m),
+        Boolean(company?.backgroundAiEnabled)
+      );
+      if (subTab === 'quotation') {
+        if (result.consignorName) setQParty(result.consignorName);
+        if (result.consignorAddress) setQAddr(result.consignorAddress);
+        if (result.consignorGstin) setQGstin(result.consignorGstin);
+        if (result.fromCity) setQEntryPoint(result.fromCity);
+        if (result.fromCity || result.toCity) {
+          setQDest(`${result.fromCity || 'KOLKATA'} to ${result.toCity || 'SILIGURI'}`);
+        }
+        if (result.totalFreight) {
+          setQFreight(String(Number(result.totalFreight) || 0));
+        }
+        if (result.particulars) setQGoodsType(result.particulars);
+        setScanMsg(`Scanned party & route details into Quotation (${result.consignorName || result.toCity || 'Document'})!`);
+        return;
+      }
+      if (subTab === '194c') {
+        if (result.consignorName) setDParty(result.consignorName);
+        if (result.consignorAddress) setDAddr(result.consignorAddress);
+        if (result.consignorGstin) setDGstin(result.consignorGstin);
+        setScanMsg(`Scanned Party details into Sec 194C Declaration (${result.consignorName || 'Document'})!`);
+        return;
+      }
       const newRow: InvoiceConsignmentRow = {
         cnNo: result.cnNo || '',
         cnDate: result.cnDate || todayISO(),
@@ -1582,7 +1648,7 @@ const BillingQuotesModuleInner: React.FC<BillingQuotesModuleProps> = ({
       });
       setScanMsg(`Auto-pasted scanned LR ${newRow.cnNo || newRow.vehicle} into invoice table!`);
     } catch (err) {
-      setScanMsg(err instanceof Error ? err.message : 'Failed to scan LR');
+      setScanMsg(err instanceof Error ? err.message : 'Failed to scan document');
     }
   };
 
@@ -1641,10 +1707,9 @@ const BillingQuotesModuleInner: React.FC<BillingQuotesModuleProps> = ({
     setNarrationText('');
     setNarrationCustom(false);
     setFinalizeBill(false);
-    const nextSeq = 106 + invoices.length;
+    const nextSeq = nextSequentialBillInfo.seqNum;
     setBillId(String(nextSeq));
-    const code = (billedAtBranch || branchTag).replace(/[^A-Z0-9]/gi, '').slice(0, 3).toUpperCase() || branchTag;
-    setInvoiceNo(`${code}/${nextSeq}/${fyShort}`);
+    setInvoiceNo(nextSequentialBillInfo.formattedNo);
     const today = todayISO();
     setInvoiceDate(today);
     updateDueDateFromCredit(today, 15);
@@ -1864,6 +1929,7 @@ const BillingQuotesModuleInner: React.FC<BillingQuotesModuleProps> = ({
 
   const buildInvoiceObject = (overrideNo?: string): Invoice => {
     const settlement = computeSettlementAmounts();
+    const matchedStateObj = ALL_INDIA_STATES_DISTRICTS.find((s) => s.code === partyStateCode);
     return {
       id: editingInvoiceId || lastSavedInvoiceId || 'preview',
       billId: billId.trim(),
@@ -1885,6 +1951,8 @@ const BillingQuotesModuleInner: React.FC<BillingQuotesModuleProps> = ({
       partyName: partyName.trim(),
       partyAddress: partyAddress.trim(),
       partyGstin: partyGstin.trim(),
+      partyStateCode: partyStateCode.trim(),
+      partyStateName: matchedStateObj?.name || '',
       partyPan: partyPan.trim().toUpperCase(),
       billingCountry,
       sac,
@@ -1999,6 +2067,8 @@ const BillingQuotesModuleInner: React.FC<BillingQuotesModuleProps> = ({
           partyName: invObj.partyName,
           partyAddress: invObj.partyAddress || '',
           partyGstin: invObj.partyGstin || '',
+          partyStateCode: invObj.partyStateCode || '',
+          partyStateName: invObj.partyStateName || '',
           partyPan: invObj.partyPan || '',
           billingCountry: invObj.billingCountry || 'India',
           sac: invObj.sac || '996791',
@@ -2076,6 +2146,39 @@ const BillingQuotesModuleInner: React.FC<BillingQuotesModuleProps> = ({
         }
       }
 
+      // Auto Credit/Debit Note with Narration when a Tax Invoice is rectified & amount changes
+      let autoNoteBanner = '';
+      if (editingInvoiceId && docKind === 'Tax Invoice') {
+        const previousInvoice = invoices.find((x) => x.id === editingInvoiceId);
+        if (previousInvoice) {
+          const autoNote = buildAutoCreditDebitNoteForRectifiedInvoice({
+            previousInvoice,
+            revisedInvoice: { ...invObj, id },
+            existingInvoicesCount: invoices.length,
+            reason: invObj.remarks || undefined,
+            fy: activeFy,
+            branchCode: invObj.billedAtBranch || activeBranchCode,
+            staffCode: activeStaffCode,
+            ownerUid,
+          });
+          if (autoNote && autoNote.needed) {
+            const noteId = makeSafeDocId(autoNote.docKind === 'Credit Note' ? 'crn' : 'drn');
+            await upsertDocument('invoices', noteId, autoNote.payload as unknown as Record<string, unknown>, true);
+            await logBranchActivity({
+              action: `Auto-Issued ${autoNote.docKind}`,
+              module: 'Billing',
+              docRefCode: autoNote.noteNo,
+              summary: autoNote.narrationText,
+              staffCode: activeStaffCode,
+              staffName: activeStaffName,
+              branchCode: invObj.billedAtBranch || activeBranchCode,
+              ownerUid,
+            });
+            autoNoteBanner = ` · Auto-generated ${autoNote.docKind} ${autoNote.noteNo} (₹${formatINR(autoNote.grandTotal)}) with narration!`;
+          }
+        }
+      }
+
       await logBranchActivity({
         action: editingInvoiceId ? `Updated ${docKind}` : `Created ${docKind}`,
         module: 'Billing',
@@ -2093,17 +2196,24 @@ const BillingQuotesModuleInner: React.FC<BillingQuotesModuleProps> = ({
       await deleteIdbObject('drc_draft_invoice_v1');
       playVerifiedBeep();
 
+      if (onAutoUploadPdfToDrive) {
+        try {
+          const pdf = await generateInvoicePDF({ ...invObj, id }, company, includeAnnexure, 'p', copyCount);
+          void onAutoUploadPdfToDrive(pdf, 'Bills_Invoices');
+        } catch {
+          // Silent background upload fallback
+        }
+      }
+
       if (finalizeBill) {
         setScanMsg(
-          docKind === 'Credit Note'
-            ? `Saved Finalized Credit Note ${finalInvoiceNo}! Linked CNs unlocked for Re-Billing. Print / PDF / Share active below.`
-            : `Saved & Finalized ${docKind} ${finalInvoiceNo}! Print, Low-MB PDF & Share unlocked.`
+          (docKind === 'Credit Note'
+            ? `Saved Finalized Credit Note ${finalInvoiceNo}! Linked CNs unlocked for Re-Billing.`
+            : `Saved & Finalized ${docKind} ${finalInvoiceNo}! Use Manual Print / Preview PDF below.`) + autoNoteBanner
         );
-        const pdf = await generateInvoicePDF(invObj, company, includeAnnexure, 'p', copyCount);
-        onPreviewPdf(pdf, 'Bills_Invoices');
       } else {
         setScanMsg(
-          `Saved Draft ${finalInvoiceNo} (Finalize Bill = DRAFT [N]). Toggle Finalize = YES [Y] and Save again to unlock Printing & Sharing.`
+          `Saved Draft ${finalInvoiceNo} (Finalize = N). Click Preview PDF or Manual Print anytime below.${autoNoteBanner}`
         );
       }
     } finally {
@@ -2111,10 +2221,28 @@ const BillingQuotesModuleInner: React.FC<BillingQuotesModuleProps> = ({
     }
   };
 
-  // ---- QUOTATION STATE (10-Second Auto-Fill) ----
+  // ---- QUOTATION STATE (10-Second Auto-Fill + Rectify + Sequential No Lock) ----
+  const nextSequentialQuotationNo = useMemo(() => {
+    const activeFyNorm = normalizeFyLabel(activeFy);
+    const prefix = (company.serialConfig?.ftlQuotePrefix || 'QTN/2026').trim();
+    let maxNum = 0;
+    quotations.forEach((q) => {
+      const qFy = normalizeFyLabel(q.financialYear || getDynamicFinancialYear(q.quotationDate));
+      if (qFy !== activeFyNorm) return;
+      const m = String(q.quotationNo || '').match(/(\d+)\s*$/);
+      if (m) {
+        const n = parseInt(m[1], 10);
+        if (Number.isFinite(n) && n > maxNum && n < 1000000) maxNum = n;
+      }
+    });
+    const nextNum = Math.max(19, maxNum > 0 ? maxNum + 1 : 19);
+    return `${prefix}/${String(nextNum).padStart(3, '0')}`;
+  }, [quotations, activeFy, company.serialConfig]);
+
+  const [editingQuotationId, setEditingQuotationId] = useState<string | null>(null);
   const [autoAtomicQuotation, setAutoAtomicQuotation] = useState(true);
   const [qDivision, setQDivision] = useState<BusinessMode>('FTL');
-  const [qNo, setQNo] = useState(`QTN/2026/${String(19 + quotations.length).padStart(3, '0')}`);
+  const [qNo, setQNo] = useState(() => nextSequentialQuotationNo);
   const [qDate, setQDate] = useState(todayISO());
   const [qParty, setQParty] = useState('');
   const [selectedQPartyId, setSelectedQPartyId] = useState('');
@@ -2142,6 +2270,18 @@ const BillingQuotesModuleInner: React.FC<BillingQuotesModuleProps> = ({
   const [qEntryPoint, setQEntryPoint] = useState('As Applicable');
   const [qEntryPointPinCode, setQEntryPointPinCode] = useState('');
   const [qEntryPointCountry, setQEntryPointCountry] = useState<SupportedCountry>('India');
+  const [qRouteRates, setQRouteRates] = useState<QuotationRouteRow[]>([
+    {
+      slNo: 1,
+      origin: 'Kolkata',
+      destination: 'KOLKATA to SILIGURI',
+      vehicleType: '09 TON Open / Closed Truck',
+      loadCapacity: '09 TON Loading Capacity',
+      freightRate: 34500,
+      detentionExtra: 'YES Extra Charges',
+      remarks: 'No Advance Before Lorry Loading',
+    },
+  ]);
   const [qSearch, setQSearch] = useState('');
   const debouncedQSearch = useDebouncedValue(qSearch, 200);
 
@@ -2154,42 +2294,151 @@ const BillingQuotesModuleInner: React.FC<BillingQuotesModuleProps> = ({
     setQEntryPointCountry(country);
   });
 
-  const buildQuotationObject = (overrideNo?: string, overrideId?: string): Quotation => ({
-    id: overrideId || 'preview_qtn',
-    quotationNo: (overrideNo || qNo).trim(),
-    quotationDate: qDate,
-    financialYear: normalizeFyLabel(activeFy),
-    division: qDivision,
-    partyName: qParty.trim(),
-    partyAddress: qAddr.trim(),
-    partyGstin: qGstin.trim(),
-    partyPhone: qPhone.trim(),
-    partyEmail: qEmail.trim(),
-    guarantorName: qGuarantorName.trim(),
-    guarantorPhone: qGuarantorPhone.trim(),
-    acceptanceEmailOnly: true,
-    subject: qSubject.trim(),
-    validityText: qValidity.trim(),
-    vehicleType: qVehicleType.trim(),
-    goodsType: qGoodsType.trim(),
-    rateMode: qRateMode,
-    freight: Number(qFreight) || 0,
-    loadingCharge: qLoading,
-    unloadingCharge: qUnloading,
-    parkingCharge: qParking,
-    detentionCharge: qDetention,
-    tonGuarantee: qTonGuarantee,
-    destination: qDest,
-    destinationPinCode: qDestinationPinCode.trim(),
-    destinationCountry: qDestinationCountry,
-    advancePay: qAdvance,
-    entryPoint: qEntryPoint,
-    entryPointPinCode: qEntryPointPinCode.trim(),
-    entryPointCountry: qEntryPointCountry,
-    branchCode: activeBranchCode,
-    createdByStaff: activeStaffCode,
-    ownerUid,
-  });
+  useEffect(() => {
+    if (!editingQuotationId) {
+      setQNo(nextSequentialQuotationNo);
+    }
+  }, [editingQuotationId, nextSequentialQuotationNo]);
+
+  const resetQuotationForm = () => {
+    setEditingQuotationId(null);
+    setQNo(nextSequentialQuotationNo);
+    setQDate(todayISO());
+    setQParty('');
+    setSelectedQPartyId('');
+    setQAddr('');
+    setQGstin('');
+    setQPhone('');
+    setQEmail('');
+    setQGuarantorName('');
+    setQGuarantorPhone('');
+    setQRouteRates([
+      {
+        slNo: 1,
+        origin: 'Kolkata',
+        destination: 'KOLKATA to SILIGURI',
+        vehicleType: '09 TON Open / Closed Truck',
+        loadCapacity: '09 TON Loading Capacity',
+        freightRate: 34500,
+        detentionExtra: 'YES Extra Charges',
+        remarks: 'No Advance Before Lorry Loading',
+      },
+    ]);
+  };
+
+  const loadQuotationForEdit = (q: Quotation) => {
+    setSubTab('quotation');
+    setEditingQuotationId(q.id);
+    setQDivision((q.division as BusinessMode) || 'FTL');
+    setQNo(q.quotationNo || nextSequentialQuotationNo);
+    setQDate(q.quotationDate || todayISO());
+    setQParty(q.partyName || '');
+    setSelectedQPartyId('');
+    setQAddr(q.partyAddress || '');
+    setQGstin(q.partyGstin || '');
+    setQPhone(q.partyPhone || '');
+    setQEmail(q.partyEmail || '');
+    setQGuarantorName(q.guarantorName || '');
+    setQGuarantorPhone(q.guarantorPhone || '');
+    setQValidity(q.validityText || '7 Days After Lorry Unloading');
+    setQVehicleType(q.vehicleType || '09 TON Open / Closed Truck');
+    setQGoodsType(q.goodsType || 'General Merchandise / Industrial Goods');
+    setQRateMode((q.rateMode as 'Fixed' | 'Per Ton') || 'Fixed');
+    setQFreight(String(q.freight ?? 0));
+    setQLoading(q.loadingCharge || 'NO Extra Charges');
+    setQUnloading(q.unloadingCharge || 'YES Extra Charges');
+    setQDetention(q.detentionCharge || 'YES Extra Charges');
+    setQTonGuarantee(q.tonGuarantee || '09 TON Loading Capacity');
+    setQDest(q.destination || '');
+    setQDestinationPinCode(q.destinationPinCode || '');
+    setQDestinationCountry((q.destinationCountry as SupportedCountry) || 'India');
+    setQAdvance(q.advancePay || 'No Advance Before Lorry Loading');
+    setQEntryPoint(q.entryPoint || 'As Applicable');
+    setQEntryPointPinCode(q.entryPointPinCode || '');
+    setQEntryPointCountry((q.entryPointCountry as SupportedCountry) || 'India');
+    setQRouteRates(
+      q.routeRates && q.routeRates.length > 0
+        ? q.routeRates
+        : [
+            {
+              slNo: 1,
+              origin: q.entryPoint || 'Kolkata',
+              destination: q.destination || '-',
+              vehicleType: q.vehicleType || '09 TON Open / Closed Truck',
+              loadCapacity: q.tonGuarantee || '09 TON Loading Capacity',
+              freightRate: Number(q.freight ?? 0),
+              detentionExtra: q.detentionCharge || 'YES Extra Charges',
+              remarks: q.advancePay || 'No Advance Before Lorry Loading',
+            },
+          ]
+    );
+    if (typeof window !== 'undefined') window.scrollTo({ top: 0, behavior: 'smooth' });
+  };
+
+  const buildQuotationObject = (overrideNo?: string, overrideId?: string): Quotation => {
+    const cleanRoutes = (qRouteRates.length > 0
+      ? qRouteRates
+      : [
+          {
+            slNo: 1,
+            origin: qEntryPoint.trim() || 'Kolkata',
+            destination: qDest.trim() || '-',
+            vehicleType: qVehicleType.trim(),
+            loadCapacity: qTonGuarantee.trim(),
+            freightRate: Number(qFreight) || 0,
+            detentionExtra: qDetention,
+            remarks: qAdvance,
+          },
+        ]
+    ).map((r, i) => ({
+      slNo: i + 1,
+      origin: (r.origin || '').trim() || 'Kolkata',
+      destination: (r.destination || '').trim() || '-',
+      vehicleType: (r.vehicleType || '').trim() || '-',
+      loadCapacity: (r.loadCapacity || '').trim() || '-',
+      freightRate: Number(r.freightRate) || 0,
+      detentionExtra: (r.detentionExtra || '').trim() || '-',
+      remarks: (r.remarks || '').trim() || '-',
+    }));
+    const firstRow = cleanRoutes[0];
+    return {
+      id: overrideId || editingQuotationId || 'preview_qtn',
+      quotationNo: (overrideNo || qNo).trim(),
+      quotationDate: qDate,
+      financialYear: normalizeFyLabel(activeFy),
+      division: qDivision,
+      partyName: qParty.trim(),
+      partyAddress: qAddr.trim(),
+      partyGstin: qGstin.trim(),
+      partyPhone: qPhone.trim(),
+      partyEmail: qEmail.trim(),
+      guarantorName: qGuarantorName.trim(),
+      guarantorPhone: qGuarantorPhone.trim(),
+      acceptanceEmailOnly: true,
+      subject: qSubject.trim(),
+      validityText: qValidity.trim(),
+      vehicleType: firstRow?.vehicleType || qVehicleType.trim(),
+      goodsType: qGoodsType.trim(),
+      rateMode: qRateMode,
+      freight: firstRow ? Number(firstRow.freightRate) || Number(qFreight) || 0 : Number(qFreight) || 0,
+      loadingCharge: qLoading,
+      unloadingCharge: qUnloading,
+      parkingCharge: qParking,
+      detentionCharge: firstRow?.detentionExtra || qDetention,
+      tonGuarantee: firstRow?.loadCapacity || qTonGuarantee,
+      destination: firstRow?.destination || qDest,
+      destinationPinCode: qDestinationPinCode.trim(),
+      destinationCountry: qDestinationCountry,
+      advancePay: qAdvance,
+      entryPoint: firstRow?.origin || qEntryPoint,
+      entryPointPinCode: qEntryPointPinCode.trim(),
+      entryPointCountry: qEntryPointCountry,
+      routeRates: cleanRoutes,
+      branchCode: activeBranchCode,
+      createdByStaff: activeStaffCode,
+      ownerUid,
+    };
+  };
 
   const handleSaveQuotation = async (e: React.FormEvent) => {
     e.preventDefault();
@@ -2204,7 +2453,7 @@ const BillingQuotesModuleInner: React.FC<BillingQuotesModuleProps> = ({
     }
 
     let finalQNo = qNo.trim();
-    if (autoAtomicQuotation) {
+    if (!editingQuotationId && autoAtomicQuotation) {
       try {
         const serial = await reserveNextSerialNumber({
           type: 'quotation',
@@ -2220,7 +2469,8 @@ const BillingQuotesModuleInner: React.FC<BillingQuotesModuleProps> = ({
       }
     }
 
-    const id = makeSafeDocId('qtn');
+    const id = editingQuotationId || makeSafeDocId('qtn');
+    const isNew = !editingQuotationId;
     const qObj = buildQuotationObject(finalQNo, id);
     await upsertDocument(
       'quotations',
@@ -2256,14 +2506,15 @@ const BillingQuotesModuleInner: React.FC<BillingQuotesModuleProps> = ({
         entryPoint: qObj.entryPoint,
         entryPointPinCode: qObj.entryPointPinCode || '',
         entryPointCountry: qObj.entryPointCountry || 'India',
+        routeRates: qObj.routeRates || [],
         branchCode: activeBranchCode,
         createdByStaff: activeStaffCode,
         ownerUid,
       },
-      true
+      isNew
     );
     await logBranchActivity({
-      action: 'Created Rate Quotation',
+      action: isNew ? 'Created Rate Quotation' : 'Rectified Rate Quotation',
       module: 'Billing',
       docRefCode: finalQNo,
       summary: `${qObj.partyName} · ${qObj.destination} · ₹${formatINR(qObj.freight)}`,
@@ -2272,11 +2523,21 @@ const BillingQuotesModuleInner: React.FC<BillingQuotesModuleProps> = ({
       branchCode: activeBranchCode,
       ownerUid,
     });
-    const pdf = await generateQuotationPDF(qObj, company);
-    onPreviewPdf(pdf, 'Quotations');
+    playVerifiedBeep();
+    if (onAutoUploadPdfToDrive) {
+      try {
+        const pdf = await generateQuotationPDF(qObj, company);
+        void onAutoUploadPdfToDrive(pdf, 'Quotations');
+      } catch {
+        // Silent background upload fallback
+      }
+    }
+    setScanMsg(`Saved Quotation ${finalQNo} (${qObj.partyName}) cleanly. Click Preview PDF when ready.`);
+    if (!isNew) resetQuotationForm();
   };
 
-  // ---- SECTION 194C DECLARATION STATE ----
+  // ---- SECTION 194C DECLARATION STATE (Date + Party Only — NO Serial Lock) ----
+  const [editingDeclId, setEditingDeclId] = useState<string | null>(null);
   const [dDivision, setDDivision] = useState<BusinessMode>('FTL');
   const [dParty, setDParty] = useState('');
   const [selectedDPartyId, setSelectedDPartyId] = useState('');
@@ -2295,8 +2556,37 @@ const BillingQuotesModuleInner: React.FC<BillingQuotesModuleProps> = ({
     setDPlaceCountry(country);
   });
 
+  const resetDeclForm = () => {
+    setEditingDeclId(null);
+    setDParty('');
+    setSelectedDPartyId('');
+    setDAddr('');
+    setDGstin('');
+    setDDate(todayISO());
+    setDFy(normalizeFyLabel(activeFy));
+    setDPlace('Kolkata');
+    setDPlacePinCode('700001');
+    setDPlaceCountry('India');
+  };
+
+  const loadDeclForEdit = (d: Declaration194C) => {
+    setSubTab('194c');
+    setEditingDeclId(d.id);
+    setDDivision((d.division as BusinessMode) || 'FTL');
+    setDParty(d.partyName || '');
+    setSelectedDPartyId('');
+    setDAddr(d.partyAddress || '');
+    setDGstin(d.partyGstin || '');
+    setDDate(d.declarationDate || todayISO());
+    setDFy(d.financialYear || normalizeFyLabel(activeFy));
+    setDPlace(d.place || 'Kolkata');
+    setDPlacePinCode(d.placePinCode || '700001');
+    setDPlaceCountry((d.placeCountry as SupportedCountry) || 'India');
+    if (typeof window !== 'undefined') window.scrollTo({ top: 0, behavior: 'smooth' });
+  };
+
   const buildDeclarationObject = (overrideId?: string): Declaration194C => ({
-    id: overrideId || 'preview_decl',
+    id: overrideId || editingDeclId || 'preview_decl',
     division: dDivision,
     partyName: dParty.trim(),
     partyAddress: dAddr.trim(),
@@ -2322,7 +2612,8 @@ const BillingQuotesModuleInner: React.FC<BillingQuotesModuleProps> = ({
         return;
       }
     }
-    const id = makeSafeDocId('decl');
+    const id = editingDeclId || makeSafeDocId('decl');
+    const isNew = !editingDeclId;
     const decl = buildDeclarationObject(id);
     await upsertDocument(
       'declarations',
@@ -2341,20 +2632,29 @@ const BillingQuotesModuleInner: React.FC<BillingQuotesModuleProps> = ({
         createdByStaff: activeStaffCode,
         ownerUid,
       },
-      true
+      isNew
     );
     await logBranchActivity({
-      action: 'Issued 194C Declaration',
+      action: isNew ? 'Issued 194C Declaration' : 'Rectified 194C Declaration',
       module: 'Billing',
       docRefCode: decl.financialYear,
-      summary: `Non-Deduction 194C issued to ${decl.partyName}`,
+      summary: `Non-Deduction 194C ${isNew ? 'issued to' : 'updated for'} ${decl.partyName}`,
       staffCode: activeStaffCode,
       staffName: activeStaffName,
       branchCode: activeBranchCode,
       ownerUid,
     });
-    const pdf = await generateDeclaration194CPDF(decl, company);
-    onPreviewPdf(pdf, 'Declarations');
+    playVerifiedBeep();
+    if (onAutoUploadPdfToDrive) {
+      try {
+        const pdf = await generateDeclaration194CPDF(decl, company);
+        void onAutoUploadPdfToDrive(pdf, 'Declarations');
+      } catch {
+        // Silent background upload fallback
+      }
+    }
+    setScanMsg(`Saved Section 194C Declaration for "${decl.partyName}" (${decl.financialYear}). Click Preview 194C PDF if needed.`);
+    if (!isNew) resetDeclForm();
   };
 
   // Filtered + Indexed Registers for PaginatedDataTable (50 rows/page)
@@ -2518,33 +2818,30 @@ const BillingQuotesModuleInner: React.FC<BillingQuotesModuleProps> = ({
             <>
               <button
                 type="button"
-                disabled={!isFinalized}
-                title={isFinalized ? 'Preview / Low-MB PDF' : 'Locked: Edit & set Finalize = YES [Y] first'}
+                title="Preview / Low-MB PDF"
                 onClick={async () => {
                   const pdf = await generateInvoicePDF(inv, company, true, 'p', inv.copyCount || 1);
                   onPreviewPdf(pdf, 'Bills_Invoices');
                 }}
-                className="inline-flex items-center gap-1 px-2 py-1 rounded bg-blue-50 hover:bg-blue-100 text-blue-800 font-semibold cursor-pointer disabled:opacity-40 disabled:cursor-not-allowed"
+                className="inline-flex items-center gap-1 px-2 py-1 rounded bg-blue-50 hover:bg-blue-100 text-blue-800 font-semibold cursor-pointer"
               >
                 <Eye className="w-3 h-3" />
                 PDF
               </button>
               <button
                 type="button"
-                disabled={!isFinalized}
-                title={isFinalized ? 'Auto-Print A4' : 'Locked until Finalized [Y]'}
+                title="Manual Print A4"
                 onClick={async () => {
                   const pdf = await generateInvoicePDF(inv, company, true, 'p', inv.copyCount || 1);
                   printPdfDirect(pdf);
                 }}
-                className="inline-flex items-center gap-1 px-1.5 py-1 rounded bg-slate-100 hover:bg-slate-200 text-slate-800 font-semibold cursor-pointer disabled:opacity-40 disabled:cursor-not-allowed"
+                className="inline-flex items-center gap-1 px-1.5 py-1 rounded bg-slate-100 hover:bg-slate-200 text-slate-800 font-semibold cursor-pointer"
               >
                 <Printer className="w-3 h-3" />
               </button>
               <button
                 type="button"
-                disabled={!isFinalized}
-                title={isFinalized ? 'Share Real Invoice PDF on WhatsApp' : 'Locked until Finalized [Y]'}
+                title="Share Real Invoice PDF on WhatsApp"
                 onClick={async () => {
                   const pdf = await generateInvoicePDF(inv, company, true, 'p', inv.copyCount || 1);
                   const res = await sharePdfDirect({
@@ -2559,14 +2856,13 @@ const BillingQuotesModuleInner: React.FC<BillingQuotesModuleProps> = ({
                   });
                   setScanMsg(res.message);
                 }}
-                className="inline-flex items-center gap-1 px-1.5 py-1 rounded bg-emerald-600 hover:bg-emerald-700 text-white font-bold cursor-pointer disabled:opacity-40 disabled:cursor-not-allowed"
+                className="inline-flex items-center gap-1 px-1.5 py-1 rounded bg-emerald-600 hover:bg-emerald-700 text-white font-bold cursor-pointer"
               >
                 <MessageSquare className="w-3 h-3" />
               </button>
               <button
                 type="button"
-                disabled={!isFinalized}
-                title={isFinalized ? 'Share Real Invoice PDF via Email' : 'Locked until Finalized [Y]'}
+                title="Share Real Invoice PDF via Email"
                 onClick={async () => {
                   const pdf = await generateInvoicePDF(inv, company, true, 'p', inv.copyCount || 1);
                   const res = await sharePdfDirect({
@@ -2581,7 +2877,7 @@ const BillingQuotesModuleInner: React.FC<BillingQuotesModuleProps> = ({
                   });
                   setScanMsg(res.message);
                 }}
-                className="inline-flex items-center gap-1 px-1.5 py-1 rounded bg-indigo-600 hover:bg-indigo-700 text-white font-bold cursor-pointer disabled:opacity-40 disabled:cursor-not-allowed"
+                className="inline-flex items-center gap-1 px-1.5 py-1 rounded bg-indigo-600 hover:bg-indigo-700 text-white font-bold cursor-pointer"
               >
                 <Mail className="w-3 h-3" />
               </button>
@@ -2589,11 +2885,11 @@ const BillingQuotesModuleInner: React.FC<BillingQuotesModuleProps> = ({
                 <button
                   type="button"
                   onClick={() => handleLoadInvoiceForEdit(inv)}
-                  className="inline-flex items-center gap-1 px-2 py-1 rounded bg-amber-50 hover:bg-amber-100 text-amber-800 font-semibold cursor-pointer"
-                  title="Edit / Rectify Bill"
+                  className="inline-flex items-center gap-1 px-2 py-1 rounded bg-amber-50 hover:bg-amber-100 text-amber-800 font-bold cursor-pointer"
+                  title="Rectify / Edit Bill (Auto CRN/DRN on amount change)"
                 >
                   <Edit3 className="w-3 h-3" />
-                  Edit
+                  Rectify
                 </button>
               )}
               {!readOnly && (!inv.docKind || inv.docKind === 'Tax Invoice') && (
@@ -2788,6 +3084,17 @@ const BillingQuotesModuleInner: React.FC<BillingQuotesModuleProps> = ({
           );
           return (
             <>
+              {!quotationReadOnly && (
+                <button
+                  type="button"
+                  onClick={() => loadQuotationForEdit(q)}
+                  className="inline-flex items-center gap-1 px-2 py-1 rounded bg-amber-50 hover:bg-amber-100 text-amber-800 font-bold cursor-pointer"
+                  title="Rectify Quotation"
+                >
+                  <Edit3 className="w-3 h-3" />
+                  Rectify
+                </button>
+              )}
               <button
                 type="button"
                 onClick={async () => {
@@ -2871,6 +3178,17 @@ const BillingQuotesModuleInner: React.FC<BillingQuotesModuleProps> = ({
           );
           return (
             <>
+              {!declarationReadOnly && (
+                <button
+                  type="button"
+                  onClick={() => loadDeclForEdit(d)}
+                  className="inline-flex items-center gap-1 px-2 py-1 rounded bg-amber-50 hover:bg-amber-100 text-amber-800 font-bold cursor-pointer"
+                  title="Rectify 194C Declaration"
+                >
+                  <Edit3 className="w-3 h-3" />
+                  Rectify
+                </button>
+              )}
               <button
                 type="button"
                 onClick={async () => {
@@ -2936,6 +3254,16 @@ const BillingQuotesModuleInner: React.FC<BillingQuotesModuleProps> = ({
 
   return (
     <div className="space-y-4">
+      <input
+        ref={lrScanRef}
+        type="file"
+        accept="image/*"
+        className="hidden"
+        onChange={(e) => {
+          void handleScanLRIntoBill(e.target.files?.[0]);
+          e.target.value = '';
+        }}
+      />
       {/* Sub-navigation */}
       <div className="flex flex-wrap items-center gap-2 bg-white p-2 rounded-xl border border-slate-200 shadow-sm">
         <button
@@ -2979,6 +3307,13 @@ const BillingQuotesModuleInner: React.FC<BillingQuotesModuleProps> = ({
           </button>
         )}
       </div>
+
+      {scanMsg && subTab !== 'invoice' && (
+        <div className="px-4 py-2 rounded-xl bg-emerald-50 border border-emerald-200 text-xs font-semibold text-emerald-800 flex items-center gap-2">
+          <CheckCircle2 className="w-4 h-4 shrink-0" />
+          <span>{scanMsg}</span>
+        </div>
+      )}
 
       {/* ================================================================= */}
       {/* TAB 1: TAX INVOICE / BILL OF SUPPLY                               */}
@@ -3026,13 +3361,6 @@ const BillingQuotesModuleInner: React.FC<BillingQuotesModuleProps> = ({
                   />
                   Auto Atomic Serial
                 </label>
-                <input
-                  ref={lrScanRef}
-                  type="file"
-                  accept="image/*"
-                  className="hidden"
-                  onChange={(e) => handleScanLRIntoBill(e.target.files?.[0])}
-                />
                 <button
                   type="button"
                   onClick={() => lrScanRef.current?.click()}
@@ -3469,14 +3797,15 @@ const BillingQuotesModuleInner: React.FC<BillingQuotesModuleProps> = ({
                 </div>
                 <div>
                   <label className="block font-semibold text-slate-700 mb-1">
-                    Invoice No * {autoAtomicInvoice && <span className="text-emerald-700">(Atomic)</span>}
+                    Invoice No * {!editingInvoiceId && docKind === 'Tax Invoice' && company.lastSavedNoLock !== false ? '(Last Saved No + 1 Lock)' : autoAtomicInvoice ? '(Atomic)' : ''}
                   </label>
                   <input
                     type="text"
                     required
-                    value={invoiceNo}
+                    disabled={!editingInvoiceId && docKind === 'Tax Invoice' && company.lastSavedNoLock !== false}
+                    value={!editingInvoiceId && docKind === 'Tax Invoice' && company.lastSavedNoLock !== false ? nextSequentialBillInfo.formattedNo : invoiceNo}
                     onChange={(e) => setInvoiceNo(e.target.value)}
-                    className="w-full px-2.5 py-1.5 rounded border border-slate-300 font-mono-num font-bold"
+                    className="w-full px-2.5 py-1.5 rounded border border-slate-300 font-mono-num font-bold disabled:bg-blue-50 disabled:text-blue-800"
                   />
                 </div>
                 <div className="grid grid-cols-3 gap-1.5">
@@ -4517,21 +4846,6 @@ const BillingQuotesModuleInner: React.FC<BillingQuotesModuleProps> = ({
             )}
 
             <div className="px-4 py-3 bg-slate-50 border-t border-slate-200 space-y-2.5">
-              {!canPrintOrShareCurrentForm && (
-                <div className="px-3 py-1.5 rounded-lg bg-amber-50 border border-amber-300 text-[11px] font-bold text-amber-900 flex items-center gap-1.5">
-                  <Lock className="w-3.5 h-3.5 text-amber-700 shrink-0" />
-                  <span>
-                    Strict Print Lock Active:{' '}
-                    {!invoiceMandatoryReady
-                      ? 'Complete Party, Invoice No & at least 1 CN/Freight row'
-                      : !finalizeBill
-                        ? 'Switch Finalize Bill = YES [Y] above'
-                        : 'Click Save to commit latest edits'}{' '}
-                    to unlock Preview, Auto-Print, Low-MB PDF &amp; WhatsApp/Email Share.
-                  </span>
-                </div>
-              )}
-
               <div className="flex flex-wrap items-center justify-between gap-2.5">
                 <div className="flex items-center gap-2 text-xs">
                   <label className="font-bold text-slate-700">Print Copies:</label>
@@ -4552,9 +4866,28 @@ const BillingQuotesModuleInner: React.FC<BillingQuotesModuleProps> = ({
                 </div>
 
                 <div className="flex flex-wrap items-center gap-2">
+                  {!editingInvoiceId && filteredInvoices.length > 0 && (
+                    <button
+                      type="button"
+                      disabled={readOnly}
+                      onClick={() => handleLoadInvoiceForEdit(filteredInvoices[0])}
+                      className="inline-flex items-center gap-1 px-2.5 py-1.5 rounded-md bg-amber-50 border border-amber-300 hover:bg-amber-100 text-amber-900 text-xs font-bold cursor-pointer disabled:opacity-40"
+                      title="Reload latest Tax Invoice for Rectification (keeps serial number & creates CRN/DRN on amount change)"
+                    >
+                      <Edit3 className="w-3.5 h-3.5" />
+                      Rectify Last
+                    </button>
+                  )}
                   <button
                     type="button"
-                    disabled={!canPrintOrShareCurrentForm}
+                    onClick={() => lrScanRef.current?.click()}
+                    className="inline-flex items-center gap-1 px-2.5 py-1.5 rounded-md border border-emerald-300 bg-emerald-50 hover:bg-emerald-100 text-xs font-bold text-emerald-900 cursor-pointer"
+                  >
+                    <ScanLine className="w-3.5 h-3.5" />
+                    Scan LR
+                  </button>
+                  <button
+                    type="button"
                     onClick={async () => {
                       const pdf = await generateInvoicePDF(
                         buildInvoiceObject(),
@@ -4565,14 +4898,13 @@ const BillingQuotesModuleInner: React.FC<BillingQuotesModuleProps> = ({
                       );
                       onPreviewPdf(pdf, 'Bills_Invoices');
                     }}
-                    className="inline-flex items-center gap-1.5 px-3 py-1.5 rounded-md border border-slate-300 bg-white hover:bg-slate-100 text-xs font-semibold text-slate-800 cursor-pointer disabled:opacity-40 disabled:cursor-not-allowed"
+                    className="inline-flex items-center gap-1.5 px-3 py-1.5 rounded-md border border-slate-300 bg-white hover:bg-slate-100 text-xs font-semibold text-slate-800 cursor-pointer"
                   >
                     <Eye className="w-3.5 h-3.5" />
                     Preview PDF
                   </button>
                   <button
                     type="button"
-                    disabled={!canPrintOrShareCurrentForm}
                     onClick={async () => {
                       const pdf = await generateInvoicePDF(
                         buildInvoiceObject(),
@@ -4583,14 +4915,13 @@ const BillingQuotesModuleInner: React.FC<BillingQuotesModuleProps> = ({
                       );
                       printPdfDirect(pdf);
                     }}
-                    className="inline-flex items-center gap-1.5 px-3 py-1.5 rounded-md border border-slate-300 bg-white hover:bg-slate-100 text-xs font-semibold text-slate-800 cursor-pointer disabled:opacity-40 disabled:cursor-not-allowed"
+                    className="inline-flex items-center gap-1.5 px-3 py-1.5 rounded-md border border-slate-300 bg-white hover:bg-slate-100 text-xs font-semibold text-slate-800 cursor-pointer"
                   >
                     <Printer className="w-3.5 h-3.5" />
-                    Auto-Print
+                    Manual Print
                   </button>
                   <button
                     type="button"
-                    disabled={!canPrintOrShareCurrentForm}
                     onClick={async () => {
                       const pdf = await generateInvoicePDF(
                         buildInvoiceObject(),
@@ -4601,14 +4932,13 @@ const BillingQuotesModuleInner: React.FC<BillingQuotesModuleProps> = ({
                       );
                       downloadPdfDirect(pdf);
                     }}
-                    className="inline-flex items-center gap-1.5 px-3 py-1.5 rounded-md border border-blue-300 bg-blue-50 hover:bg-blue-100 text-xs font-bold text-blue-900 cursor-pointer disabled:opacity-40 disabled:cursor-not-allowed"
+                    className="inline-flex items-center gap-1.5 px-3 py-1.5 rounded-md border border-blue-300 bg-blue-50 hover:bg-blue-100 text-xs font-bold text-blue-900 cursor-pointer"
                   >
                     <Download className="w-3.5 h-3.5" />
-                    Low-MB PDF
+                    Low-KB PDF
                   </button>
                   <button
                     type="button"
-                    disabled={!canPrintOrShareCurrentForm}
                     onClick={async () => {
                       const partyRec = parties.find(
                         (p) => p.name.trim().toLowerCase() === partyName.trim().toLowerCase()
@@ -4633,7 +4963,7 @@ const BillingQuotesModuleInner: React.FC<BillingQuotesModuleProps> = ({
                       });
                       setScanMsg(res.message);
                     }}
-                    className="inline-flex items-center gap-1 px-2.5 py-1.5 rounded-md bg-emerald-600 hover:bg-emerald-700 text-white text-xs font-bold cursor-pointer disabled:opacity-40 disabled:cursor-not-allowed"
+                    className="inline-flex items-center gap-1 px-2.5 py-1.5 rounded-md bg-emerald-600 hover:bg-emerald-700 text-white text-xs font-bold cursor-pointer"
                     title="Attach & Share Real Invoice PDF on WhatsApp"
                   >
                     <MessageSquare className="w-3.5 h-3.5" />
@@ -4641,7 +4971,6 @@ const BillingQuotesModuleInner: React.FC<BillingQuotesModuleProps> = ({
                   </button>
                   <button
                     type="button"
-                    disabled={!canPrintOrShareCurrentForm}
                     onClick={async () => {
                       const partyRec = parties.find(
                         (p) => p.name.trim().toLowerCase() === partyName.trim().toLowerCase()
@@ -4666,7 +4995,7 @@ const BillingQuotesModuleInner: React.FC<BillingQuotesModuleProps> = ({
                       });
                       setScanMsg(res.message);
                     }}
-                    className="inline-flex items-center gap-1 px-2.5 py-1.5 rounded-md bg-indigo-600 hover:bg-indigo-700 text-white text-xs font-bold cursor-pointer disabled:opacity-40 disabled:cursor-not-allowed"
+                    className="inline-flex items-center gap-1 px-2.5 py-1.5 rounded-md bg-indigo-600 hover:bg-indigo-700 text-white text-xs font-bold cursor-pointer"
                     title="Attach & Share Real Invoice PDF via Email"
                   >
                     <Mail className="w-3.5 h-3.5" />
@@ -4684,20 +5013,14 @@ const BillingQuotesModuleInner: React.FC<BillingQuotesModuleProps> = ({
                     ref={saveInvBtnRef}
                     type="submit"
                     disabled={savingInv || readOnly}
-                    className={`inline-flex items-center gap-1.5 px-4 py-1.5 rounded-md text-white text-xs font-bold cursor-pointer disabled:opacity-50 ${
-                      finalizeBill
-                        ? 'bg-blue-700 hover:bg-blue-800'
-                        : 'bg-slate-700 hover:bg-slate-800'
-                    }`}
+                    className="inline-flex items-center gap-1.5 px-4 py-1.5 rounded-md text-white text-xs font-bold cursor-pointer disabled:opacity-50 bg-blue-700 hover:bg-blue-800"
                   >
                     <Save className="w-3.5 h-3.5" />
                     {savingInv
                       ? 'Saving...'
-                      : !finalizeBill
-                        ? 'Save Draft [N]'
-                        : editingInvoiceId
-                          ? 'Update & Preview Final PDF'
-                          : 'Save [Y] & Preview Final PDF'}
+                      : editingInvoiceId
+                        ? 'Save Rectified Bill'
+                        : 'Save Bill'}
                   </button>
                 </div>
               </div>
@@ -4785,14 +5108,15 @@ const BillingQuotesModuleInner: React.FC<BillingQuotesModuleProps> = ({
             <div className="p-4 grid grid-cols-1 md:grid-cols-3 gap-3 text-xs">
               <div>
                 <label className="block font-semibold text-slate-700 mb-1">
-                  Quotation No * {autoAtomicQuotation && <span className="text-emerald-700">(Atomic)</span>}
+                  Quotation No * {!editingQuotationId && company.lastSavedNoLock !== false ? '(Last Saved No + 1 Lock)' : autoAtomicQuotation ? '(Atomic)' : ''}
                 </label>
                 <input
                   type="text"
                   required
-                  value={qNo}
+                  disabled={!editingQuotationId && company.lastSavedNoLock !== false}
+                  value={!editingQuotationId && company.lastSavedNoLock !== false ? nextSequentialQuotationNo : qNo}
                   onChange={(e) => setQNo(e.target.value)}
-                  className="w-full px-2.5 py-1.5 rounded border border-slate-300 font-mono-num"
+                  className="w-full px-2.5 py-1.5 rounded border border-slate-300 font-mono-num disabled:bg-blue-50 disabled:text-blue-800 disabled:font-bold"
                 />
               </div>
               <div>
@@ -5069,6 +5393,176 @@ const BillingQuotesModuleInner: React.FC<BillingQuotesModuleProps> = ({
                 />
               </div>
             </div>
+            {/* Dynamic Multi-Row Route & Vehicle Rate Schedule (Page 1 PDF) */}
+            <div className="mx-4 mb-3 rounded-lg border border-blue-200 bg-blue-50/40 overflow-hidden">
+              <div className="px-3 py-2 bg-[#0D47A1]/10 border-b border-blue-200 flex flex-wrap items-center justify-between gap-2 text-xs">
+                <span className="font-bold text-[#0D47A1]">
+                  Multi-Row Route &amp; Vehicle Rate Schedule ({qRouteRates.length} Route(s))
+                </span>
+                <button
+                  type="button"
+                  onClick={() =>
+                    setQRouteRates((prev) => [
+                      ...prev,
+                      {
+                        slNo: prev.length + 1,
+                        origin: qEntryPoint.trim() || 'Kolkata',
+                        destination: qDest.trim() || 'KOLKATA to SILIGURI',
+                        vehicleType: qVehicleType.trim() || '09 TON Open / Closed Truck',
+                        loadCapacity: qTonGuarantee.trim() || '09 TON Loading Capacity',
+                        freightRate: Number(qFreight) || 0,
+                        detentionExtra: qDetention || 'YES Extra Charges',
+                        remarks: qAdvance || 'No Advance Before Lorry Loading',
+                      },
+                    ])
+                  }
+                  className="inline-flex items-center gap-1 px-2.5 py-1 rounded bg-[#0D47A1] hover:bg-blue-900 text-white text-[11px] font-bold cursor-pointer"
+                >
+                  <Plus className="w-3 h-3" />
+                  Add Row
+                </button>
+              </div>
+              <div className="overflow-x-auto">
+                <table className="w-full text-[11px] border-collapse">
+                  <thead>
+                    <tr className="bg-slate-100 text-slate-700 font-bold border-b border-slate-200 text-left">
+                      <th className="px-2 py-1.5 w-10">Sl</th>
+                      <th className="px-2 py-1.5">Origin</th>
+                      <th className="px-2 py-1.5">Destination</th>
+                      <th className="px-2 py-1.5">Vehicle Type</th>
+                      <th className="px-2 py-1.5">Load Capacity</th>
+                      <th className="px-2 py-1.5 w-28">Freight Rate (₹)</th>
+                      <th className="px-2 py-1.5">Detention / Extra</th>
+                      <th className="px-2 py-1.5">Remarks</th>
+                      <th className="px-2 py-1.5 w-10 text-center">Del</th>
+                    </tr>
+                  </thead>
+                  <tbody>
+                    {qRouteRates.map((rr, idx) => (
+                      <tr key={idx} className="border-b border-slate-200 bg-white">
+                        <td className="px-2 py-1 font-mono-num font-bold text-center">{idx + 1}</td>
+                        <td className="p-1">
+                          <input
+                            type="text"
+                            value={rr.origin}
+                            onChange={(e) => {
+                              const v = e.target.value;
+                              setQRouteRates((prev) =>
+                                prev.map((x, i) => (i === idx ? { ...x, origin: v } : x))
+                              );
+                              if (idx === 0) setQEntryPoint(v);
+                            }}
+                            className="w-full px-1.5 py-1 rounded border border-slate-300"
+                          />
+                        </td>
+                        <td className="p-1">
+                          <input
+                            type="text"
+                            value={rr.destination}
+                            onChange={(e) => {
+                              const v = e.target.value;
+                              setQRouteRates((prev) =>
+                                prev.map((x, i) => (i === idx ? { ...x, destination: v } : x))
+                              );
+                              if (idx === 0) setQDest(v);
+                            }}
+                            className="w-full px-1.5 py-1 rounded border border-slate-300"
+                          />
+                        </td>
+                        <td className="p-1">
+                          <input
+                            type="text"
+                            value={rr.vehicleType}
+                            onChange={(e) => {
+                              const v = e.target.value;
+                              setQRouteRates((prev) =>
+                                prev.map((x, i) => (i === idx ? { ...x, vehicleType: v } : x))
+                              );
+                              if (idx === 0) setQVehicleType(v);
+                            }}
+                            className="w-full px-1.5 py-1 rounded border border-slate-300"
+                          />
+                        </td>
+                        <td className="p-1">
+                          <input
+                            type="text"
+                            value={rr.loadCapacity}
+                            onChange={(e) => {
+                              const v = e.target.value;
+                              setQRouteRates((prev) =>
+                                prev.map((x, i) => (i === idx ? { ...x, loadCapacity: v } : x))
+                              );
+                              if (idx === 0) setQTonGuarantee(v);
+                            }}
+                            className="w-full px-1.5 py-1 rounded border border-slate-300"
+                          />
+                        </td>
+                        <td className="p-1">
+                          <input
+                            type="number"
+                            value={rr.freightRate}
+                            onChange={(e) => {
+                              const num = Number(e.target.value) || 0;
+                              setQRouteRates((prev) =>
+                                prev.map((x, i) => (i === idx ? { ...x, freightRate: num } : x))
+                              );
+                              if (idx === 0) setQFreight(String(num));
+                            }}
+                            className="w-full px-1.5 py-1 rounded border border-slate-300 font-mono-num font-bold text-right"
+                          />
+                        </td>
+                        <td className="p-1">
+                          <input
+                            type="text"
+                            value={rr.detentionExtra}
+                            onChange={(e) => {
+                              const v = e.target.value;
+                              setQRouteRates((prev) =>
+                                prev.map((x, i) => (i === idx ? { ...x, detentionExtra: v } : x))
+                              );
+                              if (idx === 0) setQDetention(v);
+                            }}
+                            className="w-full px-1.5 py-1 rounded border border-slate-300"
+                          />
+                        </td>
+                        <td className="p-1">
+                          <input
+                            type="text"
+                            value={rr.remarks}
+                            onChange={(e) => {
+                              const v = e.target.value;
+                              setQRouteRates((prev) =>
+                                prev.map((x, i) => (i === idx ? { ...x, remarks: v } : x))
+                              );
+                              if (idx === 0) setQAdvance(v);
+                            }}
+                            className="w-full px-1.5 py-1 rounded border border-slate-300"
+                          />
+                        </td>
+                        <td className="p-1 text-center">
+                          <button
+                            type="button"
+                            disabled={qRouteRates.length <= 1}
+                            onClick={() =>
+                              setQRouteRates((prev) =>
+                                prev
+                                  .filter((_, i) => i !== idx)
+                                  .map((row, ri) => ({ ...row, slNo: ri + 1 }))
+                              )
+                            }
+                            className="p-1 rounded hover:bg-red-50 text-red-600 disabled:opacity-30 cursor-pointer"
+                            title="Remove Route Row"
+                          >
+                            <Trash2 className="w-3.5 h-3.5" />
+                          </button>
+                        </td>
+                      </tr>
+                    ))}
+                  </tbody>
+                </table>
+              </div>
+            </div>
+
             <div className="mx-4 mb-3 px-3.5 py-2.5 rounded-lg bg-red-50 border border-red-200 text-xs font-bold text-red-900 flex items-center gap-2">
               <Mail className="w-4 h-4 text-red-700 shrink-0" />
               <span>
@@ -5076,6 +5570,26 @@ const BillingQuotesModuleInner: React.FC<BillingQuotesModuleProps> = ({
               </span>
             </div>
             <div className="px-4 py-3 bg-slate-50 border-t border-slate-200 flex flex-wrap justify-end gap-2">
+              {!editingQuotationId && filteredQuotations.length > 0 && (
+                <button
+                  type="button"
+                  disabled={quotationReadOnly}
+                  onClick={() => loadQuotationForEdit(filteredQuotations[0])}
+                  className="inline-flex items-center gap-1 px-2.5 py-1.5 rounded-md bg-amber-50 border border-amber-300 hover:bg-amber-100 text-amber-900 text-xs font-bold cursor-pointer disabled:opacity-40"
+                  title="Reload latest Quotation for Rectification (keeps serial no intact)"
+                >
+                  <Edit3 className="w-3.5 h-3.5" />
+                  Rectify Last
+                </button>
+              )}
+              <button
+                type="button"
+                onClick={() => lrScanRef.current?.click()}
+                className="inline-flex items-center gap-1 px-2.5 py-1.5 rounded-md border border-emerald-300 bg-emerald-50 hover:bg-emerald-100 text-emerald-900 text-xs font-bold cursor-pointer"
+              >
+                <ScanLine className="w-3.5 h-3.5" />
+                Scan
+              </button>
               <button
                 type="button"
                 onClick={async () => {
@@ -5130,13 +5644,70 @@ const BillingQuotesModuleInner: React.FC<BillingQuotesModuleProps> = ({
                 <Mail className="w-3.5 h-3.5" />
                 Email PDF
               </button>
+              {editingQuotationId && (
+                <button
+                  type="button"
+                  onClick={resetQuotationForm}
+                  className="px-3 py-1.5 rounded-md border border-slate-300 bg-white hover:bg-slate-100 text-slate-700 text-xs font-bold cursor-pointer"
+                >
+                  Cancel Edit
+                </button>
+              )}
+              <button
+                type="button"
+                onClick={async () => {
+                  const qObj = buildQuotationObject();
+                  if (!qObj.partyName) {
+                    setScanMsg('Enter Quotation Party Name before downloading PDF.');
+                    return;
+                  }
+                  const pdf = await generateQuotationPDF(qObj, company);
+                  downloadPdfDirect(pdf);
+                }}
+                className="inline-flex items-center gap-1.5 px-3 py-1.5 rounded-md border border-blue-300 bg-blue-50 hover:bg-blue-100 text-blue-900 text-xs font-bold cursor-pointer"
+              >
+                <Download className="w-3.5 h-3.5" />
+                Low-KB PDF
+              </button>
+              <button
+                type="button"
+                onClick={async () => {
+                  const qObj = buildQuotationObject();
+                  if (!qObj.partyName) {
+                    setScanMsg('Enter Quotation Party Name before printing.');
+                    return;
+                  }
+                  const pdf = await generateQuotationPDF(qObj, company);
+                  printPdfDirect(pdf);
+                }}
+                className="inline-flex items-center gap-1.5 px-3 py-1.5 rounded-md border border-slate-300 bg-white hover:bg-slate-100 text-slate-800 text-xs font-bold cursor-pointer"
+              >
+                <Printer className="w-3.5 h-3.5" />
+                Manual Print
+              </button>
+              <button
+                type="button"
+                onClick={async () => {
+                  const qObj = buildQuotationObject();
+                  if (!qObj.partyName) {
+                    setScanMsg('Enter Quotation Party Name before previewing PDF.');
+                    return;
+                  }
+                  const pdf = await generateQuotationPDF(qObj, company);
+                  onPreviewPdf(pdf, 'Quotations');
+                }}
+                className="inline-flex items-center gap-1.5 px-3 py-1.5 rounded-md border border-slate-300 bg-white hover:bg-slate-100 text-slate-800 text-xs font-bold cursor-pointer"
+              >
+                <Eye className="w-3.5 h-3.5" />
+                Preview PDF
+              </button>
               <button
                 type="submit"
                 disabled={quotationReadOnly}
                 className="inline-flex items-center gap-1.5 px-4 py-1.5 rounded-md bg-blue-700 hover:bg-blue-800 text-white text-xs font-bold cursor-pointer disabled:opacity-50"
               >
-                <Printer className="w-3.5 h-3.5" />
-                Save &amp; Preview Quotation PDF
+                <Save className="w-3.5 h-3.5" />
+                {editingQuotationId ? 'Save Rectified Quotation' : 'Save Quotation'}
               </button>
             </div>
           </form>
@@ -5319,6 +5890,26 @@ const BillingQuotesModuleInner: React.FC<BillingQuotesModuleProps> = ({
               Includes Royal Blue Dolphin Ring top-left logo, 11% Twin-Dolphin Heart D.R.C center watermark, Proprietor PAN Card photo bottom-left (PAN: {company.pan}), and Subhajit Saha Proprietor Signature with Blue Round Seal bottom-right identically across all 4 divisions.
             </div>
             <div className="px-4 py-3 bg-slate-50 border-t border-slate-200 flex flex-wrap justify-end gap-2">
+              {!editingDeclId && filteredDeclarations.length > 0 && (
+                <button
+                  type="button"
+                  disabled={declarationReadOnly}
+                  onClick={() => loadDeclForEdit(filteredDeclarations[0])}
+                  className="inline-flex items-center gap-1 px-2.5 py-1.5 rounded-md bg-amber-50 border border-amber-300 hover:bg-amber-100 text-amber-900 text-xs font-bold cursor-pointer disabled:opacity-40"
+                  title="Reload latest Section 194C Declaration for Rectification"
+                >
+                  <Edit3 className="w-3.5 h-3.5" />
+                  Rectify Last
+                </button>
+              )}
+              <button
+                type="button"
+                onClick={() => lrScanRef.current?.click()}
+                className="inline-flex items-center gap-1 px-2.5 py-1.5 rounded-md border border-emerald-300 bg-emerald-50 hover:bg-emerald-100 text-emerald-900 text-xs font-bold cursor-pointer"
+              >
+                <ScanLine className="w-3.5 h-3.5" />
+                Scan
+              </button>
               <button
                 type="button"
                 onClick={async () => {
@@ -5381,13 +5972,70 @@ const BillingQuotesModuleInner: React.FC<BillingQuotesModuleProps> = ({
                 <Mail className="w-3.5 h-3.5" />
                 Email PDF
               </button>
+              {editingDeclId && (
+                <button
+                  type="button"
+                  onClick={resetDeclForm}
+                  className="px-3 py-1.5 rounded-md border border-slate-300 bg-white hover:bg-slate-100 text-slate-700 text-xs font-bold cursor-pointer"
+                >
+                  Cancel Edit
+                </button>
+              )}
+              <button
+                type="button"
+                onClick={async () => {
+                  const decl = buildDeclarationObject();
+                  if (!decl.partyName) {
+                    setScanMsg('Select or enter Party Name before downloading 194C PDF.');
+                    return;
+                  }
+                  const pdf = await generateDeclaration194CPDF(decl, company);
+                  downloadPdfDirect(pdf);
+                }}
+                className="inline-flex items-center gap-1.5 px-3 py-1.5 rounded-md border border-blue-300 bg-blue-50 hover:bg-blue-100 text-blue-900 text-xs font-bold cursor-pointer"
+              >
+                <Download className="w-3.5 h-3.5" />
+                Low-KB PDF
+              </button>
+              <button
+                type="button"
+                onClick={async () => {
+                  const decl = buildDeclarationObject();
+                  if (!decl.partyName) {
+                    setScanMsg('Select or enter Party Name before printing 194C PDF.');
+                    return;
+                  }
+                  const pdf = await generateDeclaration194CPDF(decl, company);
+                  printPdfDirect(pdf);
+                }}
+                className="inline-flex items-center gap-1.5 px-3 py-1.5 rounded-md border border-slate-300 bg-white hover:bg-slate-100 text-slate-800 text-xs font-bold cursor-pointer"
+              >
+                <Printer className="w-3.5 h-3.5" />
+                Manual Print
+              </button>
+              <button
+                type="button"
+                onClick={async () => {
+                  const decl = buildDeclarationObject();
+                  if (!decl.partyName) {
+                    setScanMsg('Select or enter Party Name before previewing 194C PDF.');
+                    return;
+                  }
+                  const pdf = await generateDeclaration194CPDF(decl, company);
+                  onPreviewPdf(pdf, 'Declarations');
+                }}
+                className="inline-flex items-center gap-1.5 px-3 py-1.5 rounded-md border border-slate-300 bg-white hover:bg-slate-100 text-slate-800 text-xs font-bold cursor-pointer"
+              >
+                <Eye className="w-3.5 h-3.5" />
+                Preview 194C PDF
+              </button>
               <button
                 type="submit"
                 disabled={declarationReadOnly}
                 className="inline-flex items-center gap-1.5 px-4 py-1.5 rounded-md bg-blue-700 hover:bg-blue-800 text-white text-xs font-bold cursor-pointer disabled:opacity-50"
               >
-                <Printer className="w-3.5 h-3.5" />
-                Generate &amp; Preview 194C PDF
+                <Save className="w-3.5 h-3.5" />
+                {editingDeclId ? 'Save Rectified 194C' : 'Save 194C Declaration'}
               </button>
             </div>
           </form>

@@ -3,10 +3,15 @@ import * as XLSX from 'xlsx';
 import {
   CheckCircle2,
   CloudUpload,
+  Download,
+  Edit3,
+  Eye,
   FileSpreadsheet,
   Landmark,
   MessageSquareText,
   Printer,
+  ScanLine,
+  Share2,
   Sparkles,
   Trash2,
   Upload,
@@ -27,7 +32,13 @@ import {
   extractPaymentMetadata,
   formatReferenceChain,
 } from '../lib/paymentNarration';
-import { GeneratedPdfResult, generateFoxproStatementPDF } from '../lib/pdfEngine';
+import {
+  downloadPdfDirect,
+  GeneratedPdfResult,
+  generateFoxproStatementPDF,
+  printPdfDirect,
+} from '../lib/pdfEngine';
+import { sharePdfDirect } from '../lib/shareUtils';
 import { BankReceiptRecord, CompanySettings, Invoice } from '../types/erp';
 import { ConfirmModal } from './ConfirmModal';
 import { SearchableSelect } from './SearchableSelect';
@@ -43,6 +54,7 @@ interface BankReceiptImportModuleProps {
   currentBranchCode: string;
   driveAccessToken: string | null;
   readOnly?: boolean;
+  onOpenPodScanner?: () => void;
   onOpenPreview: (pdf: GeneratedPdfResult) => void;
 }
 
@@ -268,6 +280,7 @@ export interface ParsedSmsCreditDraft {
   upiRefId: string;
   chequeNo: string;
   matchedInvoiceId: string;
+  matchedInvoiceIds: string[];
   tdsAmount: number;
   looksLikeDebit: boolean;
 }
@@ -383,6 +396,7 @@ export function parseBankCreditAlertText(
     upiRefId: meta.upiRefId || '',
     chequeNo: meta.chequeNo || '',
     matchedInvoiceId: matchedInv?.id || '',
+    matchedInvoiceIds: matchedInv ? [matchedInv.id] : [],
     tdsAmount,
     looksLikeDebit,
   };
@@ -398,6 +412,7 @@ export const BankReceiptImportModule: React.FC<BankReceiptImportModuleProps> = (
   currentBranchCode,
   driveAccessToken,
   readOnly = false,
+  onOpenPodScanner,
   onOpenPreview,
 }) => {
   const bankNames = useMemo(() => {
@@ -554,9 +569,14 @@ export const BankReceiptImportModule: React.FC<BankReceiptImportModuleProps> = (
     setSavingSms(true);
     setSmsWarn(null);
     try {
-      const matchedInv = smsDraft.matchedInvoiceId
-        ? fyInvoices.find((i) => i.id === smsDraft.matchedInvoiceId)
-        : undefined;
+      const selectedInvIds = Array.from(
+        new Set([
+          ...(smsDraft.matchedInvoiceIds || []),
+          ...(smsDraft.matchedInvoiceId ? [smsDraft.matchedInvoiceId] : []),
+        ])
+      ).filter(Boolean);
+      const matchedList = fyInvoices.filter((i) => selectedInvIds.includes(i.id));
+      const matchedInv = matchedList[0];
       const partyName = matchedInv?.partyName || smsDraft.partyName.trim();
       const refPrimary =
         smsDraft.utrNo || smsDraft.upiRefId || smsDraft.chequeNo || `SMS-${Date.now().toString().slice(-6)}`;
@@ -567,25 +587,34 @@ export const BankReceiptImportModule: React.FC<BankReceiptImportModuleProps> = (
       let nextStatus: Invoice['status'] | undefined;
       let balanceRemaining = 0;
 
-      if (matchedInv) {
-        const nextPaid = Math.min(
-          Number(matchedInv.grandTotal || 0),
-          Math.round((Number(matchedInv.paidAmount || 0) + grossSettled) * 100) / 100
-        );
-        nextStatus = nextPaid >= Number(matchedInv.grandTotal || 0) - 1 ? 'Paid' : 'Partial';
-        balanceRemaining = Math.max(0, Math.round((Number(matchedInv.grandTotal || 0) - nextPaid) * 100) / 100);
-        await upsertDocument(
-          'invoices',
-          matchedInv.id,
-          {
-            ...matchedInv,
-            paidAmount: nextPaid,
-            status: nextStatus,
-          },
-          false
-        );
+      if (matchedList.length > 0) {
+        let remainingGross = grossSettled;
+        let lastTotalRemaining = 0;
+        for (const inv of matchedList) {
+          if (remainingGross <= 0) break;
+          const total = Number(inv.grandTotal || 0);
+          const already = Number(inv.paidAmount || 0);
+          const due = Math.max(0, Math.round((total - already) * 100) / 100);
+          const applyHere = Math.min(due > 0 ? due : remainingGross, remainingGross);
+          const nextPaid = Math.min(total, Math.round((already + applyHere) * 100) / 100);
+          nextStatus = nextPaid >= total - 1 ? 'Paid' : 'Partial';
+          lastTotalRemaining += Math.max(0, Math.round((total - nextPaid) * 100) / 100);
+          await upsertDocument(
+            'invoices',
+            inv.id,
+            {
+              ...inv,
+              paidAmount: nextPaid,
+              status: nextStatus,
+            },
+            false
+          );
+          remainingGross = Math.max(0, Math.round((remainingGross - applyHere) * 100) / 100);
+        }
+        balanceRemaining = Math.round(lastTotalRemaining * 100) / 100;
       }
 
+      const linkedNosLabel = matchedList.map((i) => i.invoiceNo).join(', ');
       const autoNarration = buildAutomaticNarration({
         txType: 'Income',
         partyName,
@@ -595,7 +624,7 @@ export const BankReceiptImportModule: React.FC<BankReceiptImportModuleProps> = (
         utrNo: smsDraft.utrNo,
         chequeNo: smsDraft.chequeNo,
         referenceNo: refPrimary,
-        linkedInvoiceNo: matchedInv?.invoiceNo,
+        linkedInvoiceNo: linkedNosLabel || undefined,
         bankAccountName: selectedBank,
         tdsAmount: tdsAmt,
       });
@@ -620,7 +649,7 @@ export const BankReceiptImportModule: React.FC<BankReceiptImportModuleProps> = (
           utrNo: smsDraft.utrNo || '',
           chequeNo: smsDraft.chequeNo || '',
           tdsAmount: tdsAmt,
-          ...(matchedInv ? { linkedInvoiceNo: matchedInv.invoiceNo } : {}),
+          ...(linkedNosLabel ? { linkedInvoiceNo: linkedNosLabel, linkedInvoiceNos: matchedList.map((i) => i.invoiceNo) } : {}),
           branchCode: currentBranchCode,
           createdByStaff: currentStaffCode,
           ownerUid,
@@ -649,10 +678,10 @@ export const BankReceiptImportModule: React.FC<BankReceiptImportModuleProps> = (
           tdsRatePct: matchedInv && netAmt + tdsAmt > 0 ? Math.round((tdsAmt / (netAmt + tdsAmt)) * 1000) / 10 : 0,
           tdsAmount: tdsAmt,
           grossSettled,
-          ...(matchedInv ? { matchedInvoiceId: matchedInv.id, matchedInvoiceNo: matchedInv.invoiceNo } : {}),
-          billAmount: matchedInv ? Number(matchedInv.grandTotal || 0) : netAmt,
+          ...(matchedInv ? { matchedInvoiceId: matchedInv.id, matchedInvoiceNo: linkedNosLabel, matchedInvoiceIds: selectedInvIds, matchedInvoiceNos: matchedList.map((i) => i.invoiceNo) } : {}),
+          billAmount: matchedList.length > 0 ? matchedList.reduce((s, i) => s + Number(i.grandTotal || 0), 0) : netAmt,
           balanceRemaining,
-          appliedToInvoice: Boolean(matchedInv),
+          appliedToInvoice: matchedList.length > 0,
           sourceFileName: 'Smart_SMS_Email_Reader',
           branchCode: currentBranchCode,
           createdByStaff: currentStaffCode,
@@ -666,7 +695,7 @@ export const BankReceiptImportModule: React.FC<BankReceiptImportModuleProps> = (
         module: 'BANK_IMPORT',
         docRefCode: refPrimary,
         summary: `Auto-created Receipt Voucher Rs. ${formatINR(netAmt)} from ${partyName} (${smsDraft.paymentMode})${
-          matchedInv ? ` against ${matchedInv.invoiceNo} -> ${nextStatus}` : ''
+          linkedNosLabel ? ` against ${linkedNosLabel} -> ${nextStatus}` : ''
         }`,
         staffCode: currentStaffCode,
         branchCode: currentBranchCode,
@@ -677,7 +706,7 @@ export const BankReceiptImportModule: React.FC<BankReceiptImportModuleProps> = (
       setStatusMsg(
         `Receipt Voucher Created & Party Ledger Updated: Rs. ${formatINR(netAmt)}${
           tdsAmt > 0 ? ` + TDS Rs. ${formatINR(tdsAmt)}` : ''
-        } from ${partyName}${matchedInv ? ` (Invoice ${matchedInv.invoiceNo}: ${nextStatus})` : ''}.`
+        } from ${partyName}${linkedNosLabel ? ` (Bills ${linkedNosLabel}: ${nextStatus})` : ''}.`
       );
       setSmsAlertText('');
       setSmsDraft(null);
@@ -817,12 +846,12 @@ export const BankReceiptImportModule: React.FC<BankReceiptImportModuleProps> = (
     );
   };
 
-  const handlePrintSummary = async () => {
+  const buildSummaryPdf = async () => {
     const sumCredit = fyReceipts.reduce((s, r) => s + Number(r.creditAmount || 0), 0);
     const sumTds = fyReceipts.reduce((s, r) => s + Number(r.tdsAmount || 0), 0);
     const sumGross = fyReceipts.reduce((s, r) => s + Number(r.grossSettled || 0), 0);
 
-    const pdf = await generateFoxproStatementPDF(
+    return generateFoxproStatementPDF(
       {
         title: 'BANK RECEIPT & 194C TDS RECONCILIATION',
         subtitle: `Financial Year: ${activeFy}   |   Party Credits Only (Debits Excluded)`,
@@ -888,6 +917,10 @@ export const BankReceiptImportModule: React.FC<BankReceiptImportModuleProps> = (
       },
       company
     );
+  };
+
+  const handlePrintSummary = async () => {
+    const pdf = await buildSummaryPdf();
     onOpenPreview(pdf);
   };
 
@@ -937,14 +970,92 @@ export const BankReceiptImportModule: React.FC<BankReceiptImportModuleProps> = (
             </div>
           </div>
 
-          <button
-            type="button"
-            onClick={() => void handlePrintSummary()}
-            className="inline-flex items-center gap-1.5 px-3 py-2 rounded-lg bg-[#0D47A1] hover:bg-blue-900 text-white text-xs font-bold cursor-pointer"
-          >
-            <Printer className="w-3.5 h-3.5" />
-            Print / PDF / Share Statement
-          </button>
+          <div className="flex flex-wrap items-center gap-1.5 text-xs">
+            <button
+              type="button"
+              onClick={() => void handlePrintSummary()}
+              className="inline-flex items-center gap-1 px-2.5 py-1.5 rounded-lg bg-[#0D47A1] hover:bg-blue-900 text-white font-bold cursor-pointer"
+            >
+              <Eye className="w-3.5 h-3.5" />
+              Preview
+            </button>
+            {onOpenPodScanner && (
+              <button
+                type="button"
+                onClick={onOpenPodScanner}
+                className="inline-flex items-center gap-1 px-2.5 py-1.5 rounded-lg bg-amber-500 hover:bg-amber-400 text-slate-950 font-extrabold cursor-pointer"
+              >
+                <ScanLine className="w-3.5 h-3.5" />
+                Scan
+              </button>
+            )}
+            <button
+              type="button"
+              onClick={async () => {
+                const pdf = await buildSummaryPdf();
+                downloadPdfDirect(pdf);
+              }}
+              className="inline-flex items-center gap-1 px-2.5 py-1.5 rounded-lg bg-emerald-600 hover:bg-emerald-700 text-white font-bold cursor-pointer"
+            >
+              <Download className="w-3.5 h-3.5" />
+              Low-KB PDF
+            </button>
+            <button
+              type="button"
+              onClick={async () => {
+                const pdf = await buildSummaryPdf();
+                printPdfDirect(pdf);
+              }}
+              className="inline-flex items-center gap-1 px-2.5 py-1.5 rounded-lg bg-white border border-slate-300 hover:bg-slate-100 text-slate-800 font-semibold cursor-pointer"
+            >
+              <Printer className="w-3.5 h-3.5" />
+              Manual Print
+            </button>
+            <button
+              type="button"
+              onClick={async () => {
+                const pdf = await buildSummaryPdf();
+                const res = await sharePdfDirect({
+                  pdf,
+                  channel: 'whatsapp',
+                  partyName: 'Bank Receipt Reconciliation',
+                  docNo: activeFy,
+                  docLabel: 'Bank Receipt & TDS Statement',
+                  company,
+                });
+                setStatusMsg(res.message);
+              }}
+              className="inline-flex items-center gap-1 px-2.5 py-1.5 rounded-lg bg-green-600 hover:bg-green-700 text-white font-bold cursor-pointer"
+            >
+              <Share2 className="w-3.5 h-3.5" />
+              Share
+            </button>
+            {!readOnly && (
+              <button
+                type="button"
+                onClick={() => {
+                  const latest = fyReceipts[0];
+                  setSmsDraft({
+                    receiptDate: latest?.receiptDate || todayISO(),
+                    creditAmount: latest?.creditAmount || 0,
+                    partyName: latest?.partyName || '',
+                    paymentMode: latest?.paymentMode || 'NEFT',
+                    utrNo: latest?.utrNo || '',
+                    upiRefId: latest?.upiRefId || '',
+                    chequeNo: latest?.chequeNo || '',
+                    matchedInvoiceId: latest?.matchedInvoiceId || '',
+                    matchedInvoiceIds: latest?.matchedInvoiceIds || (latest?.matchedInvoiceId ? [latest.matchedInvoiceId] : []),
+                    tdsAmount: latest?.tdsAmount || 0,
+                    looksLikeDebit: false,
+                  });
+                }}
+                className="inline-flex items-center gap-1 px-2.5 py-1.5 rounded-lg bg-amber-50 border border-amber-300 hover:bg-amber-100 text-amber-900 font-bold cursor-pointer"
+              >
+                <Edit3 className="w-3.5 h-3.5" />
+                Rectify / New
+              </button>
+            )}
+          </div>
         </div>
 
         {/* SMART BANK CREDIT SMS / EMAIL ALERT READER */}
@@ -1040,6 +1151,62 @@ export const BankReceiptImportModule: React.FC<BankReceiptImportModuleProps> = (
                   </div>
                 </div>
 
+                {/* Multi-Bill Settlement Checkboxes for SMS/Manual Receipt Voucher */}
+                {fyInvoices.filter((inv) => Math.max(0, Number(inv.grandTotal || 0) - Number(inv.paidAmount || 0)) > 0.5).length > 0 && (
+                  <div className="p-2 rounded bg-blue-50/70 border border-blue-200 space-y-1">
+                    <div className="text-[11px] font-extrabold text-blue-950">
+                      Multi-Bill Voucher Checkboxes ({(smsDraft.matchedInvoiceIds || []).length} Checked):
+                    </div>
+                    <div className="max-h-24 overflow-y-auto grid grid-cols-1 sm:grid-cols-3 gap-1">
+                      {fyInvoices
+                        .filter((inv) => {
+                          const due = Math.max(0, Number(inv.grandTotal || 0) - Number(inv.paidAmount || 0));
+                          if (due <= 0.5) return false;
+                          if (!smsDraft.partyName.trim()) return true;
+                          return inv.partyName.trim().toLowerCase() === smsDraft.partyName.trim().toLowerCase();
+                        })
+                        .slice(0, 18)
+                        .map((inv) => {
+                          const checked = (smsDraft.matchedInvoiceIds || []).includes(inv.id);
+                          const due = Math.max(0, Number(inv.grandTotal || 0) - Number(inv.paidAmount || 0));
+                          return (
+                            <label
+                              key={inv.id}
+                              className={`flex items-center justify-between gap-1.5 px-2 py-1 rounded border text-[11px] cursor-pointer ${
+                                checked ? 'bg-emerald-50 border-emerald-400 font-bold text-emerald-950' : 'bg-white border-slate-200'
+                              }`}
+                            >
+                              <span className="inline-flex items-center gap-1 truncate">
+                                <input
+                                  type="checkbox"
+                                  checked={checked}
+                                  onChange={() => {
+                                    const prev = smsDraft.matchedInvoiceIds || [];
+                                    const nextIds = checked ? prev.filter((id) => id !== inv.id) : [...prev, inv.id];
+                                    const nextInvs = fyInvoices.filter((i) => nextIds.includes(i.id));
+                                    const sumDue = nextInvs.reduce(
+                                      (s, i) => s + Math.max(0, Number(i.grandTotal || 0) - Number(i.paidAmount || 0)),
+                                      0
+                                    );
+                                    setSmsDraft({
+                                      ...smsDraft,
+                                      matchedInvoiceIds: nextIds,
+                                      matchedInvoiceId: nextIds[0] || '',
+                                      partyName: nextInvs[0]?.partyName || smsDraft.partyName,
+                                      creditAmount: nextInvs.length > 0 && smsDraft.creditAmount === 0 ? Math.round(sumDue * 100) / 100 : smsDraft.creditAmount,
+                                    });
+                                  }}
+                                />
+                                <span className="font-mono-num">{inv.invoiceNo}</span>
+                              </span>
+                              <span className="font-mono-num text-rose-700 shrink-0">₹{formatINR(due)}</span>
+                            </label>
+                          );
+                        })}
+                    </div>
+                  </div>
+                )}
+
                 <div className="grid grid-cols-1 sm:grid-cols-6 gap-2.5 items-end">
                   <div className="sm:col-span-3">
                     <label className="block text-[11px] font-bold text-slate-700 mb-1">
@@ -1053,6 +1220,7 @@ export const BankReceiptImportModule: React.FC<BankReceiptImportModuleProps> = (
                         setSmsDraft({
                           ...smsDraft,
                           matchedInvoiceId: invId,
+                          matchedInvoiceIds: invId ? Array.from(new Set([...(smsDraft.matchedInvoiceIds || []), invId])) : [],
                           partyName: hit?.partyName || smsDraft.partyName,
                         });
                       }}
@@ -1095,7 +1263,7 @@ export const BankReceiptImportModule: React.FC<BankReceiptImportModuleProps> = (
                       className="inline-flex items-center gap-1.5 px-4 py-1.5 rounded-lg bg-emerald-600 hover:bg-emerald-700 text-white font-extrabold cursor-pointer disabled:opacity-60"
                     >
                       <CheckCircle2 className="w-4 h-4" />
-                      {savingSms ? 'Posting...' : 'Auto-Create Receipt Voucher & Update Ledger'}
+                      {savingSms ? 'Posting...' : 'Save Receipt Voucher & Update Ledger'}
                     </button>
                   </div>
                 </div>

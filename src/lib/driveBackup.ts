@@ -1590,3 +1590,150 @@ export async function uploadPdfToDivisionVaultFolder(params: {
 
   return (await res.json()) as { id: string; name: string; webViewLink?: string };
 }
+
+// ============================================================================
+// YEAR-WISE AUTO-GENERATED DRIVE FOLDERS (FY_YYYY-YY / ROLE / PDF)
+// + AUTO-CLEAN SCRATCH COPIES ON SAVE/RECTIFY
+// ============================================================================
+
+export type DriveRoleCategory =
+  | 'POD'
+  | 'BROKER'
+  | 'OWNER'
+  | 'DRIVER'
+  | 'VEHICLES'
+  | 'PARTY'
+  | 'STAFF'
+  | 'LR_Copy'
+  | 'Bills_Invoices'
+  | 'Quotations'
+  | 'Declarations'
+  | 'Bank_Statements';
+
+export function getDriveFyFolderName(fy?: string): string {
+  const code = formatDriveYearCode(fy || 'FY 2026-27');
+  return `FY_${code}`;
+}
+
+function sanitizeDriveSubFolder(raw?: string): string {
+  return String(raw || '')
+    .trim()
+    .replace(/[\\/:*?"<>|]+/g, '_')
+    .replace(/\s+/g, ' ')
+    .slice(0, 64);
+}
+
+export async function cleanupScratchFilesInFolder(
+  folderId: string,
+  accessToken: string,
+  preserveFileName?: string
+): Promise<number> {
+  try {
+    const q = encodeURIComponent(
+      `'${folderId}' in parents and trashed = false and mimeType != 'application/vnd.google-apps.folder'`
+    );
+    const res = await driveFetch(
+      `https://www.googleapis.com/drive/v3/files?q=${q}&fields=files(id,name)&pageSize=50`,
+      accessToken
+    );
+    const json = (await res.json()) as { files?: Array<{ id: string; name: string }> };
+    let cleaned = 0;
+    const preserveLower = String(preserveFileName || '').toLowerCase();
+    for (const file of json.files || []) {
+      const lower = String(file.name || '').toLowerCase();
+      if (preserveLower && lower === preserveLower) continue;
+      const isScratch =
+        /(^|_|-|\s)(scratch|tmp|temp|draft_copy|unlinked_copy)(\.|_|-|\s|$)/i.test(lower) ||
+        /^copy of /i.test(lower);
+      if (isScratch) {
+        await driveFetch(`https://www.googleapis.com/drive/v3/files/${file.id}`, accessToken, {
+          method: 'DELETE',
+        });
+        cleaned += 1;
+      }
+    }
+    return cleaned;
+  } catch {
+    return 0;
+  }
+}
+
+export async function uploadRoleOrganizedPdfToDrive(params: {
+  accessToken: string;
+  fy?: string;
+  rootFolderName?: string;
+  category: DriveRoleCategory;
+  entitySubFolder?: string;
+  fileName: string;
+  blob: Blob;
+  connectedEmail?: string | null;
+  cleanScratch?: boolean;
+}): Promise<{ id: string; name: string; webViewLink?: string; folderPath: string; cleanedScratchCount: number }> {
+  const {
+    accessToken,
+    fy,
+    rootFolderName,
+    category,
+    entitySubFolder,
+    fileName,
+    blob,
+    connectedEmail,
+    cleanScratch = true,
+  } = params;
+  assertAuthorizedBackupAccount(connectedEmail);
+  assertSafeDriveFileName(fileName);
+
+  const rootName = sanitizeDriveSubFolder(rootFolderName) || ROOT_FOLDER_NAME;
+  const fyFolderName = getDriveFyFolderName(fy);
+  const rootId = await findOrCreateFolder(rootName, accessToken);
+  const fyId = await findOrCreateFolder(fyFolderName, accessToken, rootId);
+  const catId = await findOrCreateFolder(category, accessToken, fyId);
+
+  const safeSub = sanitizeDriveSubFolder(entitySubFolder);
+  const targetFolderId = safeSub ? await findOrCreateFolder(safeSub, accessToken, catId) : catId;
+
+  const folderPath = safeSub
+    ? `${rootName}/${fyFolderName}/${category}/${safeSub}`
+    : `${rootName}/${fyFolderName}/${category}`;
+
+  const existingId = await findFileInFolder(fileName, targetFolderId, accessToken);
+  const boundary = 'drc_fy_pdf_' + Date.now() + '_' + Math.random().toString(36).slice(2, 6);
+  const mimeType = blob.type || 'application/pdf';
+  const metadata = existingId
+    ? { name: fileName, mimeType }
+    : { name: fileName, mimeType, parents: [targetFolderId] };
+
+  const arrayBuffer = await blob.arrayBuffer();
+  const base64Body = uint8ArrayToBase64(new Uint8Array(arrayBuffer));
+  const multipartBody =
+    `--${boundary}\r\n` +
+    `Content-Type: application/json; charset=UTF-8\r\n\r\n` +
+    `${JSON.stringify(metadata)}\r\n` +
+    `--${boundary}\r\n` +
+    `Content-Type: ${mimeType}\r\n` +
+    `Content-Transfer-Encoding: base64\r\n\r\n` +
+    `${base64Body}\r\n` +
+    `--${boundary}--`;
+
+  const url = existingId
+    ? `https://www.googleapis.com/upload/drive/v3/files/${existingId}?uploadType=multipart&fields=id,name,webViewLink`
+    : `https://www.googleapis.com/upload/drive/v3/files?uploadType=multipart&fields=id,name,webViewLink`;
+
+  const res = await driveFetch(url, accessToken, {
+    method: existingId ? 'PATCH' : 'POST',
+    headers: { 'Content-Type': `multipart/related; boundary=${boundary}` },
+    body: multipartBody,
+  });
+  const uploaded = (await res.json()) as { id: string; name: string; webViewLink?: string };
+
+  const cleanedScratchCount = cleanScratch
+    ? await cleanupScratchFilesInFolder(targetFolderId, accessToken, fileName)
+    : 0;
+
+  return {
+    ...uploaded,
+    folderPath,
+    cleanedScratchCount,
+  };
+}
+

@@ -6,7 +6,9 @@ import {
   ChevronDown,
   ChevronUp,
   CloudUpload,
+  Download,
   Edit3,
+  Eye,
   Lock,
   Mail,
   MessageSquare,
@@ -14,6 +16,7 @@ import {
   Printer,
   RotateCcw,
   Save,
+  ScanLine,
   Search,
   Sparkles,
   Trash2,
@@ -48,8 +51,10 @@ import { logBranchActivity, removeDocument, upsertDocument } from '../lib/firest
 import { uploadPdfToDivisionVaultFolder } from '../lib/driveBackup';
 import {
   GeneratedPdfResult,
+  downloadPdfDirect,
   generateFoxproStatementPDF,
   generatePodScanPDF,
+  printPdfDirect,
 } from '../lib/pdfEngine';
 import { sharePdfDirect } from '../lib/shareUtils';
 import { useDebouncedValue } from '../hooks/useDebounce';
@@ -668,8 +673,10 @@ const LorryHirePodModuleInner: React.FC<LorryHirePodModuleProps> = ({
         const resBlob = await (await fetch(enhanced.dataUrl)).blob();
         fileToScan = new File([resBlob], file.name.replace(/\.[^.]+$/, '.jpg'), { type: 'image/jpeg' });
       }
-      const { result, compressedDataUrl } = await scanPODDocument(fileToScan, (m) =>
-        setPodScanStatus(m)
+      const { result, compressedDataUrl } = await scanPODDocument(
+        fileToScan,
+        (m) => setPodScanStatus(m),
+        Boolean(company?.backgroundAiEnabled)
       );
       setPodImageUrl(compressedDataUrl);
       const effectiveTruck = (podTruckNo.trim() || activePodTarget.truckNo || activePodTarget.cnNo || 'TRUCK')
@@ -890,8 +897,79 @@ const LorryHirePodModuleInner: React.FC<LorryHirePodModuleProps> = ({
     setPayRef('');
   };
 
-  const handlePreviewHireVoucher = async (h: LorryHire) => {
-    if (!onPreviewPdf) return;
+  const buildCurrentHireSnapshot = (): LorryHire => {
+    const cleanedAdvances = activeAdvanceRows
+      .slice(0, 50)
+      .map((a) => ({
+        payeeType: a.payeeType || 'Lorry Owner',
+        accountName: a.accountName || accountBankOptions[0] || 'Cash in Hand',
+        holderName: (a.holderName || '').trim(),
+        bankAccountNo: (a.bankAccountNo || '').trim(),
+        upiId: (a.upiId || '').trim(),
+        refNo: (a.refNo || '').trim(),
+        advanceDate: a.advanceDate || todayISO(),
+        mode: a.mode || 'NEFT',
+        amount: Number(a.amount) || 0,
+      }))
+      .filter((a) => a.amount > 0 || activeAdvanceRows.length === 1);
+    const existing = editingHireId ? lorryHires.find((x) => x.id === editingHireId) : undefined;
+    return {
+      id: editingHireId || 'preview_hire',
+      cnNo: cnNo.trim() || 'PREVIEW',
+      cnDate: cnDate || todayISO(),
+      financialYear: normalizeFyLabel(activeFy),
+      division,
+      truckNo: truckNo.trim().toUpperCase() || '-',
+      ownerName: ownerName.trim(),
+      brokerName: brokerName.trim(),
+      fromCity: fromCity.trim(),
+      fromPinCode: fromPinCode.trim(),
+      fromCountry,
+      toCity: toCity.trim(),
+      toPinCode: toPinCode.trim(),
+      toCountry,
+      weightMt: Number(weightMt) || 0,
+      rateMode,
+      ratePerUnit: Number(ratePerUnit) || 0,
+      bookedPkgs: bookedNum,
+      deliveredPkgs: deliveredNum,
+      shortageDamagePkgs,
+      hasMultiAdvance,
+      advances: cleanedAdvances,
+      hireAmount: hireNum,
+      advancePaid: totalAdvances,
+      extraAdvanceAmt: extraAdvNum,
+      balancePaidAmt: Number(balancePaidAmt) || 0,
+      loadingCharge: loadNum,
+      unloadingCharge: unloadNum,
+      parkingCharge: parkNum,
+      kataCharge: kataNum,
+      detentionDays: Number(detentionDays) || 0,
+      detentionCharge: detChgNum,
+      shortageCharge: shortChgNum,
+      damageCharge: dmgChgNum,
+      tdsRatePct: Number(tdsRatePct) || 0,
+      tdsAmount: tdsAmtNum,
+      receiptChallanNo: receiptChallanNo.trim(),
+      receiptChallanDate: receiptChallanDate.trim(),
+      remarks: remarks.trim(),
+      balancePayable,
+      podReceived: existing?.podReceived ?? false,
+      podReceiveDate: existing?.podReceiveDate ?? '',
+      podImageDataUrl: existing?.podImageDataUrl ?? '',
+      podFileName: existing?.podFileName ?? '',
+      podRemarks: existing?.podRemarks ?? '',
+      balancePaid: existing?.balancePaid ?? false,
+      balancePaidDate: existing?.balancePaidDate ?? '',
+      paymentMode: existing?.paymentMode ?? '',
+      paymentRef: existing?.paymentRef ?? '',
+      branchCode: existing?.branchCode || activeBranchCode,
+      createdByStaff: existing?.createdByStaff || activeStaffCode,
+      ownerUid,
+    };
+  };
+
+  const buildHireVoucherPdf = async (h: LorryHire): Promise<GeneratedPdfResult> => {
     const advRows = Array.isArray(h.advances) ? h.advances : [];
     const totalDed =
       Number(h.advancePaid || 0) +
@@ -930,7 +1008,7 @@ const LorryHirePodModuleInner: React.FC<LorryHirePodModuleProps> = ({
       { line1: ['-', '(-) Damage Charge', 'POD Damage Claim', `-${formatINR(h.damageCharge || 0)}`] },
     ];
 
-    const pdf = await generateFoxproStatementPDF(
+    return generateFoxproStatementPDF(
       {
         title: 'L-O-R-R-Y   H-I-R-E   S-E-T-T-L-E-M-E-N-T   V-O-U-C-H-E-R',
         subtitle: `CN: ${h.cnNo} (${formatDateDDMMYYYY(h.cnDate)}) | Truck: ${h.truckNo} | Branch: ${h.branchCode || activeBranchCode}`,
@@ -960,6 +1038,11 @@ const LorryHirePodModuleInner: React.FC<LorryHirePodModuleProps> = ({
       effectiveCompany,
       'p'
     );
+  };
+
+  const handlePreviewHireVoucher = async (h: LorryHire) => {
+    if (!onPreviewPdf) return;
+    const pdf = await buildHireVoucherPdf(h);
     onPreviewPdf(pdf, 'Reports_Ledgers');
   };
 
@@ -2110,7 +2193,113 @@ const LorryHirePodModuleInner: React.FC<LorryHirePodModuleProps> = ({
           </div>
         </div>
 
-        <div className="px-4 py-3 bg-slate-50 border-t border-slate-200 flex justify-end">
+        <div className="px-4 py-3 bg-slate-50 border-t border-slate-200 flex flex-wrap items-center justify-end gap-2">
+          {filteredHires.length > 0 && !editingHireId && (
+            <button
+              type="button"
+              disabled={readOnly}
+              onClick={() => {
+                const target = filteredHires.find((x) => !x.balancePaid) || filteredHires[0];
+                if (target) handleLoadForEdit(target);
+              }}
+              className="inline-flex items-center gap-1 px-2.5 py-1.5 rounded-md bg-amber-50 border border-amber-300 hover:bg-amber-100 text-amber-900 text-xs font-bold cursor-pointer disabled:opacity-40"
+              title="Reload latest Lorry Hire into form for Rectification"
+            >
+              <Edit3 className="w-3.5 h-3.5" />
+              Rectify Last
+            </button>
+          )}
+          <button
+            type="button"
+            onClick={() => {
+              const target =
+                (editingHireId && lorryHires.find((x) => x.id === editingHireId)) ||
+                filteredHires[0];
+              if (!target) return;
+              setActivePodTarget(target);
+              setPodTruckNo(target.truckNo || '');
+              setPodDate(target.podReceiveDate || todayISO());
+              setPodBookedPkgs(target.bookedPkgs != null ? String(target.bookedPkgs) : '');
+              setPodDeliveredPkgs(
+                target.deliveredPkgs != null
+                  ? String(target.deliveredPkgs)
+                  : target.bookedPkgs != null
+                    ? String(target.bookedPkgs)
+                    : ''
+              );
+              setPodShortageCharge(String(target.shortageCharge ?? 0));
+              setPodDamageCharge(String(target.damageCharge ?? 0));
+              setPodRemarks(target.podRemarks || '');
+              setPodShortageAlert(false);
+              setPodImageUrl(target.podImageDataUrl || '');
+              setPodFileName(target.podFileName || '');
+              setPodScanStatus(null);
+            }}
+            disabled={filteredHires.length === 0 && !editingHireId}
+            className="inline-flex items-center gap-1 px-2.5 py-1.5 rounded-md border border-emerald-300 bg-emerald-50 hover:bg-emerald-100 text-emerald-900 text-xs font-bold cursor-pointer disabled:opacity-40"
+          >
+            <ScanLine className="w-3.5 h-3.5" />
+            Scan POD
+          </button>
+          <button
+            type="button"
+            onClick={async () => {
+              const pdf = await buildHireVoucherPdf(buildCurrentHireSnapshot());
+              if (onPreviewPdf) onPreviewPdf(pdf, 'Reports_Ledgers');
+            }}
+            className="inline-flex items-center gap-1 px-2.5 py-1.5 rounded-md border border-slate-300 bg-white hover:bg-slate-100 text-slate-800 text-xs font-semibold cursor-pointer"
+          >
+            <Eye className="w-3.5 h-3.5" />
+            Preview
+          </button>
+          <button
+            type="button"
+            onClick={async () => {
+              const pdf = await buildHireVoucherPdf(buildCurrentHireSnapshot());
+              downloadPdfDirect(pdf);
+            }}
+            className="inline-flex items-center gap-1 px-2.5 py-1.5 rounded-md border border-blue-300 bg-blue-50 hover:bg-blue-100 text-blue-900 text-xs font-bold cursor-pointer"
+          >
+            <Download className="w-3.5 h-3.5" />
+            Low-KB PDF
+          </button>
+          <button
+            type="button"
+            onClick={async () => {
+              const pdf = await buildHireVoucherPdf(buildCurrentHireSnapshot());
+              printPdfDirect(pdf);
+            }}
+            className="inline-flex items-center gap-1 px-2.5 py-1.5 rounded-md border border-slate-300 bg-white hover:bg-slate-100 text-slate-800 text-xs font-semibold cursor-pointer"
+          >
+            <Printer className="w-3.5 h-3.5" />
+            Manual Print
+          </button>
+          <button
+            type="button"
+            onClick={async () => {
+              const snap = buildCurrentHireSnapshot();
+              const pdf = await buildHireVoucherPdf(snap);
+              const matchedParty = parties.find(
+                (p) =>
+                  p.name.trim().toLowerCase() === (snap.ownerName || '').trim().toLowerCase() ||
+                  p.name.trim().toLowerCase() === (snap.brokerName || '').trim().toLowerCase()
+              );
+              await sharePdfDirect({
+                pdf,
+                channel: 'whatsapp',
+                phone: matchedParty?.phone,
+                email: matchedParty?.email,
+                partyName: snap.ownerName || snap.brokerName || snap.truckNo,
+                docNo: snap.cnNo,
+                docLabel: 'Lorry Hire Challan',
+                company: effectiveCompany,
+              });
+            }}
+            className="inline-flex items-center gap-1 px-2.5 py-1.5 rounded-md bg-emerald-600 hover:bg-emerald-700 text-white text-xs font-bold cursor-pointer"
+          >
+            <MessageSquare className="w-3.5 h-3.5" />
+            Share WA
+          </button>
           <button
             type="submit"
             disabled={saving || readOnly}
@@ -2447,11 +2636,109 @@ const LorryHirePodModuleInner: React.FC<LorryHirePodModuleProps> = ({
                 </div>
               </div>
 
-              <div className="flex justify-end gap-2 pt-2 border-t border-slate-200">
+              <div className="flex flex-wrap justify-end gap-2 pt-2 border-t border-slate-200">
+                {podImageUrl && (
+                  <>
+                    <button
+                      type="button"
+                      onClick={async () => {
+                        const pdf = await generatePodScanPDF({
+                          imageDataUrl: podImageUrl,
+                          truckNo: (podTruckNo.trim() || activePodTarget.truckNo || activePodTarget.cnNo).toUpperCase(),
+                          cnNo: activePodTarget.cnNo,
+                          podDate: podDate || todayISO(),
+                          remarks: podRemarks.trim(),
+                          partyName: activePodTarget.ownerName || activePodTarget.brokerName,
+                          division: (activePodTarget.division as BusinessMode) || 'FTL',
+                          company: effectiveCompany,
+                        });
+                        if (onPreviewPdf) onPreviewPdf(pdf, 'POD_Scans');
+                      }}
+                      className="inline-flex items-center gap-1 px-2.5 py-2 rounded-lg border border-slate-300 bg-white hover:bg-slate-100 text-slate-800 font-semibold cursor-pointer"
+                    >
+                      <Eye className="w-3.5 h-3.5" />
+                      Preview
+                    </button>
+                    <button
+                      type="button"
+                      onClick={async () => {
+                        const pdf = await generatePodScanPDF({
+                          imageDataUrl: podImageUrl,
+                          truckNo: (podTruckNo.trim() || activePodTarget.truckNo || activePodTarget.cnNo).toUpperCase(),
+                          cnNo: activePodTarget.cnNo,
+                          podDate: podDate || todayISO(),
+                          remarks: podRemarks.trim(),
+                          partyName: activePodTarget.ownerName || activePodTarget.brokerName,
+                          division: (activePodTarget.division as BusinessMode) || 'FTL',
+                          company: effectiveCompany,
+                        });
+                        downloadPdfDirect(pdf);
+                      }}
+                      className="inline-flex items-center gap-1 px-2.5 py-2 rounded-lg border border-blue-300 bg-blue-50 hover:bg-blue-100 text-blue-900 font-bold cursor-pointer"
+                    >
+                      <Download className="w-3.5 h-3.5" />
+                      Low-KB PDF
+                    </button>
+                    <button
+                      type="button"
+                      onClick={async () => {
+                        const pdf = await generatePodScanPDF({
+                          imageDataUrl: podImageUrl,
+                          truckNo: (podTruckNo.trim() || activePodTarget.truckNo || activePodTarget.cnNo).toUpperCase(),
+                          cnNo: activePodTarget.cnNo,
+                          podDate: podDate || todayISO(),
+                          remarks: podRemarks.trim(),
+                          partyName: activePodTarget.ownerName || activePodTarget.brokerName,
+                          division: (activePodTarget.division as BusinessMode) || 'FTL',
+                          company: effectiveCompany,
+                        });
+                        printPdfDirect(pdf);
+                      }}
+                      className="inline-flex items-center gap-1 px-2.5 py-2 rounded-lg border border-slate-300 bg-white hover:bg-slate-100 text-slate-800 font-semibold cursor-pointer"
+                    >
+                      <Printer className="w-3.5 h-3.5" />
+                      Manual Print
+                    </button>
+                    <button
+                      type="button"
+                      onClick={async () => {
+                        const pdf = await generatePodScanPDF({
+                          imageDataUrl: podImageUrl,
+                          truckNo: (podTruckNo.trim() || activePodTarget.truckNo || activePodTarget.cnNo).toUpperCase(),
+                          cnNo: activePodTarget.cnNo,
+                          podDate: podDate || todayISO(),
+                          remarks: podRemarks.trim(),
+                          partyName: activePodTarget.ownerName || activePodTarget.brokerName,
+                          division: (activePodTarget.division as BusinessMode) || 'FTL',
+                          company: effectiveCompany,
+                        });
+                        const matchedParty = parties.find(
+                          (p) =>
+                            p.name.trim().toLowerCase() === (activePodTarget.ownerName || '').trim().toLowerCase() ||
+                            p.name.trim().toLowerCase() === (activePodTarget.brokerName || '').trim().toLowerCase()
+                        );
+                        await sharePdfDirect({
+                          pdf,
+                          channel: 'whatsapp',
+                          phone: matchedParty?.phone,
+                          email: matchedParty?.email,
+                          partyName: activePodTarget.ownerName || activePodTarget.brokerName,
+                          docNo: activePodTarget.cnNo,
+                          docLabel: 'POD Scan',
+                          company: effectiveCompany,
+                        });
+                      }}
+                      className="inline-flex items-center gap-1 px-2.5 py-2 rounded-lg bg-indigo-600 hover:bg-indigo-700 text-white font-bold cursor-pointer"
+                    >
+                      <MessageSquare className="w-3.5 h-3.5" />
+                      Share WA
+                    </button>
+                  </>
+                )}
                 <button
                   type="button"
                   onClick={() => setActivePodTarget(null)}
-                  className="px-4 py-2 rounded-lg border border-slate-300 text-slate-700 font-semibold cursor-pointer"
+                  className="px-3 py-2 rounded-lg border border-slate-300 text-slate-700 font-semibold cursor-pointer"
                 >
                   Cancel
                 </button>

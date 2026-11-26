@@ -19,6 +19,7 @@ import {
   PdfOrientation,
   PdfTaskPayload,
 } from './pdfBuilders';
+import type { TallyLedgerStatement } from './tallyLedgerEngine';
 import { savePdfToVault } from './pdfVaultStorage';
 
 const DRC_RING_LOGO_URL = '/assets/aistudio/WhatsApp_Image_2026-11-16_at_11.55.22_PM__2__3293db0a.jpeg';
@@ -146,6 +147,14 @@ async function getAssets(company?: CompanySettings): Promise<PdfAssets> {
     );
   }
 
+  let logoDataUrl = cachedLogoDataUrl;
+  if (company?.logoDataUrl) {
+    const normalizedLogo = await loadImageToCompressedDataUrl(company.logoDataUrl, 640, 0.95);
+    if (normalizedLogo) {
+      logoDataUrl = normalizedLogo;
+    }
+  }
+
   let stampDataUrl = cachedDefaultStampDataUrl;
   if (company?.customStampDataUrl) {
     const normalizedCustom = await loadImageToCompressedDataUrl(company.customStampDataUrl, 540, 0.94);
@@ -162,13 +171,19 @@ async function getAssets(company?: CompanySettings): Promise<PdfAssets> {
     }
   }
 
-  const watermarkDataUrl =
+  let watermarkDataUrl =
     typeof OffscreenCanvas !== 'undefined'
       ? undefined
       : createFallbackTwinDolphinWatermarkDataUrl();
+  if (company?.watermarkDataUrl) {
+    const normalizedWatermark = await loadImageToCompressedDataUrl(company.watermarkDataUrl, 520, 0.85);
+    if (normalizedWatermark) {
+      watermarkDataUrl = normalizedWatermark;
+    }
+  }
 
   return {
-    logoDataUrl: cachedLogoDataUrl,
+    logoDataUrl,
     stampDataUrl,
     panCropDataUrl,
     watermarkDataUrl,
@@ -387,25 +402,27 @@ async function runPdfTask(
       );
 
       const blob = new Blob([result.buffer], { type: 'application/pdf' });
-      const blobUrl = URL.createObjectURL(blob);
-      const sizeKB = Math.max(1, Math.round(blob.size / 1024));
-      const baseVault = resolveVaultContextFromTask(task);
-      if (baseVault) {
-        void savePdfToVault({
-          ...baseVault,
-          ...vaultOverride,
-          fileName: result.fileName,
+      if (task.kind === 'imagePages' || blob.size <= 350 * 1024) {
+        const blobUrl = URL.createObjectURL(blob);
+        const sizeKB = Math.max(1, Math.round(blob.size / 1024));
+        const baseVault = resolveVaultContextFromTask(task);
+        if (baseVault) {
+          void savePdfToVault({
+            ...baseVault,
+            ...vaultOverride,
+            fileName: result.fileName,
+            blob,
+          });
+        }
+        return attachRebuild({
           blob,
+          blobUrl,
+          fileName: result.fileName,
+          sizeKB,
+          title: result.title,
+          orientation: chosenOrientation,
         });
       }
-      return attachRebuild({
-        blob,
-        blobUrl,
-        fileName: result.fileName,
-        sizeKB,
-        title: result.title,
-        orientation: chosenOrientation,
-      });
     } catch {
       // Fallback to main thread cleanly if worker is blocked
     }
@@ -414,8 +431,48 @@ async function runPdfTask(
   if (!task.assets.watermarkDataUrl) {
     task.assets.watermarkDataUrl = createFallbackTwinDolphinWatermarkDataUrl();
   }
-  const { buffer, fileName, title } = buildPdfArrayBuffer(task);
-  const blob = new Blob([buffer], { type: 'application/pdf' });
+
+  const buildBlobFromTask = async (currentTask: PdfTaskPayload) => {
+    const out = buildPdfArrayBuffer(currentTask);
+    return { ...out, blob: new Blob([out.buffer], { type: 'application/pdf' }) };
+  };
+
+  let built = await buildBlobFromTask(task);
+
+  // Universal Low-KB Guarantee: auto-downscale raster branding assets cleanly until PDF <= 350 KB (text remains crisp vector)
+  if (task.kind !== 'imagePages' && built.blob.size > 350 * 1024) {
+    const assetTiers: Array<{ maxW: number; quality: number; dropWatermark: boolean }> = [
+      { maxW: 360, quality: 0.72, dropWatermark: false },
+      { maxW: 240, quality: 0.54, dropWatermark: true },
+      { maxW: 160, quality: 0.42, dropWatermark: true },
+    ];
+    for (const tier of assetTiers) {
+      if (built.blob.size <= 350 * 1024) break;
+      const nextAssets: PdfAssets = {
+        logoDataUrl: task.assets.logoDataUrl
+          ? (await loadImageToCompressedDataUrl(task.assets.logoDataUrl, tier.maxW, tier.quality)) ||
+            task.assets.logoDataUrl
+          : undefined,
+        stampDataUrl: task.assets.stampDataUrl
+          ? (await loadImageToCompressedDataUrl(task.assets.stampDataUrl, tier.maxW, tier.quality)) ||
+            task.assets.stampDataUrl
+          : undefined,
+        panCropDataUrl: task.assets.panCropDataUrl
+          ? (await loadImageToCompressedDataUrl(task.assets.panCropDataUrl, tier.maxW, tier.quality)) ||
+            task.assets.panCropDataUrl
+          : undefined,
+        watermarkDataUrl: tier.dropWatermark
+          ? undefined
+          : task.assets.watermarkDataUrl
+          ? (await loadImageToCompressedDataUrl(task.assets.watermarkDataUrl, tier.maxW, tier.quality)) ||
+            task.assets.watermarkDataUrl
+          : undefined,
+      };
+      built = await buildBlobFromTask({ ...task, assets: nextAssets });
+    }
+  }
+
+  const { blob, fileName, title } = built;
   const blobUrl = URL.createObjectURL(blob);
   const sizeKB = Math.max(1, Math.round(blob.size / 1024));
   const baseVault = resolveVaultContextFromTask(task);
@@ -469,7 +526,8 @@ export async function generateLR3CopyPDF(
   cn: ConsignmentNote,
   company: CompanySettings,
   orientation: PdfOrientation = 'l',
-  shareMeta?: PdfShareMeta
+  shareMeta?: PdfShareMeta,
+  singleCopyOnly = true
 ): Promise<GeneratedPdfResult> {
   const assets = await getAssets(company);
   const res = await runPdfTask({
@@ -477,6 +535,7 @@ export async function generateLR3CopyPDF(
     cn,
     company,
     orientation,
+    singleCopyOnly,
     assets: { ...assets },
   }, shareMeta);
   return {
@@ -688,26 +747,70 @@ export async function generatePodScanPDF(params: {
   orientation?: PdfOrientation;
 }): Promise<GeneratedPdfResult> {
   const assets = await getAssets(params.company);
-  const normalizedImg =
-    (await loadImageToCompressedDataUrl(params.imageDataUrl, 1280, 0.86)) || params.imageDataUrl;
+
+  // Target crystal-clear Low-KB PDF strictly <= 350 KB (prefer 100 KB - 350 KB band)
+  const compressionSteps: Array<[number, number]> = [
+    [1280, 0.8],
+    [1120, 0.68],
+    [960, 0.56],
+    [800, 0.46],
+    [680, 0.36],
+    [560, 0.28],
+  ];
+
+  let res: GeneratedPdfResult | null = null;
+  for (const [maxW, q] of compressionSteps) {
+    const compressedImg =
+      (await loadImageToCompressedDataUrl(params.imageDataUrl, maxW, q)) || params.imageDataUrl;
+    const attempt = await runPdfTask({
+      kind: 'podScan',
+      imageDataUrl: compressedImg,
+      truckNo: params.truckNo,
+      cnNo: params.cnNo,
+      podDate: params.podDate,
+      remarks: params.remarks,
+      partyName: params.partyName,
+      division: params.division || 'FTL',
+      company: params.company,
+      orientation: params.orientation || 'p',
+      assets: { ...assets },
+    });
+    res = attempt;
+    if (attempt.blob.size <= 350 * 1024) {
+      break;
+    }
+  }
+
+  const finalRes = res!;
+  return {
+    ...finalRes,
+    shareMeta: {
+      partyName: params.partyName,
+      docNo: params.cnNo || params.truckNo,
+    },
+  };
+}
+
+export async function generateTallyRoleLedgerPDF(
+  statement: TallyLedgerStatement,
+  company: CompanySettings,
+  orientation: PdfOrientation = 'p',
+  shareMeta?: PdfShareMeta
+): Promise<GeneratedPdfResult> {
+  const assets = await getAssets(company);
   const res = await runPdfTask({
-    kind: 'podScan',
-    imageDataUrl: normalizedImg,
-    truckNo: params.truckNo,
-    cnNo: params.cnNo,
-    podDate: params.podDate,
-    remarks: params.remarks,
-    partyName: params.partyName,
-    division: params.division || 'FTL',
-    company: params.company,
-    orientation: params.orientation || 'p',
+    kind: 'tallyLedger',
+    statement,
+    company,
+    orientation,
     assets: { ...assets },
   });
   return {
     ...res,
-    shareMeta: {
-      partyName: params.partyName,
-      docNo: params.cnNo || params.truckNo,
+    shareMeta: shareMeta || {
+      partyName: statement.accountName,
+      docNo: `${statement.role.toUpperCase()}-${statement.accountName}`,
+      summaryText: `Tally Account Statement (${statement.fy}): ${statement.accountName} | Closing: Rs.${statement.closingBalance.toFixed(2)} ${statement.closingSide}`,
     },
   };
 }

@@ -34,6 +34,7 @@ type CollectionKey =
   | 'bank_receipts'
   | 'transactions'
   | 'declarations'
+  | 'trip_expenses'
   | 'staff_accounts'
   | 'presence'
   | 'activity_logs'
@@ -59,6 +60,7 @@ const VALID_COLLECTIONS = new Set<CollectionKey>([
   'bank_receipts',
   'transactions',
   'declarations',
+  'trip_expenses',
   'staff_accounts',
   'presence',
   'activity_logs',
@@ -97,6 +99,7 @@ interface ErpDbSchema {
   bank_receipts: ErpDoc[];
   transactions: ErpDoc[];
   declarations: ErpDoc[];
+  trip_expenses: ErpDoc[];
   staff_accounts: ErpDoc[];
   presence: ErpDoc[];
   activity_logs: ErpDoc[];
@@ -182,6 +185,7 @@ function createEmptyDb(): ErpDbSchema {
     bank_receipts: [],
     transactions: [],
     declarations: [],
+    trip_expenses: [],
     staff_accounts: DEFAULT_STAFF_SEED.map((s) => ({
       ...s,
       createdAt: now,
@@ -1346,6 +1350,7 @@ app.post('/api/erp/restore', async (req, res) => {
       'bank_receipts',
       'transactions',
       'declarations',
+      'trip_expenses',
       'staff_accounts',
       'logistics_parties',
       'logistics_vehicles',

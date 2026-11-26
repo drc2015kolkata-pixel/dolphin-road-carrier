@@ -294,6 +294,8 @@ const BackupSettingsModuleInner: React.FC<BackupSettingsModuleProps> = ({
 }) => {
   const stampInputRef = useRef<HTMLInputElement | null>(null);
   const panCardInputRef = useRef<HTMLInputElement | null>(null);
+  const logoInputRef = useRef<HTMLInputElement | null>(null);
+  const watermarkInputRef = useRef<HTMLInputElement | null>(null);
   const bholeBabaInputRef = useRef<HTMLInputElement | null>(null);
   const khatuShyamInputRef = useRef<HTMLInputElement | null>(null);
   const excelInputRef = useRef<HTMLInputElement | null>(null);
@@ -1240,8 +1242,22 @@ const BackupSettingsModuleInner: React.FC<BackupSettingsModuleProps> = ({
         fyOpeningBalances: compState.fyOpeningBalances || {},
         customStampDataUrl: compState.customStampDataUrl || '',
         panCardPhotoDataUrl: compState.panCardPhotoDataUrl || '',
+        logoDataUrl: compState.logoDataUrl || '',
+        watermarkDataUrl: compState.watermarkDataUrl || '',
         bholeBabaPhotoDataUrl: compState.bholeBabaPhotoDataUrl || '',
         khatuShyamPhotoDataUrl: compState.khatuShyamPhotoDataUrl || '',
+        driveRootFolder: (compState.driveRootFolder || 'Dolphin_Road_Carriers_ERP').trim(),
+        defaultVoiceLang: compState.defaultVoiceLang || 'en',
+        backgroundAiEnabled: Boolean(compState.backgroundAiEnabled),
+        lastSavedNoLock: compState.lastSavedNoLock !== false,
+        autoLockMasterBlocks: Boolean(compState.autoLockMasterBlocks),
+        taxSlabs:
+          Array.isArray(compState.taxSlabs) && compState.taxSlabs.length > 0
+            ? compState.taxSlabs
+            : [0, 5, 12, 18],
+        quotationCustomTerms: compState.quotationCustomTerms || '',
+        declarationCustomTerms: compState.declarationCustomTerms || '',
+        ...(compState.serialConfig ? { serialConfig: compState.serialConfig } : {}),
         autoLockMinutes: Number(compState.autoLockMinutes ?? 5),
         lockSourceInspection: compState.lockSourceInspection !== false,
         ...(compState.dropdownMaster ? { dropdownMaster: compState.dropdownMaster } : {}),
@@ -1249,7 +1265,7 @@ const BackupSettingsModuleInner: React.FC<BackupSettingsModuleProps> = ({
       },
       hasCustomSettings
     );
-    setDriveStatus('Company, Multi-Bank Accounts, Bank API, UPI QR, Branches, Stamp & Security Settings saved cleanly.');
+    setDriveStatus('Company, Multi-Bank Accounts, Bank API, UPI QR, Branches, Branding, Serials & Security Settings saved cleanly.');
   };
 
   const handleAddBankAccount = () => {
@@ -1367,6 +1383,52 @@ const BackupSettingsModuleInner: React.FC<BackupSettingsModuleProps> = ({
         setDriveStatus('Proprietor PAN Card photo loaded — click "Save Company Settings" to embed on right side of all Section 194C Declarations.');
       };
       img.onerror = () => setDriveError('Could not read the selected PAN Card image file.');
+      img.src = String(reader.result || '');
+    };
+    reader.readAsDataURL(file);
+  };
+
+  const handleUploadBrandImage = (
+    field: 'logoDataUrl' | 'watermarkDataUrl',
+    label: string,
+    maxSide: number,
+    file: File | undefined
+  ) => {
+    if (!file) return;
+    const uploadCheck = validateSafeUploadFile(file, 'image_only');
+    if (!uploadCheck.valid) {
+      playAlertBeep();
+      setDriveError(uploadCheck.reason || `Unsupported ${label} image blocked by DRC Security.`);
+      return;
+    }
+    setDriveError(null);
+    const reader = new FileReader();
+    reader.onload = () => {
+      const img = new Image();
+      img.onload = () => {
+        const scale = Math.min(1, maxSide / Math.max(img.width, img.height));
+        const w = Math.max(48, Math.round(img.width * scale));
+        const h = Math.max(48, Math.round(img.height * scale));
+        const canvas = document.createElement('canvas');
+        canvas.width = w;
+        canvas.height = h;
+        const ctx = canvas.getContext('2d');
+        if (!ctx) return;
+        ctx.clearRect(0, 0, w, h);
+        ctx.drawImage(img, 0, 0, w, h);
+        let dataUrl = canvas.toDataURL('image/png');
+        if (dataUrl.length > 435000) {
+          let quality = 0.85;
+          dataUrl = canvas.toDataURL('image/jpeg', quality);
+          while (dataUrl.length > 435000 && quality > 0.35) {
+            quality -= 0.1;
+            dataUrl = canvas.toDataURL('image/jpeg', quality);
+          }
+        }
+        setCompState((prev) => ({ ...prev, [field]: dataUrl.slice(0, 439500) }));
+        setDriveStatus(`${label} loaded cleanly — click "Save Company Settings" to apply across all PDFs & headers.`);
+      };
+      img.onerror = () => setDriveError(`Could not read the selected ${label} image file.`);
       img.src = String(reader.result || '');
     };
     reader.readAsDataURL(file);
@@ -3892,55 +3954,447 @@ const BackupSettingsModuleInner: React.FC<BackupSettingsModuleProps> = ({
                 ))}
               </div>
 
-              {/* Company Stamp & Digital Signature Upload */}
-              <div className="md:col-span-3 p-3.5 rounded-lg bg-slate-50 border border-slate-200 flex flex-wrap items-center justify-between gap-4">
-                <div className="space-y-1">
-                  <p className="font-bold text-slate-900 flex items-center gap-1.5">
-                    <ImagePlus className="w-4 h-4 text-blue-700" />
-                    <span>Company Stamp &amp; Digital Signature (Bottom-Right of Bill, LR &amp; Quotation)</span>
+              {/* Unlimited Editable Company Parameters Hub */}
+              <div className="md:col-span-3 p-3.5 rounded-lg bg-indigo-50/60 border border-indigo-200 space-y-3">
+                <div className="flex flex-wrap items-center justify-between gap-2">
+                  <p className="font-bold text-indigo-950 flex items-center gap-1.5">
+                    <Sparkles className="w-4 h-4 text-indigo-700" />
+                    <span>Unlimited Editable Company Parameters Hub (Drive Folder, Serial Lock, Voice, Tax Slabs &amp; Terms)</span>
                   </p>
-                  <p className="text-[11px] text-slate-600">
-                    Section 194C Declarations strictly display only the Top-Left Triangular DRC Logo with NO stamp/signature at bottom.
+                  <span className="text-[11px] font-semibold text-indigo-800">
+                    100% Configurable · Zero Hardcoded Locks
+                  </span>
+                </div>
+
+                <div className="grid grid-cols-1 md:grid-cols-3 gap-2.5">
+                  <div>
+                    <label className="block font-semibold text-slate-700 mb-1">Google Drive Vault Root Folder</label>
+                    <input
+                      type="text"
+                      value={compState.driveRootFolder || 'Dolphin_Road_Carriers_ERP'}
+                      onChange={(e) => setCompState({ ...compState, driveRootFolder: e.target.value })}
+                      placeholder="Dolphin_Road_Carriers_ERP"
+                      className="w-full px-2.5 py-1.5 rounded border border-slate-300 bg-white font-mono-num"
+                    />
+                  </div>
+                  <div>
+                    <label className="block font-semibold text-slate-700 mb-1">Default Voice Co-Pilot Language</label>
+                    <SearchableSelect
+                      ariaLabel="Default Voice Co-Pilot Language"
+                      value={compState.defaultVoiceLang || 'en'}
+                      onChange={(val) =>
+                        setCompState({
+                          ...compState,
+                          defaultVoiceLang: (val as 'bn' | 'en' | 'off') || 'en',
+                        })
+                      }
+                      options={[
+                        { value: 'en', label: 'English (en-IN) — Calm Official' },
+                        { value: 'bn', label: 'বাংলা (bn-IN) — Bengali Co-Pilot' },
+                        { value: 'off', label: 'OFF (Silent)' },
+                      ]}
+                      triggerClassName="!py-1.5 !bg-white !font-semibold"
+                    />
+                  </div>
+                  <div>
+                    <label className="block font-semibold text-slate-700 mb-1">Editable GST Tax Slabs (% comma-separated)</label>
+                    <input
+                      type="text"
+                      value={(compState.taxSlabs && compState.taxSlabs.length > 0 ? compState.taxSlabs : [0, 5, 12, 18]).join(', ')}
+                      onChange={(e) => {
+                        const parsed = e.target.value
+                          .split(',')
+                          .map((s) => Number(s.trim()))
+                          .filter((n) => Number.isFinite(n) && n >= 0 && n <= 40);
+                        setCompState({
+                          ...compState,
+                          taxSlabs: parsed.length > 0 ? parsed : [0, 5, 12, 18],
+                        });
+                      }}
+                      placeholder="0, 5, 12, 18"
+                      className="w-full px-2.5 py-1.5 rounded border border-slate-300 bg-white font-mono-num"
+                    />
+                  </div>
+                </div>
+
+                <div className="grid grid-cols-1 md:grid-cols-3 gap-2.5 pt-1">
+                  <label className="inline-flex items-center gap-2 font-semibold text-slate-800 cursor-pointer bg-white p-2 rounded border border-slate-200">
+                    <input
+                      type="checkbox"
+                      checked={compState.lastSavedNoLock !== false}
+                      onChange={(e) => setCompState({ ...compState, lastSavedNoLock: e.target.checked })}
+                    />
+                    <span>Sequential Serial Lock (Last Saved + 1)</span>
+                  </label>
+                  <label className="inline-flex items-center gap-2 font-semibold text-slate-800 cursor-pointer bg-white p-2 rounded border border-slate-200">
+                    <input
+                      type="checkbox"
+                      checked={Boolean(compState.autoLockMasterBlocks)}
+                      onChange={(e) => setCompState({ ...compState, autoLockMasterBlocks: e.target.checked })}
+                    />
+                    <span>Auto-Lock Master Blocks by Default</span>
+                  </label>
+                  <label className="inline-flex items-center gap-2 font-semibold text-slate-800 cursor-pointer bg-white p-2 rounded border border-slate-200">
+                    <input
+                      type="checkbox"
+                      checked={Boolean(compState.backgroundAiEnabled)}
+                      onChange={(e) => setCompState({ ...compState, backgroundAiEnabled: e.target.checked })}
+                    />
+                    <span>Enable Background Online AI Calls (Default OFF = 0 Quota)</span>
+                  </label>
+                </div>
+
+                <div className="p-2.5 rounded-lg bg-white border border-indigo-200 space-y-2">
+                  <p className="font-bold text-slate-800">Division Serial Prefix &amp; Starting Number Configuration</p>
+                  <div className="grid grid-cols-2 sm:grid-cols-4 lg:grid-cols-6 gap-2">
+                    <div>
+                      <label className="block text-[10px] font-semibold text-slate-600">FTL CN Prefix</label>
+                      <input
+                        type="text"
+                        value={compState.serialConfig?.ftlCnPrefix || 'KOL'}
+                        onChange={(e) =>
+                          setCompState({
+                            ...compState,
+                            serialConfig: { ...(compState.serialConfig || {}), ftlCnPrefix: e.target.value.toUpperCase() },
+                          })
+                        }
+                        className="w-full px-2 py-1 rounded border border-slate-300 font-mono-num"
+                      />
+                    </div>
+                    <div>
+                      <label className="block text-[10px] font-semibold text-slate-600">FTL CN Start</label>
+                      <input
+                        type="number"
+                        value={compState.serialConfig?.ftlCnStart ?? 147}
+                        onChange={(e) =>
+                          setCompState({
+                            ...compState,
+                            serialConfig: { ...(compState.serialConfig || {}), ftlCnStart: Number(e.target.value) || 1 },
+                          })
+                        }
+                        className="w-full px-2 py-1 rounded border border-slate-300 font-mono-num"
+                      />
+                    </div>
+                    <div>
+                      <label className="block text-[10px] font-semibold text-slate-600">FTL Bill Prefix</label>
+                      <input
+                        type="text"
+                        value={compState.serialConfig?.ftlBillPrefix || 'KOL'}
+                        onChange={(e) =>
+                          setCompState({
+                            ...compState,
+                            serialConfig: { ...(compState.serialConfig || {}), ftlBillPrefix: e.target.value.toUpperCase() },
+                          })
+                        }
+                        className="w-full px-2 py-1 rounded border border-slate-300 font-mono-num"
+                      />
+                    </div>
+                    <div>
+                      <label className="block text-[10px] font-semibold text-slate-600">FTL Bill Start</label>
+                      <input
+                        type="number"
+                        value={compState.serialConfig?.ftlBillStart ?? 101}
+                        onChange={(e) =>
+                          setCompState({
+                            ...compState,
+                            serialConfig: { ...(compState.serialConfig || {}), ftlBillStart: Number(e.target.value) || 1 },
+                          })
+                        }
+                        className="w-full px-2 py-1 rounded border border-slate-300 font-mono-num"
+                      />
+                    </div>
+                    <div>
+                      <label className="block text-[10px] font-semibold text-slate-600">Quote Prefix</label>
+                      <input
+                        type="text"
+                        value={compState.serialConfig?.ftlQuotePrefix || 'DRC/Q'}
+                        onChange={(e) =>
+                          setCompState({
+                            ...compState,
+                            serialConfig: { ...(compState.serialConfig || {}), ftlQuotePrefix: e.target.value.toUpperCase() },
+                          })
+                        }
+                        className="w-full px-2 py-1 rounded border border-slate-300 font-mono-num"
+                      />
+                    </div>
+                    <div>
+                      <label className="block text-[10px] font-semibold text-slate-600">Quote Start</label>
+                      <input
+                        type="number"
+                        value={compState.serialConfig?.ftlQuoteStart ?? 101}
+                        onChange={(e) =>
+                          setCompState({
+                            ...compState,
+                            serialConfig: { ...(compState.serialConfig || {}), ftlQuoteStart: Number(e.target.value) || 1 },
+                          })
+                        }
+                        className="w-full px-2 py-1 rounded border border-slate-300 font-mono-num"
+                      />
+                    </div>
+                    <div>
+                      <label className="block text-[10px] font-semibold text-slate-600">Logistics Prefix</label>
+                      <input
+                        type="text"
+                        value={compState.serialConfig?.logisticsPrefix || 'LOG'}
+                        onChange={(e) =>
+                          setCompState({
+                            ...compState,
+                            serialConfig: { ...(compState.serialConfig || {}), logisticsPrefix: e.target.value.toUpperCase() },
+                          })
+                        }
+                        className="w-full px-2 py-1 rounded border border-slate-300 font-mono-num"
+                      />
+                    </div>
+                    <div>
+                      <label className="block text-[10px] font-semibold text-slate-600">Logistics Start</label>
+                      <input
+                        type="number"
+                        value={compState.serialConfig?.logisticsStart ?? 1}
+                        onChange={(e) =>
+                          setCompState({
+                            ...compState,
+                            serialConfig: { ...(compState.serialConfig || {}), logisticsStart: Number(e.target.value) || 1 },
+                          })
+                        }
+                        className="w-full px-2 py-1 rounded border border-slate-300 font-mono-num"
+                      />
+                    </div>
+                    <div>
+                      <label className="block text-[10px] font-semibold text-slate-600">PTL Prefix</label>
+                      <input
+                        type="text"
+                        value={compState.serialConfig?.ptlPrefix || 'PTL'}
+                        onChange={(e) =>
+                          setCompState({
+                            ...compState,
+                            serialConfig: { ...(compState.serialConfig || {}), ptlPrefix: e.target.value.toUpperCase() },
+                          })
+                        }
+                        className="w-full px-2 py-1 rounded border border-slate-300 font-mono-num"
+                      />
+                    </div>
+                    <div>
+                      <label className="block text-[10px] font-semibold text-slate-600">PTL Start</label>
+                      <input
+                        type="number"
+                        value={compState.serialConfig?.ptlStart ?? 1}
+                        onChange={(e) =>
+                          setCompState({
+                            ...compState,
+                            serialConfig: { ...(compState.serialConfig || {}), ptlStart: Number(e.target.value) || 1 },
+                          })
+                        }
+                        className="w-full px-2 py-1 rounded border border-slate-300 font-mono-num"
+                      />
+                    </div>
+                    <div>
+                      <label className="block text-[10px] font-semibold text-slate-600">Courier Prefix</label>
+                      <input
+                        type="text"
+                        value={compState.serialConfig?.courierPrefix || 'COUR'}
+                        onChange={(e) =>
+                          setCompState({
+                            ...compState,
+                            serialConfig: { ...(compState.serialConfig || {}), courierPrefix: e.target.value.toUpperCase() },
+                          })
+                        }
+                        className="w-full px-2 py-1 rounded border border-slate-300 font-mono-num"
+                      />
+                    </div>
+                    <div>
+                      <label className="block text-[10px] font-semibold text-slate-600">Courier Start</label>
+                      <input
+                        type="number"
+                        value={compState.serialConfig?.courierStart ?? 1}
+                        onChange={(e) =>
+                          setCompState({
+                            ...compState,
+                            serialConfig: { ...(compState.serialConfig || {}), courierStart: Number(e.target.value) || 1 },
+                          })
+                        }
+                        className="w-full px-2 py-1 rounded border border-slate-300 font-mono-num"
+                      />
+                    </div>
+                  </div>
+                </div>
+
+                <div className="grid grid-cols-1 md:grid-cols-2 gap-2.5">
+                  <div>
+                    <label className="block font-semibold text-slate-700 mb-1">Custom Rate Quotation Terms (Optional)</label>
+                    <textarea
+                      rows={2}
+                      value={compState.quotationCustomTerms || ''}
+                      onChange={(e) => setCompState({ ...compState, quotationCustomTerms: e.target.value })}
+                      placeholder="Custom quotation terms & payment guarantee lines..."
+                      className="w-full px-2.5 py-1.5 rounded border border-slate-300 bg-white"
+                    />
+                  </div>
+                  <div>
+                    <label className="block font-semibold text-slate-700 mb-1">Custom Sec 194C Declaration Note (Optional)</label>
+                    <textarea
+                      rows={2}
+                      value={compState.declarationCustomTerms || ''}
+                      onChange={(e) => setCompState({ ...compState, declarationCustomTerms: e.target.value })}
+                      placeholder="Custom Section 194C statutory lines..."
+                      className="w-full px-2.5 py-1.5 rounded border border-slate-300 bg-white"
+                    />
+                  </div>
+                </div>
+              </div>
+
+              {/* Company Branding, Logo, Center Watermark & Stamp Manager */}
+              <div className="md:col-span-3 p-3.5 rounded-lg bg-slate-50 border border-slate-200 space-y-3">
+                <div className="flex flex-wrap items-center justify-between gap-2 pb-2 border-b border-slate-200">
+                  <p className="font-extrabold text-slate-900 flex items-center gap-1.5">
+                    <ImagePlus className="w-4 h-4 text-[#0D47A1]" />
+                    <span>Company Branding &amp; Stamp Manager (1-Click Global Apply Across All 4 Divisions &amp; PDFs)</span>
                   </p>
-                  <input
-                    ref={stampInputRef}
-                    type="file"
-                    accept="image/*"
-                    className="hidden"
-                    onChange={(e) => {
-                      handleUploadStamp(e.target.files?.[0]);
-                      e.target.value = '';
-                    }}
-                  />
-                  <div className="flex flex-wrap gap-2 pt-1">
-                    <button
-                      type="button"
-                      onClick={() => stampInputRef.current?.click()}
-                      className="inline-flex items-center gap-1.5 px-3 py-1.5 rounded bg-blue-700 hover:bg-blue-800 text-white font-bold cursor-pointer"
-                    >
-                      <Upload className="w-3.5 h-3.5" />
-                      Upload Custom Stamp / Signature
-                    </button>
-                    {compState.customStampDataUrl && (
-                      <button
-                        type="button"
-                        onClick={() => setCompState({ ...compState, customStampDataUrl: '' })}
-                        className="px-3 py-1.5 rounded border border-slate-300 bg-white hover:bg-slate-100 text-slate-700 font-semibold cursor-pointer"
-                      >
-                        Reset to Official Stamp
-                      </button>
+                  <span className="text-[11px] font-semibold text-slate-600">
+                    Top-Left Logo · Center Watermark · Bottom-Right Stamp+Sign · Bottom-Left PAN Card
+                  </span>
+                </div>
+                <div className="grid grid-cols-1 md:grid-cols-2 gap-3">
+                  {/* Top-Left Corporate Logo */}
+                  <div className="p-3 rounded-lg bg-white border border-slate-200 flex items-center justify-between gap-3">
+                    <div className="space-y-1">
+                      <p className="font-bold text-slate-900">Top-Left PDF &amp; Header Logo</p>
+                      <p className="text-[11px] text-slate-600">
+                        Custom Royal Blue Dolphin / D.R.C corporate logo (uses built-in vector logo if blank).
+                      </p>
+                      <input
+                        ref={logoInputRef}
+                        type="file"
+                        accept="image/*"
+                        className="hidden"
+                        onChange={(e) => {
+                          handleUploadBrandImage('logoDataUrl', 'Top-Left Corporate Logo', 320, e.target.files?.[0]);
+                          e.target.value = '';
+                        }}
+                      />
+                      <div className="flex flex-wrap gap-2 pt-1">
+                        <button
+                          type="button"
+                          onClick={() => logoInputRef.current?.click()}
+                          className="inline-flex items-center gap-1 px-2.5 py-1 rounded bg-[#0D47A1] hover:bg-[#0A3882] text-white font-bold cursor-pointer"
+                        >
+                          <Upload className="w-3 h-3" /> Upload Logo
+                        </button>
+                        {compState.logoDataUrl && (
+                          <button
+                            type="button"
+                            onClick={() => setCompState({ ...compState, logoDataUrl: '' })}
+                            className="px-2.5 py-1 rounded border border-slate-300 bg-white hover:bg-slate-100 text-slate-700 font-semibold cursor-pointer"
+                          >
+                            Reset Default
+                          </button>
+                        )}
+                      </div>
+                    </div>
+                    {compState.logoDataUrl && (
+                      <img
+                        src={compState.logoDataUrl}
+                        alt="Corporate Logo Preview"
+                        className="h-16 w-16 object-contain rounded border border-slate-300 bg-white p-1 shrink-0"
+                      />
+                    )}
+                  </div>
+
+                  {/* Center PDF Watermark */}
+                  <div className="p-3 rounded-lg bg-white border border-slate-200 flex items-center justify-between gap-3">
+                    <div className="space-y-1">
+                      <p className="font-bold text-slate-900">PDF Center Background Watermark (10% Opacity)</p>
+                      <p className="text-[11px] text-slate-600">
+                        Custom Twin-Dolphin Heart D.R.C center watermark for all 4 divisions.
+                      </p>
+                      <input
+                        ref={watermarkInputRef}
+                        type="file"
+                        accept="image/*"
+                        className="hidden"
+                        onChange={(e) => {
+                          handleUploadBrandImage('watermarkDataUrl', 'PDF Center Watermark', 480, e.target.files?.[0]);
+                          e.target.value = '';
+                        }}
+                      />
+                      <div className="flex flex-wrap gap-2 pt-1">
+                        <button
+                          type="button"
+                          onClick={() => watermarkInputRef.current?.click()}
+                          className="inline-flex items-center gap-1 px-2.5 py-1 rounded bg-indigo-700 hover:bg-indigo-800 text-white font-bold cursor-pointer"
+                        >
+                          <Upload className="w-3 h-3" /> Upload Watermark
+                        </button>
+                        {compState.watermarkDataUrl && (
+                          <button
+                            type="button"
+                            onClick={() => setCompState({ ...compState, watermarkDataUrl: '' })}
+                            className="px-2.5 py-1 rounded border border-slate-300 bg-white hover:bg-slate-100 text-slate-700 font-semibold cursor-pointer"
+                          >
+                            Reset Default
+                          </button>
+                        )}
+                      </div>
+                    </div>
+                    {compState.watermarkDataUrl && (
+                      <img
+                        src={compState.watermarkDataUrl}
+                        alt="Center Watermark Preview"
+                        className="h-16 w-16 object-contain rounded border border-slate-300 bg-white p-1 opacity-75 shrink-0"
+                      />
                     )}
                   </div>
                 </div>
-                <div className="flex items-center gap-3">
-                  <img
-                    src={
-                      compState.customStampDataUrl ||
-                      '/assets/aistudio/WhatsApp_Image_2026-11-16_at_11.55.22_PM__2__3293db0a.jpeg'
-                    }
-                    alt="Active Stamp Preview"
-                    className="h-20 w-24 object-contain rounded border border-slate-300 bg-white p-1"
-                  />
+
+                {/* Company Stamp & Digital Signature Upload */}
+                <div className="pt-2 border-t border-slate-200 flex flex-wrap items-center justify-between gap-4">
+                  <div className="space-y-1">
+                    <p className="font-bold text-slate-900 flex items-center gap-1.5">
+                      <ImagePlus className="w-4 h-4 text-blue-700" />
+                      <span>Company Stamp &amp; Digital Signature (Bottom-Right of Bill, LR &amp; Quotation)</span>
+                    </p>
+                    <p className="text-[11px] text-slate-600">
+                      Section 194C Declarations strictly display only the Top-Left DRC Logo + Proprietor Signature &amp; Round Seal as required.
+                    </p>
+                    <input
+                      ref={stampInputRef}
+                      type="file"
+                      accept="image/*"
+                      className="hidden"
+                      onChange={(e) => {
+                        handleUploadStamp(e.target.files?.[0]);
+                        e.target.value = '';
+                      }}
+                    />
+                    <div className="flex flex-wrap gap-2 pt-1">
+                      <button
+                        type="button"
+                        onClick={() => stampInputRef.current?.click()}
+                        className="inline-flex items-center gap-1.5 px-3 py-1.5 rounded bg-blue-700 hover:bg-blue-800 text-white font-bold cursor-pointer"
+                      >
+                        <Upload className="w-3.5 h-3.5" />
+                        Upload Custom Stamp / Signature
+                      </button>
+                      {compState.customStampDataUrl && (
+                        <button
+                          type="button"
+                          onClick={() => setCompState({ ...compState, customStampDataUrl: '' })}
+                          className="px-3 py-1.5 rounded border border-slate-300 bg-white hover:bg-slate-100 text-slate-700 font-semibold cursor-pointer"
+                        >
+                          Reset to Official Stamp
+                        </button>
+                      )}
+                    </div>
+                  </div>
+                  <div className="flex items-center gap-3">
+                    <img
+                      src={
+                        compState.customStampDataUrl ||
+                        '/assets/aistudio/WhatsApp_Image_2026-11-16_at_11.55.22_PM__2__3293db0a.jpeg'
+                      }
+                      alt="Active Stamp Preview"
+                      className="h-20 w-24 object-contain rounded border border-slate-300 bg-white p-1"
+                    />
+                  </div>
                 </div>
               </div>
 
@@ -3949,7 +4403,7 @@ const BackupSettingsModuleInner: React.FC<BackupSettingsModuleProps> = ({
                 <div className="space-y-1">
                   <p className="font-bold text-slate-900 flex items-center gap-1.5">
                     <ImagePlus className="w-4 h-4 text-emerald-700" />
-                    <span>Proprietor PAN Card Photo (Auto-Attached on RIGHT of Sec 194C Declaration)</span>
+                    <span>Proprietor PAN Card Photo (Auto-Attached on Bottom-Left of Sec 194C Declaration)</span>
                   </p>
                   <p className="text-[11px] text-slate-600">
                     Optional override for Subhajit Saha PAN card image (compressed &lt;440KB). Uses built-in PAN scan if left empty.
