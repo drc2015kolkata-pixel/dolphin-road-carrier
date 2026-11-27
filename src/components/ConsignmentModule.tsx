@@ -39,6 +39,9 @@ import {
   Vehicle,
 } from '../types/erp';
 import {
+  amountToIndianWords,
+  computeRateModeAmount,
+  extractTrailingSerialNumber,
   formatDateDDMMYYYY,
   formatINR,
   getFyShortCode,
@@ -47,6 +50,11 @@ import {
   resolveFinancialYearFromDate,
   todayISO,
 } from '../lib/formatters';
+import {
+  DbfLatestSerialSummary,
+  extractHighestBillAndCnFromRawDbf,
+  loadRawDbfArchiveFromIdb,
+} from '../lib/foxproDbfImport';
 import { scanPhysicalLR } from '../lib/ocrEngine';
 import {
   GST_STATE_CODE_OPTIONS,
@@ -179,6 +187,25 @@ const ConsignmentModuleInner: React.FC<ConsignmentModuleProps> = ({
     }
     return 'Kolkata';
   });
+  const [dbfSerialStats, setDbfSerialStats] = useState<DbfLatestSerialSummary | null>(null);
+  const cnNoDirtyRef = useRef(false);
+
+  useEffect(() => {
+    let cancelled = false;
+    void loadRawDbfArchiveFromIdb()
+      .then((tables) => {
+        if (!cancelled && tables && tables.length > 0) {
+          setDbfSerialStats(extractHighestBillAndCnFromRawDbf(tables));
+        }
+      })
+      .catch(() => {
+        // Ignore raw archive read errors
+      });
+    return () => {
+      cancelled = true;
+    };
+  }, []);
+
   const nextSequentialCnNo = useMemo(() => {
     const activeFyNorm = normalizeFyLabel(activeFy);
     const prefix = (company.serialConfig?.ftlCnPrefix || branchPrefix || 'KOL').trim().toUpperCase();
@@ -187,17 +214,17 @@ const ConsignmentModuleInner: React.FC<ConsignmentModuleProps> = ({
     consignments.forEach((c) => {
       const cFy = normalizeFyLabel(c.financialYear || resolveFinancialYearFromDate(c.cnDate));
       if (cFy !== activeFyNorm) return;
-      const m = String(c.cnNo || '').match(/(\d+)(?=\/\d{2}-\d{2}|$)/);
-      if (m) {
-        const n = parseInt(m[1], 10);
-        if (Number.isFinite(n) && n > maxNum && n < 1000000) {
-          maxNum = n;
-        }
+      const n = extractTrailingSerialNumber(c.cnNo);
+      if (n > maxNum && n < 1000000) {
+        maxNum = n;
       }
     });
+    if (dbfSerialStats?.maxCnNum && dbfSerialStats.maxCnNum > maxNum && dbfSerialStats.maxCnNum < 1000000) {
+      maxNum = dbfSerialStats.maxCnNum;
+    }
     const nextNum = Math.max(startNo, maxNum > 0 ? maxNum + 1 : startNo);
     return `${prefix}-${nextNum}/${fyShort}`;
-  }, [consignments, activeFy, company.serialConfig, branchPrefix, fyShort]);
+  }, [consignments, activeFy, company.serialConfig, branchPrefix, fyShort, dbfSerialStats]);
 
   const [autoAtomicCn, setAutoAtomicCn] = useState(true);
   const [cnNo, setCnNo] = useState(() => nextSequentialCnNo);
@@ -430,7 +457,7 @@ const ConsignmentModuleInner: React.FC<ConsignmentModuleProps> = ({
   }, [creditDaysOption, customCreditDays]);
 
   useEffect(() => {
-    if (!editingId) {
+    if (!editingId && !cnNoDirtyRef.current) {
       setCnNo(nextSequentialCnNo);
     }
   }, [editingId, nextSequentialCnNo]);
@@ -440,7 +467,10 @@ const ConsignmentModuleInner: React.FC<ConsignmentModuleProps> = ({
     void loadIdbObject<Record<string, unknown>>(FTL_LR_DRAFT_KEY).then((draft) => {
       lrDraftHydratedRef.current = true;
       if (cancelled || !draft || editingId) return;
-      if (typeof draft.cnNo === 'string' && draft.cnNo.trim()) setCnNo(draft.cnNo);
+      if (typeof draft.cnNo === 'string' && draft.cnNo.trim()) {
+        setCnNo(draft.cnNo);
+        cnNoDirtyRef.current = true;
+      }
       if (typeof draft.cnDate === 'string' && draft.cnDate) setCnDate(draft.cnDate);
       if (typeof draft.billedAtBranch === 'string' && draft.billedAtBranch) setBilledAtBranch(draft.billedAtBranch);
       if (typeof draft.billingPartyName === 'string') setBillingPartyName(draft.billingPartyName);
@@ -1046,7 +1076,12 @@ const ConsignmentModuleInner: React.FC<ConsignmentModuleProps> = ({
       (Number(nextReturnStr) || 0) +
       (Number(nextSttStr) || 0);
     if (rateNum > 0) {
-      const base = /ton|mt|kg/i.test(nextRateMode) && wt > 0 ? rateNum * wt : rateNum;
+      const base = computeRateModeAmount({
+        rateMode: nextRateMode,
+        ratePerUnit: rateNum,
+        weightMt: wt,
+        packages: Number(packages) || 0,
+      });
       const calc = Math.round((base + extras) * 100) / 100;
       setTotalFreight(String(calc));
       setToPayAmount(String(Math.max(0, calc - (Number(nextPaidStr) || 0))));
@@ -1055,6 +1090,7 @@ const ConsignmentModuleInner: React.FC<ConsignmentModuleProps> = ({
   };
 
   const resetForm = () => {
+    cnNoDirtyRef.current = false;
     setEditingId(null);
     setEditingBilled(false);
     setDivision('FTL');
@@ -1519,7 +1555,7 @@ const ConsignmentModuleInner: React.FC<ConsignmentModuleProps> = ({
     setSaving(true);
     try {
       let finalCnNo = cnNo.trim();
-      if (!editingId && autoAtomicCn) {
+      if (!editingId && autoAtomicCn && !cnNoDirtyRef.current) {
         const { formattedNo } = await reserveNextSerialNumber({
           type: 'cn',
           fy: activeFy,
@@ -1527,7 +1563,10 @@ const ConsignmentModuleInner: React.FC<ConsignmentModuleProps> = ({
           staffCode: activeStaffCode,
           ownerUid,
         });
-        finalCnNo = formattedNo;
+        finalCnNo =
+          extractTrailingSerialNumber(nextSequentialCnNo) > extractTrailingSerialNumber(formattedNo)
+            ? nextSequentialCnNo
+            : formattedNo;
       }
 
       const id = editingId || makeSafeDocId('cn');
@@ -2168,15 +2207,18 @@ const ConsignmentModuleInner: React.FC<ConsignmentModuleProps> = ({
           </div>
           <div>
             <label className="block font-semibold text-slate-700 mb-1">
-              C/N Number {(autoAtomicCn || company.lastSavedNoLock !== false) && !editingId ? '(Last Saved No + 1 Lock)' : '*'}
+              C/N Number * <span className="text-[10px] font-normal text-blue-700">(Auto Last+1 · Editable)</span>
             </label>
             <input
               type="text"
-              required={!autoAtomicCn || Boolean(editingId)}
-              disabled={!editingId && (autoAtomicCn || company.lastSavedNoLock !== false)}
-              value={!editingId && (autoAtomicCn || company.lastSavedNoLock !== false) ? nextSequentialCnNo : cnNo}
-              onChange={(e) => setCnNo(e.target.value)}
-              className="w-full px-2.5 py-1.5 rounded border border-slate-300 font-mono-num disabled:bg-blue-50 disabled:text-blue-800 disabled:font-bold"
+              required
+              value={cnNo}
+              onChange={(e) => {
+                cnNoDirtyRef.current = true;
+                setAutoAtomicCn(false);
+                setCnNo(e.target.value.toUpperCase());
+              }}
+              className="w-full px-2.5 py-1.5 rounded border border-slate-300 font-mono-num font-bold text-blue-900 bg-blue-50/40"
             />
           </div>
           <div>
@@ -3149,6 +3191,9 @@ const ConsignmentModuleInner: React.FC<ConsignmentModuleProps> = ({
                   : 'border border-slate-300 text-blue-800'
               }`}
             />
+            <p className="mt-1 text-[10px] font-bold text-blue-900 bg-blue-50/80 border border-blue-200 rounded px-2 py-0.5">
+              Freight in Words: {amountToIndianWords(Number(totalFreight) || 0)}
+            </p>
           </div>
 
           {/* Attached Tax Invoice (Yes/No) + Multi E-Way Bill (Yes/No) */}
@@ -3726,7 +3771,7 @@ const ConsignmentModuleInner: React.FC<ConsignmentModuleProps> = ({
               className="inline-flex items-center gap-1.5 px-4 py-1.5 rounded-md bg-blue-700 hover:bg-blue-800 text-white text-xs font-bold cursor-pointer disabled:opacity-50"
             >
               <Save className="w-3.5 h-3.5" />
-              <span>{saving ? 'Assigning Serial & Saving...' : editingId ? 'Update LR' : 'Save Consignment Note'}</span>
+              <span>{saving ? 'Assigning Serial & Saving...' : editingId ? 'Update LR/CN' : 'Save LR/CN'}</span>
             </button>
           </div>
         </div>

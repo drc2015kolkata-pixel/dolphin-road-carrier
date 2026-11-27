@@ -204,6 +204,30 @@ export async function autoSortAllDbfDataToExactRoles(params: {
     const archivedBroker = archivedBrokerMap.get(nk);
     const archivedOwner = archivedOwnerMap.get(nk);
 
+    const isHumanOwnrmastOwner =
+      !hasBillingCompanySuffixOrKeyword(p.name) &&
+      !isBillingCustomerOriginId(p.id) &&
+      !archivedCustomer &&
+      (p.id.startsWith('dbf_own_') || Boolean(archivedOwner));
+
+    if (isHumanOwnrmastOwner) {
+      let next: Party =
+        p.partyType !== 'TruckOwner'
+          ? {
+              ...p,
+              partyType: 'TruckOwner',
+              balanceType: p.balanceType || 'Cr',
+            }
+          : p;
+      if (archivedOwner) {
+        const { merged, changed } = mergeRichParty(next, archivedOwner);
+        if (changed) next = merged;
+      }
+      if (next !== p) upsertedPartyMap.set(next.id, next);
+      reclassifiedParties.push(next);
+      continue;
+    }
+
     const isBilling =
       hasBillingCompanySuffixOrKeyword(p.name) ||
       isBillingCustomerOriginId(p.id) ||

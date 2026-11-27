@@ -111,6 +111,7 @@ import {
 import {
   daysSinceDate,
   daysUntilDate,
+  extractTrailingSerialNumber,
   formatDateDDMMYYYY,
   formatINR,
   matchesSelectedFinancialYear,
@@ -211,6 +212,11 @@ import {
   VoicePilotLang,
 } from './lib/voicePilot';
 import { autoSortAllDbfDataToExactRoles } from './lib/dbfRoleAutoSort';
+import {
+  DbfLatestSerialSummary,
+  extractHighestBillAndCnFromRawDbf,
+  loadRawDbfArchiveFromIdb,
+} from './lib/foxproDbfImport';
 
 import { A4PreviewModal } from './components/A4PreviewModal';
 const MasterModule = lazy(() =>
@@ -366,6 +372,7 @@ export default function App() {
   const [presenceList, setPresenceList] = useState<StaffPresence[]>([]);
   const [activityLogs, setActivityLogs] = useState<ActivityLog[]>([]);
   const [settingsDocs, setSettingsDocs] = useState<Array<CompanySettings & { id?: string }>>([]);
+  const [dbfSerialStats, setDbfSerialStats] = useState<DbfLatestSerialSummary | null>(null);
 
   // Isolated Express Parcel & Part-Load Logistics collections
   const [logisticsParties, setLogisticsParties] = useState<LogisticsParty[]>([]);
@@ -2388,6 +2395,89 @@ export default function App() {
     isEffectiveMasterAdmin,
   ]);
 
+  useEffect(() => {
+    if (!erpSession) return;
+    let cancelled = false;
+    const refreshDbfSerials = () => {
+      void loadRawDbfArchiveFromIdb()
+        .then((tables) => {
+          if (cancelled || !tables || tables.length === 0) return;
+          setDbfSerialStats(extractHighestBillAndCnFromRawDbf(tables));
+        })
+        .catch(() => {});
+    };
+    refreshDbfSerials();
+    window.addEventListener('drc:data-saved', refreshDbfSerials);
+    window.addEventListener('drc:dbf-archive-updated', refreshDbfSerials);
+    return () => {
+      cancelled = true;
+      window.removeEventListener('drc:data-saved', refreshDbfSerials);
+      window.removeEventListener('drc:dbf-archive-updated', refreshDbfSerials);
+    };
+  }, [erpSession]);
+
+  const liveLastSavedNos = useMemo(() => {
+    const latestCn = [...visibleConsignments].sort((a, b) => {
+      const nDiff = extractTrailingSerialNumber(b.cnNo) - extractTrailingSerialNumber(a.cnNo);
+      if (nDiff !== 0) return nDiff;
+      return `${b.cnDate || ''}_${b.cnNo || ''}`.localeCompare(`${a.cnDate || ''}_${a.cnNo || ''}`);
+    })[0];
+    const latestBill = [...visibleInvoices].sort((a, b) => {
+      const aNum = Math.max(Number(a.billId || 0) || 0, extractTrailingSerialNumber(a.invoiceNo));
+      const bNum = Math.max(Number(b.billId || 0) || 0, extractTrailingSerialNumber(b.invoiceNo));
+      if (bNum !== aNum) return bNum - aNum;
+      return `${b.invoiceDate || ''}_${b.invoiceNo || ''}`.localeCompare(`${a.invoiceDate || ''}_${a.invoiceNo || ''}`);
+    })[0];
+    const latestQuote = [...visibleQuotations].sort((a, b) =>
+      `${b.quotationDate || ''}_${b.quotationNo || ''}`.localeCompare(`${a.quotationDate || ''}_${a.quotationNo || ''}`)
+    )[0];
+    const latestDecl = [...visibleDeclarations].sort((a, b) =>
+      (b.declarationDate || '').localeCompare(a.declarationDate || '')
+    )[0];
+    const latestPodHire = [...visibleLorryHires]
+      .filter((lh) => lh.podReceived || lh.podReceiveDate)
+      .sort((a, b) => (b.podReceiveDate || b.cnDate || '').localeCompare(a.podReceiveDate || a.cnDate || ''))[0];
+    const latestTx = [...visibleTransactions].sort((a, b) =>
+      `${b.txDate || ''}_${b.txCode || ''}`.localeCompare(`${a.txDate || ''}_${a.txCode || ''}`)
+    )[0];
+
+    const liveCnNum = latestCn ? extractTrailingSerialNumber(latestCn.cnNo) : 0;
+    const useDbfCn = Boolean(dbfSerialStats?.maxCnNum && dbfSerialStats.maxCnNum > liveCnNum);
+    const liveBillNum = latestBill
+      ? Math.max(Number(latestBill.billId || 0) || 0, extractTrailingSerialNumber(latestBill.invoiceNo))
+      : 0;
+    const useDbfBill = Boolean(dbfSerialStats?.maxBillNum && dbfSerialStats.maxBillNum > liveBillNum);
+
+    return {
+      cnNo: useDbfCn ? dbfSerialStats!.maxCnNo : latestCn?.cnNo || dbfSerialStats?.maxCnNo || '—',
+      cnParty: useDbfCn
+        ? dbfSerialStats?.maxCnParty || latestCn?.billingPartyName || latestCn?.consignorName || 'DBF Master'
+        : latestCn?.billingPartyName || latestCn?.consignorName || dbfSerialStats?.maxCnParty || '—',
+      billNo: useDbfBill ? dbfSerialStats!.maxBillNo : latestBill?.invoiceNo || dbfSerialStats?.maxBillNo || '—',
+      billParty: useDbfBill
+        ? dbfSerialStats?.maxBillParty || latestBill?.partyName || 'DBF Master'
+        : latestBill?.partyName || dbfSerialStats?.maxBillParty || '—',
+      quoteNo: latestQuote?.quotationNo || '—',
+      quoteParty: latestQuote?.partyName || '—',
+      declDate: latestDecl?.declarationDate ? formatDateDDMMYYYY(latestDecl.declarationDate) : '—',
+      declParty: latestDecl?.partyName || '—',
+      podRef: latestPodHire ? `POD-${latestPodHire.cnNo}` : latestTx?.txCode || '—',
+      podPartyTruck: latestPodHire
+        ? `${latestPodHire.truckNo} (${latestPodHire.ownerName || latestPodHire.brokerName || 'Truck'})`
+        : latestTx
+        ? `${latestTx.partyName} (${latestTx.paymentMode})`
+        : '—',
+    };
+  }, [
+    visibleConsignments,
+    visibleInvoices,
+    visibleQuotations,
+    visibleDeclarations,
+    visibleLorryHires,
+    visibleTransactions,
+    dbfSerialStats,
+  ]);
+
   if (appClosedOverlay) {
     return (
       <div className="min-h-screen flex items-center justify-center bg-slate-950 p-4">
@@ -2454,51 +2544,6 @@ export default function App() {
     );
   }
 
-  const liveLastSavedNos = useMemo(() => {
-    const latestCn = [...visibleConsignments].sort((a, b) =>
-      `${b.cnDate || ''}_${b.cnNo || ''}`.localeCompare(`${a.cnDate || ''}_${a.cnNo || ''}`)
-    )[0];
-    const latestBill = [...visibleInvoices].sort((a, b) =>
-      `${b.invoiceDate || ''}_${b.invoiceNo || ''}`.localeCompare(`${a.invoiceDate || ''}_${a.invoiceNo || ''}`)
-    )[0];
-    const latestQuote = [...visibleQuotations].sort((a, b) =>
-      `${b.quotationDate || ''}_${b.quotationNo || ''}`.localeCompare(`${a.quotationDate || ''}_${a.quotationNo || ''}`)
-    )[0];
-    const latestDecl = [...visibleDeclarations].sort((a, b) =>
-      (b.declarationDate || '').localeCompare(a.declarationDate || '')
-    )[0];
-    const latestPodHire = [...visibleLorryHires]
-      .filter((lh) => lh.podReceived || lh.podReceiveDate)
-      .sort((a, b) => (b.podReceiveDate || b.cnDate || '').localeCompare(a.podReceiveDate || a.cnDate || ''))[0];
-    const latestTx = [...visibleTransactions].sort((a, b) =>
-      `${b.txDate || ''}_${b.txCode || ''}`.localeCompare(`${a.txDate || ''}_${a.txCode || ''}`)
-    )[0];
-
-    return {
-      cnNo: latestCn?.cnNo || '—',
-      cnParty: latestCn?.billingPartyName || latestCn?.consignorName || '—',
-      billNo: latestBill?.invoiceNo || '—',
-      billParty: latestBill?.partyName || '—',
-      quoteNo: latestQuote?.quotationNo || '—',
-      quoteParty: latestQuote?.partyName || '—',
-      declDate: latestDecl?.declarationDate ? formatDateDDMMYYYY(latestDecl.declarationDate) : '—',
-      declParty: latestDecl?.partyName || '—',
-      podRef: latestPodHire ? `POD-${latestPodHire.cnNo}` : latestTx?.txCode || '—',
-      podPartyTruck: latestPodHire
-        ? `${latestPodHire.truckNo} (${latestPodHire.ownerName || latestPodHire.brokerName || 'Truck'})`
-        : latestTx
-        ? `${latestTx.partyName} (${latestTx.paymentMode})`
-        : '—',
-    };
-  }, [
-    visibleConsignments,
-    visibleInvoices,
-    visibleQuotations,
-    visibleDeclarations,
-    visibleLorryHires,
-    visibleTransactions,
-  ]);
-
   const sidebarItems: Array<{
     id: SidebarNavId;
     label: string;
@@ -2509,6 +2554,7 @@ export default function App() {
   }> = [
     // Operations
     { id: 'dashboard', label: 'Dashboard (Clean Home)', group: 'Operations', icon: LayoutDashboard, perm: 'dashboard' },
+    { id: 'allInOne', label: 'A. Bilty & Lorry Master Sheet', group: 'Operations', icon: ClipboardList, perm: 'allInOne' },
     { id: 'lr', label: 'Consignment Note (LR/CN)', group: 'Operations', icon: ScanLine, perm: 'lr' },
     { id: 'billing', label: 'Tax Invoice / Bill', group: 'Operations', icon: FileSpreadsheet, perm: 'billing' },
     { id: 'sidebar_quotation', label: 'Quotation (2-Page Legal)', group: 'Operations', icon: ClipboardList, perm: 'billing' },
@@ -2517,7 +2563,6 @@ export default function App() {
     { id: 'lorryHire', label: 'Lorry Hire Settlement', group: 'Operations', icon: Truck, perm: 'lorryHire' },
     { id: 'transactions', label: 'Vouchers & Cash/Bank', group: 'Operations', icon: ArrowLeftRight, perm: 'accounts' },
     { id: 'bankImport', label: 'Credit/Debit Notes & Bank', group: 'Operations', icon: Landmark, perm: 'bankImport' },
-    { id: 'allInOne', label: 'A. Bilty & Lorry Master Sheet', group: 'Operations', icon: ClipboardList, perm: 'allInOne' },
     { id: 'reports', label: 'D. GST, Statutory Vault & ITR', group: 'Operations', icon: FileBarChart2, perm: 'reports' },
     // Separate Role Ledgers (A–Z 100% Coverage)
     { id: 'ledger_party', label: 'Party Account Ledger (Tally)', group: 'Separate Role Ledgers', icon: BookOpen, perm: 'accounts' },

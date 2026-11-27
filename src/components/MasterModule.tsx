@@ -85,9 +85,12 @@ import {
   RichEntityPicker,
 } from './RichEntityPicker';
 import {
-  VEHICLE_BODY_TYPE_OPTIONS,
   VEHICLE_COLOR_OPTIONS,
   VEHICLE_MAKE_OPTIONS,
+  addDropdownItem,
+  deleteDropdownItem,
+  editDropdownItem,
+  getEffectiveDropdownList,
 } from '../lib/dropdownMasterStore';
 import { SupportedCountry } from '../lib/postalPinLookup';
 import { PinCountryInputs, useAutoPinLookup } from './CityPinCountryAutoFill';
@@ -186,6 +189,15 @@ const MasterModuleInner: React.FC<MasterModuleProps> = ({
         ownerUid,
       },
     [company, ownerUid]
+  );
+
+  const effectiveBankNames = useMemo(
+    () => getEffectiveDropdownList(effectiveCompany, 'bankNames'),
+    [effectiveCompany]
+  );
+  const effectiveVehicleBodyTypes = useMemo(
+    () => getEffectiveDropdownList(effectiveCompany, 'vehicleBodyTypes'),
+    [effectiveCompany]
   );
 
   // Top Picker selection states across all 5 tabs
@@ -3137,12 +3149,15 @@ const MasterModuleInner: React.FC<MasterModuleProps> = ({
               </div>
               <div>
                 <label className="block font-semibold text-slate-700 mb-1">Bank Name</label>
-                <input
-                  type="text"
+                <EditableSearchSelect
+                  ariaLabel="Lorry Owner Bank Name"
                   value={oBankName}
-                  onChange={(e) => setOBankName(e.target.value)}
-                  placeholder="SBI / PNB / HDFC"
-                  className="w-full px-2.5 py-1.5 rounded border border-slate-300"
+                  onChange={setOBankName}
+                  options={effectiveBankNames}
+                  onAddOption={(v) => addDropdownItem(ownerUid, effectiveCompany, 'bankNames', v)}
+                  onEditOption={(o, n) => editDropdownItem(ownerUid, effectiveCompany, 'bankNames', o, n)}
+                  onDeleteOption={(v) => deleteDropdownItem(ownerUid, effectiveCompany, 'bankNames', v)}
+                  placeholder="SBI / PNB / HDFC..."
                 />
               </div>
               <div>
@@ -3357,12 +3372,15 @@ const MasterModuleInner: React.FC<MasterModuleProps> = ({
               </div>
               <div>
                 <label className="block font-semibold text-slate-700 mb-1">Bank Name</label>
-                <input
-                  type="text"
+                <EditableSearchSelect
+                  ariaLabel="Broker Bank Name"
                   value={bBankName}
-                  onChange={(e) => setBBankName(e.target.value)}
-                  placeholder="Bank Name"
-                  className="w-full px-2.5 py-1.5 rounded border border-slate-300"
+                  onChange={setBBankName}
+                  options={effectiveBankNames}
+                  onAddOption={(v) => addDropdownItem(ownerUid, effectiveCompany, 'bankNames', v)}
+                  onEditOption={(o, n) => editDropdownItem(ownerUid, effectiveCompany, 'bankNames', o, n)}
+                  onDeleteOption={(v) => deleteDropdownItem(ownerUid, effectiveCompany, 'bankNames', v)}
+                  placeholder="SBI / PNB / HDFC..."
                 />
               </div>
               <div>
@@ -3539,12 +3557,16 @@ const MasterModuleInner: React.FC<MasterModuleProps> = ({
               <div>
                 <label className="block font-semibold text-slate-700 mb-1">Body Type / Wheel</label>
                 <EditableSearchSelect
+                  ariaLabel="Vehicle Body Type"
                   value={vBodyType}
                   onChange={(val) => {
                     setVBodyType(val);
                     if (val) setVType(val);
                   }}
-                  options={VEHICLE_BODY_TYPE_OPTIONS}
+                  options={effectiveVehicleBodyTypes}
+                  onAddOption={(v) => addDropdownItem(ownerUid, effectiveCompany, 'vehicleBodyTypes', v)}
+                  onEditOption={(o, n) => editDropdownItem(ownerUid, effectiveCompany, 'vehicleBodyTypes', o, n)}
+                  onDeleteOption={(v) => deleteDropdownItem(ownerUid, effectiveCompany, 'vehicleBodyTypes', v)}
                   placeholder="Full Dala Body / Container / Trailer..."
                 />
               </div>
@@ -3848,11 +3870,15 @@ const MasterModuleInner: React.FC<MasterModuleProps> = ({
               </div>
               <div>
                 <label className="block font-semibold text-slate-700 mb-1">Bank Name</label>
-                <input
-                  type="text"
+                <EditableSearchSelect
+                  ariaLabel="Driver Bank Name"
                   value={dBankName}
-                  onChange={(e) => setDBankName(e.target.value)}
-                  className="w-full px-2.5 py-1.5 rounded border border-slate-300"
+                  onChange={setDBankName}
+                  options={effectiveBankNames}
+                  onAddOption={(v) => addDropdownItem(ownerUid, effectiveCompany, 'bankNames', v)}
+                  onEditOption={(o, n) => editDropdownItem(ownerUid, effectiveCompany, 'bankNames', o, n)}
+                  onDeleteOption={(v) => deleteDropdownItem(ownerUid, effectiveCompany, 'bankNames', v)}
+                  placeholder="SBI / PNB / HDFC..."
                 />
               </div>
               <div>

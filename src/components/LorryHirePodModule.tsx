@@ -39,9 +39,12 @@ import {
   Vehicle,
 } from '../types/erp';
 import {
+  amountToIndianWords,
+  computeRateModeAmount,
   formatDateDDMMYYYY,
   formatDateHyphenDDMMYYYY,
   formatINR,
+  isLumpSumRateMode,
   makeSafeDocId,
   normalizeFyLabel,
   todayISO,
@@ -67,8 +70,16 @@ import {
   formatVehicleDetailsLine,
   RichEntityPicker,
 } from './RichEntityPicker';
+import { EditableSearchSelect } from './EditableSearchSelect';
 import { SearchableSelect } from './SearchableSelect';
-import { PAYMENT_MODE_OPTIONS, sortAlphaList } from '../lib/dropdownMasterStore';
+import {
+  addDropdownItem,
+  DEFAULT_RATE_MODES,
+  deleteDropdownItem,
+  editDropdownItem,
+  getEffectiveDropdownList,
+  sortAlphaList,
+} from '../lib/dropdownMasterStore';
 import { playAlertBeep, playVerifiedBeep } from '../lib/audioFeedback';
 import { validateSafeUploadFile } from '../lib/gstinValidator';
 import { PinCountryInputs, useAutoPinLookup } from './CityPinCountryAutoFill';
@@ -251,7 +262,7 @@ const LorryHirePodModuleInner: React.FC<LorryHirePodModuleProps> = ({
     setToCountry(country);
   });
   const [weightMt, setWeightMt] = useState('');
-  const [rateMode, setRateMode] = useState<'Fixed' | 'Per MT'>('Fixed');
+  const [rateMode, setRateMode] = useState<string>('Fixed');
   const [ratePerUnit, setRatePerUnit] = useState('');
   const [bookedPkgs, setBookedPkgs] = useState('');
   const [deliveredPkgs, setDeliveredPkgs] = useState('');
@@ -278,6 +289,7 @@ const LorryHirePodModuleInner: React.FC<LorryHirePodModuleProps> = ({
   const [receiptChallanNo, setReceiptChallanNo] = useState('');
   const [receiptChallanDate, setReceiptChallanDate] = useState('');
   const [remarks, setRemarks] = useState('');
+  const [formError, setFormError] = useState<string | null>(null);
   const [saving, setSaving] = useState(false);
 
   const [search, setSearch] = useState('');
@@ -509,7 +521,7 @@ const LorryHirePodModuleInner: React.FC<LorryHirePodModuleProps> = ({
       (h.toCountry as SupportedCountry) || 'India'
     );
     setWeightMt(h.weightMt != null ? String(h.weightMt) : '');
-    setRateMode(h.rateMode === 'Per MT' ? 'Per MT' : 'Fixed');
+    setRateMode(h.rateMode || 'Fixed');
     setRatePerUnit(h.ratePerUnit != null ? String(h.ratePerUnit) : '');
     setBookedPkgs(h.bookedPkgs != null ? String(h.bookedPkgs) : '');
     setDeliveredPkgs(h.deliveredPkgs != null ? String(h.deliveredPkgs) : '');
@@ -554,6 +566,12 @@ const LorryHirePodModuleInner: React.FC<LorryHirePodModuleProps> = ({
   const handleCreateOrUpdateHire = async (e: React.FormEvent) => {
     e.preventDefault();
     if (!cnNo.trim() || !truckNo.trim() || hireNum <= 0) return;
+    if (receiptChallanNo.trim() && !receiptChallanDate.trim()) {
+      setFormError('Challan Receipt Date is mandatory when Receipt Challan No is entered.');
+      playAlertBeep();
+      return;
+    }
+    setFormError(null);
 
     setSaving(true);
     try {
@@ -1008,6 +1026,7 @@ const LorryHirePodModuleInner: React.FC<LorryHirePodModuleProps> = ({
       { line1: ['-', '(-) Damage Charge', 'POD Damage Claim', `-${formatINR(h.damageCharge || 0)}`] },
     ];
 
+    const totalAdv = Number(h.advancePaid || 0) + Number(h.extraAdvanceAmt || 0);
     return generateFoxproStatementPDF(
       {
         title: 'L-O-R-R-Y   H-I-R-E   S-E-T-T-L-E-M-E-N-T   V-O-U-C-H-E-R',
@@ -1018,9 +1037,9 @@ const LorryHirePodModuleInner: React.FC<LorryHirePodModuleProps> = ({
           { label: 'Lorry Owner', value: h.ownerName || '-' },
           { label: 'Broker', value: h.brokerName || '-' },
           { label: 'Route', value: `${h.fromCity || '-'} -> ${h.toCity || '-'}` },
-          { label: 'Booked Pkgs', value: String(h.bookedPkgs ?? 0) },
-          { label: 'Delivered Pkgs', value: String(h.deliveredPkgs ?? h.bookedPkgs ?? 0) },
-          { label: 'Short/Damage Pkgs', value: String(h.shortageDamagePkgs ?? 0) },
+          { label: 'Gross Hire (+Detn)', value: `Rs. ${formatINR(Number(h.hireAmount || 0) + Number(h.detentionCharge || 0))}` },
+          { label: 'Advances Paid', value: `Rs. ${formatINR(totalAdv)} (${amountToIndianWords(totalAdv)})` },
+          { label: 'Booked / Short Pkgs', value: `${h.bookedPkgs ?? 0} / ${h.shortageDamagePkgs ?? 0} Short` },
         ],
         columns: [
           { label: 'S.NO', widthPct: 8, align: 'center' },
@@ -1658,13 +1677,20 @@ const LorryHirePodModuleInner: React.FC<LorryHirePodModuleProps> = ({
                 value={weightMt}
                 onChange={(e) => {
                   setWeightMt(e.target.value);
-                  if (rateMode === 'Per MT') {
+                  if (!isLumpSumRateMode(rateMode)) {
                     const wt = Number(e.target.value) || 0;
                     const rt = Number(ratePerUnit) || 0;
-                    if (wt > 0 && rt > 0) {
-                      const nextHire = Math.round(wt * rt * 100) / 100;
-                      setHireAmount(String(nextHire));
-                      if (Number(tdsRatePct) > 0) handleTdsPctChange(tdsRatePct, nextHire);
+                    if (rt > 0) {
+                      const nextHire = computeRateModeAmount({
+                        rateMode,
+                        ratePerUnit: rt,
+                        weightMt: wt,
+                        packages: bookedNum,
+                      });
+                      if (nextHire > 0) {
+                        setHireAmount(String(nextHire));
+                        if (Number(tdsRatePct) > 0) handleTdsPctChange(tdsRatePct, nextHire);
+                      }
                     }
                   }
                 }}
@@ -1674,31 +1700,35 @@ const LorryHirePodModuleInner: React.FC<LorryHirePodModuleProps> = ({
             </div>
             <div>
               <label className="block font-semibold text-slate-700 mb-1">Hire Rate Mode</label>
-              <SearchableSelect
+              <EditableSearchSelect
                 ariaLabel="Hire Rate Mode"
                 value={rateMode}
                 onChange={(val) => {
-                  const m = val === 'Per MT' ? 'Per MT' : 'Fixed';
-                  setRateMode(m);
-                  if (m === 'Per MT') {
-                    const wt = Number(weightMt) || 0;
-                    const rt = Number(ratePerUnit) || 0;
-                    if (wt > 0 && rt > 0) {
-                      const nextHire = Math.round(wt * rt * 100) / 100;
+                  setRateMode(val);
+                  const rt = Number(ratePerUnit) || 0;
+                  if (rt > 0) {
+                    const nextHire = computeRateModeAmount({
+                      rateMode: val,
+                      ratePerUnit: rt,
+                      weightMt: Number(weightMt) || 0,
+                      packages: bookedNum,
+                    });
+                    if (nextHire > 0) {
                       setHireAmount(String(nextHire));
                       if (Number(tdsRatePct) > 0) handleTdsPctChange(tdsRatePct, nextHire);
                     }
                   }
                 }}
-                options={[
-                  { value: 'Fixed', label: 'Fixed Lorry' },
-                  { value: 'Per MT', label: 'Per MT' },
-                ]}
-                triggerClassName="!py-1.5 !font-semibold"
+                options={Array.from(
+                  new Set([...DEFAULT_RATE_MODES, ...getEffectiveDropdownList(effectiveCompany, 'rateModes')])
+                )}
+                onAddOption={(val) => addDropdownItem(ownerUid, effectiveCompany, 'rateModes', val)}
+                onEditOption={(oldV, newV) => editDropdownItem(ownerUid, effectiveCompany, 'rateModes', oldV, newV)}
+                onDeleteOption={(val) => deleteDropdownItem(ownerUid, effectiveCompany, 'rateModes', val)}
               />
             </div>
             <div>
-              <label className="block font-semibold text-slate-700 mb-1">Rate (₹ / MT)</label>
+              <label className="block font-semibold text-slate-700 mb-1">Rate (₹ / Unit)</label>
               <input
                 type="number"
                 step="0.01"
@@ -1706,11 +1736,15 @@ const LorryHirePodModuleInner: React.FC<LorryHirePodModuleProps> = ({
                 value={ratePerUnit}
                 onChange={(e) => {
                   setRatePerUnit(e.target.value);
-                  if (rateMode === 'Per MT') {
-                    const wt = Number(weightMt) || 0;
-                    const rt = Number(e.target.value) || 0;
-                    if (wt > 0 && rt > 0) {
-                      const nextHire = Math.round(wt * rt * 100) / 100;
+                  const rt = Number(e.target.value) || 0;
+                  if (rt > 0) {
+                    const nextHire = computeRateModeAmount({
+                      rateMode,
+                      ratePerUnit: rt,
+                      weightMt: Number(weightMt) || 0,
+                      packages: bookedNum,
+                    });
+                    if (nextHire > 0) {
                       setHireAmount(String(nextHire));
                       if (Number(tdsRatePct) > 0) handleTdsPctChange(tdsRatePct, nextHire);
                     }
@@ -1790,12 +1824,22 @@ const LorryHirePodModuleInner: React.FC<LorryHirePodModuleProps> = ({
               />
             </div>
             <div>
-              <label className="block font-semibold text-slate-700 mb-1">Challan Receipt Date</label>
+              <label className="block font-semibold text-slate-700 mb-1">
+                Challan Receipt Date {receiptChallanNo.trim() ? <span className="text-red-600">*</span> : ''}
+              </label>
               <input
                 type="date"
+                required={Boolean(receiptChallanNo.trim())}
                 value={receiptChallanDate}
-                onChange={(e) => setReceiptChallanDate(e.target.value)}
-                className="w-full px-2 py-1.5 rounded border border-slate-300 bg-white font-mono-num"
+                onChange={(e) => {
+                  setReceiptChallanDate(e.target.value);
+                  if (e.target.value.trim()) setFormError(null);
+                }}
+                className={`w-full px-2 py-1.5 rounded border bg-white font-mono-num ${
+                  receiptChallanNo.trim() && !receiptChallanDate.trim()
+                    ? 'border-red-400 bg-red-50'
+                    : 'border-slate-300'
+                }`}
               />
             </div>
             <div>
@@ -1971,7 +2015,7 @@ const LorryHirePodModuleInner: React.FC<LorryHirePodModuleProps> = ({
                       <label className="block text-[11px] font-semibold text-slate-600 mb-0.5">
                         Mode
                       </label>
-                      <SearchableSelect
+                      <EditableSearchSelect
                         ariaLabel={`Advance ${idx + 1} Mode`}
                         value={adv.mode}
                         onChange={(val) =>
@@ -1979,9 +2023,11 @@ const LorryHirePodModuleInner: React.FC<LorryHirePodModuleProps> = ({
                             prev.map((r, i) => (i === idx ? { ...r, mode: val } : r))
                           )
                         }
-                        options={[...PAYMENT_MODE_OPTIONS, 'Diesel Slip']}
-                        triggerClassName="!py-1.5"
-                        searchPlaceholder="Search payment mode..."
+                        options={getEffectiveDropdownList(effectiveCompany, 'paymentModes')}
+                        onAddOption={(val) => addDropdownItem(ownerUid, effectiveCompany, 'paymentModes', val)}
+                        onEditOption={(oldV, newV) => editDropdownItem(ownerUid, effectiveCompany, 'paymentModes', oldV, newV)}
+                        onDeleteOption={(val) => deleteDropdownItem(ownerUid, effectiveCompany, 'paymentModes', val)}
+                        placeholder="Payment Mode..."
                       />
                     </div>
                     <div className="flex items-end gap-1.5">
@@ -2189,8 +2235,24 @@ const LorryHirePodModuleInner: React.FC<LorryHirePodModuleProps> = ({
                 <span className="font-sans">Net Payable Balance:</span>
                 <span>₹ {formatINR(balancePayable)}</span>
               </div>
+              <div className="pt-1 text-[10px] font-sans text-slate-700 space-y-0.5">
+                <div>
+                  <span className="font-bold text-amber-900">Advance in Words:</span>{' '}
+                  {amountToIndianWords(totalAdvances + extraAdvNum)}
+                </div>
+                <div>
+                  <span className="font-bold text-emerald-900">Balance in Words:</span>{' '}
+                  {amountToIndianWords(balancePayable)}
+                </div>
+              </div>
             </div>
           </div>
+          {formError && (
+            <div className="rounded-lg border border-red-300 bg-red-50 px-3 py-2 text-xs font-bold text-red-800 flex items-center gap-2">
+              <AlertTriangle className="w-4 h-4 shrink-0" />
+              <span>{formError}</span>
+            </div>
+          )}
         </div>
 
         <div className="px-4 py-3 bg-slate-50 border-t border-slate-200 flex flex-wrap items-center justify-end gap-2">
@@ -2784,12 +2846,15 @@ const LorryHirePodModuleInner: React.FC<LorryHirePodModuleProps> = ({
               </div>
               <div>
                 <label className="block font-semibold text-slate-700 mb-1">Payment Mode</label>
-                <SearchableSelect
+                <EditableSearchSelect
                   ariaLabel="Balance Payment Mode"
                   value={payMode}
                   onChange={setPayMode}
-                  options={PAYMENT_MODE_OPTIONS}
-                  triggerClassName="!py-1.5"
+                  options={getEffectiveDropdownList(effectiveCompany, 'paymentModes')}
+                  onAddOption={(v) => addDropdownItem(ownerUid, effectiveCompany, 'paymentModes', v)}
+                  onEditOption={(o, n) => editDropdownItem(ownerUid, effectiveCompany, 'paymentModes', o, n)}
+                  onDeleteOption={(v) => deleteDropdownItem(ownerUid, effectiveCompany, 'paymentModes', v)}
+                  inputClassName="!py-1.5"
                 />
               </div>
               <div>

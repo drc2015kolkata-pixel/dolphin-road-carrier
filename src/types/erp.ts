@@ -484,6 +484,14 @@ export interface Quotation {
   entryPointPinCode?: string;
   entryPointCountry?: string;
   routeRates?: QuotationRouteRow[];
+  gstRate?: number;
+  reverseCharge?: boolean;
+  interstate?: boolean;
+  cgstAmt?: number;
+  sgstAmt?: number;
+  igstAmt?: number;
+  totalTax?: number;
+  grandTotal?: number;
   branchCode?: string;
   createdByStaff?: string;
   ownerUid: string;
@@ -801,6 +809,9 @@ export interface DropdownMasterConfig {
   rateModes?: string[];
   deliveryPlaces?: string[];
   states?: string[];
+  bankNames?: string[];
+  paymentModes?: string[];
+  vehicleBodyTypes?: string[];
   districtsByState?: Record<string, string[]>;
   creditDayPresets?: number[];
   wheelCommissionRates?: Record<string, number>;
@@ -1106,7 +1117,7 @@ export interface LogisticsDocket {
   goodsDesc: string;
   actualWeightKg: number;
   chargedWeightKg: number;
-  rateBasis: 'Per Kg' | 'Per Package' | 'Fixed';
+  rateBasis: string;
   ratePerUnit: number;
   baseFreight: number;
   fovCharge?: number;

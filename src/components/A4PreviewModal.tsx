@@ -58,9 +58,8 @@ export const A4PreviewModal: React.FC<A4PreviewModalProps> = ({
     setShareEmail(pdf.shareMeta?.email || matchedParty?.email || '');
   }, [pdf, parties]);
 
-  if (!pdf) return null;
-
   const handleDownload = () => {
+    if (!pdf) return;
     const a = document.createElement('a');
     a.href = pdf.blobUrl;
     a.download = pdf.fileName;
@@ -111,6 +110,8 @@ export const A4PreviewModal: React.FC<A4PreviewModalProps> = ({
     window.addEventListener('drc:voice-print-command', onVoicePrint);
     return () => window.removeEventListener('drc:voice-print-command', onVoicePrint);
   }, [pdf, onReplacePdf]);
+
+  if (!pdf) return null;
 
   const handleOrientationChange = async (next: PdfOrientation) => {
     if (!pdf.rebuildWithOrientation || !onReplacePdf || pdf.orientation === next) return;

@@ -32,7 +32,13 @@ import {
   makeDivisionDocId,
 } from '../types/erp';
 import { removeDocument, upsertDocument } from '../lib/firestoreStore';
-import { formatDateDDMMYYYY, formatDateHyphenDDMMYYYY, formatINR, normalizeFyLabel } from '../lib/formatters';
+import {
+  computeRateModeAmount,
+  formatDateDDMMYYYY,
+  formatDateHyphenDDMMYYYY,
+  formatINR,
+  normalizeFyLabel,
+} from '../lib/formatters';
 import { downloadNicPartBJson, getEwayBillExpiryState } from '../lib/ewayBillUtils';
 import {
   GeneratedPdfResult,
@@ -55,6 +61,10 @@ import { EditableSearchSelect } from './EditableSearchSelect';
 import {
   ALL_INDIA_BRANCH_OPTIONS,
   DEFAULT_PACKAGE_MODES,
+  DEFAULT_RATE_MODES,
+  addDropdownItem,
+  deleteDropdownItem,
+  editDropdownItem,
   getEffectiveDropdownList,
 } from '../lib/dropdownMasterStore';
 import { playAlertBeep, playVerifiedBeep } from '../lib/audioFeedback';
@@ -183,7 +193,7 @@ export const LogisticsDocketManifestPanel: React.FC<LogisticsDocketManifestPanel
   const [goodsDesc, setGoodsDesc] = useState('Hardware / Spare Parts');
   const [actualWeightKg, setActualWeightKg] = useState('25');
   const [chargedWeightKg, setChargedWeightKg] = useState('30');
-  const [rateBasis, setRateBasis] = useState<'Per Kg' | 'Per Package' | 'Fixed'>('Per Kg');
+  const [rateBasis, setRateBasis] = useState<string>('Per Kg');
   const [ratePerUnit, setRatePerUnit] = useState('18');
   const [fovCharge, setFovCharge] = useState('0');
   const [docketCharge, setDocketCharge] = useState('80');
@@ -402,13 +412,12 @@ export const LogisticsDocketManifestPanel: React.FC<LogisticsDocketManifestPanel
 
   // Auto-calculated freight preview
   const docketTotals = useMemo(() => {
-    const qty =
-      rateBasis === 'Per Kg'
-        ? Math.max(0, Number(chargedWeightKg) || 0)
-        : rateBasis === 'Per Package'
-        ? Math.max(0, Number(packages) || 0)
-        : 1;
-    const baseFreight = Math.round(qty * (Number(ratePerUnit) || 0) * 100) / 100;
+    const baseFreight = computeRateModeAmount({
+      rateMode: rateBasis,
+      ratePerUnit: Number(ratePerUnit) || 0,
+      weightKg: Number(chargedWeightKg) || 0,
+      packages: Number(packages) || 0,
+    });
     const subTotal =
       baseFreight +
       (Number(fovCharge) || 0) +
@@ -1185,16 +1194,20 @@ export const LogisticsDocketManifestPanel: React.FC<LogisticsDocketManifestPanel
               <div className="grid grid-cols-4 gap-2">
                 <div>
                   <label className="block text-[11px] font-bold text-slate-600 mb-0.5">Rate Basis</label>
-                  <SearchableSelect
+                  <EditableSearchSelect
                     ariaLabel="Docket Rate Basis"
                     value={rateBasis}
-                    onChange={(val) => setRateBasis(val as 'Per Kg' | 'Per Package' | 'Fixed')}
-                    options={[
-                      { value: 'Fixed', label: 'Fixed' },
-                      { value: 'Per Kg', label: 'Per Kg' },
-                      { value: 'Per Package', label: 'Per Pkg' },
-                    ]}
-                    triggerClassName="!py-1.5"
+                    onChange={setRateBasis}
+                    options={Array.from(
+                      new Set([
+                        ...DEFAULT_RATE_MODES,
+                        ...getEffectiveDropdownList(company, 'rateModes'),
+                      ])
+                    )}
+                    onAddOption={(v) => addDropdownItem(ownerUid, company, 'rateModes', v)}
+                    onEditOption={(o, n) => editDropdownItem(ownerUid, company, 'rateModes', o, n)}
+                    onDeleteOption={(v) => deleteDropdownItem(ownerUid, company, 'rateModes', v)}
+                    inputClassName="!py-1.5"
                   />
                 </div>
                 <div>

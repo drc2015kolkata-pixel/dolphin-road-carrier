@@ -562,6 +562,28 @@ export const PAYMENT_MODE_OPTIONS: string[] = sortAlphaList([
   'UPI',
 ]);
 
+export const DEFAULT_BANK_NAMES: string[] = sortAlphaList([
+  'Axis Bank',
+  'Bandhan Bank',
+  'Bank of Baroda',
+  'Bank of India',
+  'Canara Bank',
+  'Central Bank of India',
+  'Federal Bank',
+  'HDFC Bank',
+  'ICICI Bank',
+  'IDBI Bank',
+  'Indian Bank',
+  'IndusInd Bank',
+  'Kotak Mahindra Bank',
+  'Punjab & Sind Bank',
+  'Punjab National Bank',
+  'State Bank of India',
+  'UCO Bank',
+  'Union Bank of India',
+  'Yes Bank',
+]);
+
 export const VEHICLE_MAKE_OPTIONS: string[] = sortAlphaList([
   'AMW (Asia Motor Works)',
   'Ashok Leyland',
@@ -700,7 +722,10 @@ export type DropdownCategoryKey =
   | 'packageModes'
   | 'rateModes'
   | 'deliveryPlaces'
-  | 'states';
+  | 'states'
+  | 'bankNames'
+  | 'paymentModes'
+  | 'vehicleBodyTypes';
 
 const CATEGORY_DEFAULTS: Record<DropdownCategoryKey, string[]> = {
   goodsTypes: ALL_INDIA_NON_LIQUID_GOODS,
@@ -708,6 +733,9 @@ const CATEGORY_DEFAULTS: Record<DropdownCategoryKey, string[]> = {
   rateModes: DEFAULT_RATE_MODES,
   deliveryPlaces: DEFAULT_DELIVERY_PLACES,
   states: ALL_INDIA_STATES_DISTRICTS.map((s) => s.label),
+  bankNames: DEFAULT_BANK_NAMES,
+  paymentModes: PAYMENT_MODE_OPTIONS,
+  vehicleBodyTypes: VEHICLE_BODY_TYPE_OPTIONS,
 };
 
 export function getEffectiveDropdownList(
@@ -718,6 +746,9 @@ export function getEffectiveDropdownList(
   if (Array.isArray(custom)) {
     if (category === 'packageModes') {
       return mergeDropdownOptions(custom, ['MULTI', 'NOS', 'METER', 'LOOSE', 'BAGS', 'NUMBER', 'PACKAGES', 'PIECES', 'BOXES', 'BUNDLES', 'DRUMS', 'ROLLS', 'PALLETS', 'INCH']);
+    }
+    if (category === 'paymentModes') {
+      return mergeDropdownOptions(PAYMENT_MODE_OPTIONS, custom);
     }
     return sortAlphaList(custom);
   }

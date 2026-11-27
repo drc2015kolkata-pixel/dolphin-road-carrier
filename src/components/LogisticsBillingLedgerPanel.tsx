@@ -22,7 +22,12 @@ import {
   makeDivisionDocId,
 } from '../types/erp';
 import { removeDocument, upsertDocument } from '../lib/firestoreStore';
-import { formatDateDDMMYYYY, formatINR, normalizeFyLabel } from '../lib/formatters';
+import {
+  amountToIndianWords,
+  formatDateDDMMYYYY,
+  formatINR,
+  normalizeFyLabel,
+} from '../lib/formatters';
 import {
   GeneratedPdfResult,
   generateFoxproStatementPDF,
@@ -35,7 +40,14 @@ import {
   RichEntityPicker,
 } from './RichEntityPicker';
 import { SearchableSelect } from './SearchableSelect';
-import { COMMON_REMARK_PRESETS, PAYMENT_MODE_OPTIONS } from '../lib/dropdownMasterStore';
+import { EditableSearchSelect } from './EditableSearchSelect';
+import {
+  COMMON_REMARK_PRESETS,
+  addDropdownItem,
+  deleteDropdownItem,
+  editDropdownItem,
+  getEffectiveDropdownList,
+} from '../lib/dropdownMasterStore';
 import { validateIndianGstin } from '../lib/gstinValidator';
 import { GstinInputField } from './GstinInputField';
 import { playAlertBeep } from '../lib/audioFeedback';
@@ -681,9 +693,10 @@ export const LogisticsBillingLedgerPanel: React.FC<LogisticsBillingLedgerPanelPr
                         value={gstRate}
                         onChange={setGstRate}
                         options={[
+                          { value: '0', label: '0% (Exempt)' },
+                          { value: '5', label: '5%' },
                           { value: '12', label: '12%' },
                           { value: '18', label: '18%' },
-                          { value: '5', label: '5%' },
                         ]}
                         triggerClassName="!py-1 !text-[11px] !font-bold !border-teal-300"
                       />
@@ -708,6 +721,9 @@ export const LogisticsBillingLedgerPanel: React.FC<LogisticsBillingLedgerPanelPr
                   </div>
                   <div className="text-sm font-extrabold font-mono-num">
                     Grand Total: ₹{formatINR(billingTotals.grandTotal)}
+                  </div>
+                  <div className="text-[10px] text-emerald-300 mt-0.5">
+                    {amountToIndianWords(billingTotals.grandTotal)}
                   </div>
                 </div>
                 <button
@@ -1046,12 +1062,15 @@ export const LogisticsBillingLedgerPanel: React.FC<LogisticsBillingLedgerPanelPr
                   </div>
                   <div>
                     <label className="block text-[11px] font-bold text-slate-600 mb-0.5">Payment Mode</label>
-                    <SearchableSelect
+                    <EditableSearchSelect
                       ariaLabel="Logistics Payment Mode"
                       value={paymentMode}
                       onChange={setPaymentMode}
-                      options={PAYMENT_MODE_OPTIONS}
-                      triggerClassName="!py-1.5 !font-bold"
+                      options={getEffectiveDropdownList(company, 'paymentModes')}
+                      onAddOption={(v) => addDropdownItem(ownerUid, company, 'paymentModes', v)}
+                      onEditOption={(o, n) => editDropdownItem(ownerUid, company, 'paymentModes', o, n)}
+                      onDeleteOption={(v) => deleteDropdownItem(ownerUid, company, 'paymentModes', v)}
+                      inputClassName="!py-1.5 !font-bold"
                     />
                   </div>
                 </div>

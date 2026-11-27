@@ -42,6 +42,7 @@ import {
 } from '../types/erp';
 import {
   amountToIndianWords,
+  extractTrailingSerialNumber,
   formatDateDDMMYYYY,
   formatINR,
   getDynamicFinancialYear,
@@ -74,7 +75,10 @@ import {
   BILL_FOOTNOTE_PRESETS,
   BILL_REMARK_PRESETS,
   COMMON_REMARK_PRESETS,
-  PAYMENT_MODE_OPTIONS,
+  DEFAULT_RATE_MODES,
+  addDropdownItem,
+  deleteDropdownItem,
+  editDropdownItem,
   getEffectiveDropdownList,
 } from '../lib/dropdownMasterStore';
 import { playAlertBeep, playVerifiedBeep } from '../lib/audioFeedback';
@@ -103,7 +107,15 @@ import {
 import { PinCountryInputs, useAutoPinLookup } from './CityPinCountryAutoFill';
 import { resolvePinSync, SupportedCountry } from '../lib/postalPinLookup';
 import { VoiceDraftFields } from '../lib/voicePilot';
-import { deleteIdbObject, loadIdbObject, saveIdbObject } from '../lib/indexedDbStore';
+import {
+  deleteIdbObject,
+  loadIdbObject,
+  saveIdbObject,
+} from '../lib/indexedDbStore';
+import {
+  extractHighestBillAndCnFromRawDbf,
+  loadRawDbfArchiveFromIdb,
+} from '../lib/foxproDbfImport';
 import { buildAutoCreditDebitNoteForRectifiedInvoice } from '../lib/autoCreditDebitNote';
 
 interface BillingQuotesModuleProps {
@@ -236,11 +248,40 @@ const BillingQuotesModuleInner: React.FC<BillingQuotesModuleProps> = ({
     () => getEffectiveDropdownList(company, 'goodsTypes'),
     [company]
   );
+  const effectivePaymentModes = useMemo(
+    () => getEffectiveDropdownList(company, 'paymentModes'),
+    [company]
+  );
+  const effectiveRateModes = useMemo(
+    () => Array.from(new Set([...DEFAULT_RATE_MODES, ...getEffectiveDropdownList(company, 'rateModes')])),
+    [company]
+  );
+
+  const [dbfSerialStats, setDbfSerialStats] = useState<{ highestBillSeq: number; highestCnSeq: number }>({
+    highestBillSeq: 0,
+    highestCnSeq: 0,
+  });
+  useEffect(() => {
+    let cancelled = false;
+    void loadRawDbfArchiveFromIdb().then((tables) => {
+      if (cancelled || !tables || tables.length === 0) return;
+      const summary = extractHighestBillAndCnFromRawDbf(tables);
+      setDbfSerialStats({
+        highestBillSeq: summary.maxBillNum,
+        highestCnSeq: summary.maxCnNum,
+      });
+    });
+    return () => {
+      cancelled = true;
+    };
+  }, []);
 
   const lrScanRef = useRef<HTMLInputElement | null>(null);
   const billDateInputRef = useRef<HTMLInputElement | null>(null);
   const remarksInputRef = useRef<HTMLInputElement | null>(null);
   const saveInvBtnRef = useRef<HTMLButtonElement | null>(null);
+  const invoiceNoDirtyRef = useRef(false);
+  const qNoDirtyRef = useRef(false);
   const fyShort = getFyShortCode(activeFy);
 
   // ---- TAX INVOICE STATE ----
@@ -252,7 +293,9 @@ const BillingQuotesModuleInner: React.FC<BillingQuotesModuleProps> = ({
     const activeFyNorm = normalizeFyLabel(activeFy);
     const prefix = (company.serialConfig?.ftlBillPrefix || branchTag || 'KOL').trim().toUpperCase();
     const startNo = Number(company.serialConfig?.ftlBillStart || 105);
-    let maxNum = 0;
+    let maxNum = dbfSerialStats.highestBillSeq > 0 && dbfSerialStats.highestBillSeq < 1000000
+      ? dbfSerialStats.highestBillSeq
+      : 0;
     invoices.forEach((inv) => {
       if (inv.docKind && inv.docKind !== 'Tax Invoice') return;
       const invFy = normalizeFyLabel(inv.financialYear || getDynamicFinancialYear(inv.invoiceDate));
@@ -270,7 +313,7 @@ const BillingQuotesModuleInner: React.FC<BillingQuotesModuleProps> = ({
       seqNum,
       formattedNo: `${prefix}/${seqNum}/${fyShort}`,
     };
-  }, [invoices, activeFy, company.serialConfig, branchTag, fyShort]);
+  }, [invoices, activeFy, company.serialConfig, branchTag, fyShort, dbfSerialStats.highestBillSeq]);
 
   const [editingInvoiceId, setEditingInvoiceId] = useState<string | null>(null);
   const [editingOriginalPaidAmount, setEditingOriginalPaidAmount] = useState(0);
@@ -538,7 +581,8 @@ const BillingQuotesModuleInner: React.FC<BillingQuotesModuleProps> = ({
   const applyAutoGstRules = (
     nextCountry: 'India' | 'Nepal' | 'Bangladesh' | 'Bhutan',
     nextGstin: string,
-    nextPaidBy = gstPaidBy
+    nextPaidBy = gstPaidBy,
+    nextStateCode?: string
   ) => {
     if (nextCountry !== 'India') {
       setInterstate(false);
@@ -547,10 +591,13 @@ const BillingQuotesModuleInner: React.FC<BillingQuotesModuleProps> = ({
       return;
     }
     const cleanGst = nextGstin.trim().toUpperCase();
-    if (/^19/.test(cleanGst)) {
+    const effectiveCode = /^(0[1-9]|[1-3][0-9])/.test(cleanGst)
+      ? cleanGst.slice(0, 2)
+      : (nextStateCode || partyStateCode || '').trim();
+    if (effectiveCode === '19') {
       setInterstate(false);
       setGstRate(5);
-    } else if (/^(0[1-9]|[1-3][0-9])/.test(cleanGst)) {
+    } else if (/^(0[1-9]|[1-3][0-9])$/.test(effectiveCode)) {
       setInterstate(true);
       setGstRate(5);
     } else {
@@ -857,7 +904,7 @@ const BillingQuotesModuleInner: React.FC<BillingQuotesModuleProps> = ({
   const hasUnsavedChanges = savedFingerprint !== currentInvoiceFingerprint;
 
   useEffect(() => {
-    if (!editingInvoiceId && docKind === 'Tax Invoice') {
+    if (!editingInvoiceId && docKind === 'Tax Invoice' && !invoiceNoDirtyRef.current) {
       setBillId(String(nextSequentialBillInfo.seqNum));
       setInvoiceNo(nextSequentialBillInfo.formattedNo);
     }
@@ -1501,7 +1548,7 @@ const BillingQuotesModuleInner: React.FC<BillingQuotesModuleProps> = ({
     setPartyStateCode(stInfo.code);
     setPartyPan((p.pan || '').trim().toUpperCase());
     setBillingCountry(detected);
-    applyAutoGstRules(detected, nextGstin, gstPaidBy);
+    applyAutoGstRules(detected, nextGstin, gstPaidBy, stInfo.code);
   };
 
   const handlePartySelect = (name: string) => {
@@ -1549,7 +1596,7 @@ const BillingQuotesModuleInner: React.FC<BillingQuotesModuleProps> = ({
       if (!qDest.trim() && prevQ.destination) setQDest(prevQ.destination);
       if (prevQ.vehicleType) setQVehicleType(prevQ.vehicleType);
       if (prevQ.goodsType) setQGoodsType(prevQ.goodsType);
-      if (prevQ.rateMode === 'Fixed' || prevQ.rateMode === 'Per Ton') setQRateMode(prevQ.rateMode);
+      if (prevQ.rateMode) setQRateMode(prevQ.rateMode);
       if ((!qFreight || Number(qFreight) <= 0) && Number(prevQ.freight || 0) > 0) {
         setQFreight(String(prevQ.freight));
       }
@@ -1580,7 +1627,7 @@ const BillingQuotesModuleInner: React.FC<BillingQuotesModuleProps> = ({
         setQFreight(String(prevCn.totalFreight));
       }
       if (!qGoodsType.trim() && prevCn.particulars) setQGoodsType(prevCn.particulars);
-      if (prevCn.rateMode && /ton|mt/i.test(prevCn.rateMode)) setQRateMode('Per Ton');
+      if (prevCn.rateMode) setQRateMode(prevCn.rateMode);
     }
   };
 
@@ -1707,6 +1754,7 @@ const BillingQuotesModuleInner: React.FC<BillingQuotesModuleProps> = ({
     setNarrationText('');
     setNarrationCustom(false);
     setFinalizeBill(false);
+    invoiceNoDirtyRef.current = false;
     const nextSeq = nextSequentialBillInfo.seqNum;
     setBillId(String(nextSeq));
     setInvoiceNo(nextSequentialBillInfo.formattedNo);
@@ -1754,6 +1802,7 @@ const BillingQuotesModuleInner: React.FC<BillingQuotesModuleProps> = ({
 
   const handleLoadInvoiceForEdit = (inv: Invoice) => {
     setSubTab('invoice');
+    invoiceNoDirtyRef.current = false;
     setEditingInvoiceId(inv.id);
     setLastSavedInvoiceId(inv.id);
     setEditingOriginalPaidAmount(Number(inv.paidAmount || 0));
@@ -1853,6 +1902,7 @@ const BillingQuotesModuleInner: React.FC<BillingQuotesModuleProps> = ({
 
   const handleStartCreditNoteRebill = (origInv: Invoice) => {
     handleLoadInvoiceForEdit(origInv);
+    invoiceNoDirtyRef.current = false;
     const branchPref = (origInv.billedAtBranch || origInv.branchCode || branchTag)
       .replace(/[^A-Z0-9]/gi, '')
       .slice(0, 3)
@@ -1879,6 +1929,7 @@ const BillingQuotesModuleInner: React.FC<BillingQuotesModuleProps> = ({
 
   const handleStartDebitNote = (origInv: Invoice) => {
     handleLoadInvoiceForEdit(origInv);
+    invoiceNoDirtyRef.current = false;
     const branchPref = (origInv.billedAtBranch || origInv.branchCode || branchTag)
       .replace(/[^A-Z0-9]/gi, '')
       .slice(0, 3)
@@ -2025,8 +2076,8 @@ const BillingQuotesModuleInner: React.FC<BillingQuotesModuleProps> = ({
 
     setSavingInv(true);
     try {
-      let finalInvoiceNo = invoiceNo.trim();
-      if (!editingInvoiceId && autoAtomicInvoice && docKind === 'Tax Invoice') {
+      let finalInvoiceNo = invoiceNo.trim() || nextSequentialBillInfo.formattedNo;
+      if (!editingInvoiceId && autoAtomicInvoice && docKind === 'Tax Invoice' && !invoiceNoDirtyRef.current) {
         try {
           const serial = await reserveNextSerialNumber({
             type: 'invoice',
@@ -2035,7 +2086,11 @@ const BillingQuotesModuleInner: React.FC<BillingQuotesModuleProps> = ({
             staffCode: activeStaffCode,
             ownerUid,
           });
-          finalInvoiceNo = serial.formattedNo;
+          const serialSeq = extractTrailingSerialNumber(serial.formattedNo);
+          finalInvoiceNo =
+            nextSequentialBillInfo.seqNum > serialSeq
+              ? nextSequentialBillInfo.formattedNo
+              : serial.formattedNo;
           setInvoiceNo(finalInvoiceNo);
         } catch {
           // Offline fallback preserves entered invoiceNo
@@ -2256,8 +2311,11 @@ const BillingQuotesModuleInner: React.FC<BillingQuotesModuleProps> = ({
   const [qValidity, setQValidity] = useState('7 Days After Lorry Unloading');
   const [qVehicleType, setQVehicleType] = useState('09 TON Open / Closed Truck');
   const [qGoodsType, setQGoodsType] = useState('General Merchandise / Industrial Goods');
-  const [qRateMode, setQRateMode] = useState<'Fixed' | 'Per Ton'>('Fixed');
+  const [qRateMode, setQRateMode] = useState<string>('Fixed');
   const [qFreight, setQFreight] = useState('34500');
+  const [qGstRate, setQGstRate] = useState<number>(5);
+  const [qReverseCharge, setQReverseCharge] = useState<boolean>(true);
+  const [qInterstate, setQInterstate] = useState<boolean>(false);
   const [qLoading, setQLoading] = useState('NO Extra Charges');
   const [qUnloading, setQUnloading] = useState('YES Extra Charges');
   const [qParking] = useState('YES Extra Charges');
@@ -2285,6 +2343,38 @@ const BillingQuotesModuleInner: React.FC<BillingQuotesModuleProps> = ({
   const [qSearch, setQSearch] = useState('');
   const debouncedQSearch = useDebouncedValue(qSearch, 200);
 
+  const applyQuotationGstFromParty = (gstinVal: string, addrVal: string, countryVal: SupportedCountry = qDestinationCountry) => {
+    if (countryVal !== 'India') {
+      setQGstRate(0);
+      setQInterstate(false);
+      setQReverseCharge(false);
+      return;
+    }
+    const clean = gstinVal.trim().toUpperCase();
+    const st = resolveGstStateCode(clean, addrVal, 'India');
+    if (st.code === '19' || /^19/.test(clean)) {
+      setQInterstate(false);
+    } else if (/^(0[1-9]|[1-3][0-9])/.test(clean) || (st.code && st.code !== '19' && st.code !== '99')) {
+      setQInterstate(true);
+    }
+  };
+
+  const qSubtotal = useMemo(() => {
+    if (qRouteRates.length > 0) {
+      const sum = qRouteRates.reduce((s, r) => s + (Number(r.freightRate) || 0), 0);
+      return sum > 0 ? sum : Number(qFreight) || 0;
+    }
+    return Number(qFreight) || 0;
+  }, [qRouteRates, qFreight]);
+
+  const qIsExport = qDestinationCountry !== 'India';
+  const qEffectiveGstRate = qIsExport ? 0 : qGstRate;
+  const qTotalTax = roundPaise((qSubtotal * qEffectiveGstRate) / 100);
+  const qCgstAmt = qIsExport || qInterstate ? 0 : roundPaise(qTotalTax / 2);
+  const qSgstAmt = qIsExport || qInterstate ? 0 : roundPaise(qTotalTax - qCgstAmt);
+  const qIgstAmt = !qIsExport && qInterstate ? qTotalTax : 0;
+  const qGrandTotal = roundPaise(qIsExport || qReverseCharge ? qSubtotal : qSubtotal + qTotalTax);
+
   useAutoPinLookup(qDest, qDestinationPinCode, qDestinationCountry, (pin, country) => {
     setQDestinationPinCode(pin);
     setQDestinationCountry(country);
@@ -2295,13 +2385,14 @@ const BillingQuotesModuleInner: React.FC<BillingQuotesModuleProps> = ({
   });
 
   useEffect(() => {
-    if (!editingQuotationId) {
+    if (!editingQuotationId && !qNoDirtyRef.current) {
       setQNo(nextSequentialQuotationNo);
     }
   }, [editingQuotationId, nextSequentialQuotationNo]);
 
   const resetQuotationForm = () => {
     setEditingQuotationId(null);
+    qNoDirtyRef.current = false;
     setQNo(nextSequentialQuotationNo);
     setQDate(todayISO());
     setQParty('');
@@ -2312,6 +2403,9 @@ const BillingQuotesModuleInner: React.FC<BillingQuotesModuleProps> = ({
     setQEmail('');
     setQGuarantorName('');
     setQGuarantorPhone('');
+    setQGstRate(5);
+    setQReverseCharge(true);
+    setQInterstate(false);
     setQRouteRates([
       {
         slNo: 1,
@@ -2328,6 +2422,7 @@ const BillingQuotesModuleInner: React.FC<BillingQuotesModuleProps> = ({
 
   const loadQuotationForEdit = (q: Quotation) => {
     setSubTab('quotation');
+    qNoDirtyRef.current = false;
     setEditingQuotationId(q.id);
     setQDivision((q.division as BusinessMode) || 'FTL');
     setQNo(q.quotationNo || nextSequentialQuotationNo);
@@ -2343,8 +2438,11 @@ const BillingQuotesModuleInner: React.FC<BillingQuotesModuleProps> = ({
     setQValidity(q.validityText || '7 Days After Lorry Unloading');
     setQVehicleType(q.vehicleType || '09 TON Open / Closed Truck');
     setQGoodsType(q.goodsType || 'General Merchandise / Industrial Goods');
-    setQRateMode((q.rateMode as 'Fixed' | 'Per Ton') || 'Fixed');
+    setQRateMode(q.rateMode || 'Fixed');
     setQFreight(String(q.freight ?? 0));
+    setQGstRate(Number(q.gstRate ?? 5));
+    setQReverseCharge(q.reverseCharge ?? true);
+    setQInterstate(Boolean(q.interstate));
     setQLoading(q.loadingCharge || 'NO Extra Charges');
     setQUnloading(q.unloadingCharge || 'YES Extra Charges');
     setQDetention(q.detentionCharge || 'YES Extra Charges');
@@ -2421,6 +2519,14 @@ const BillingQuotesModuleInner: React.FC<BillingQuotesModuleProps> = ({
       goodsType: qGoodsType.trim(),
       rateMode: qRateMode,
       freight: firstRow ? Number(firstRow.freightRate) || Number(qFreight) || 0 : Number(qFreight) || 0,
+      gstRate: qEffectiveGstRate,
+      reverseCharge: qIsExport ? false : qReverseCharge,
+      interstate: qIsExport ? false : qInterstate,
+      cgstAmt: qCgstAmt,
+      sgstAmt: qSgstAmt,
+      igstAmt: qIgstAmt,
+      totalTax: qTotalTax,
+      grandTotal: qGrandTotal,
       loadingCharge: qLoading,
       unloadingCharge: qUnloading,
       parkingCharge: qParking,
@@ -2452,8 +2558,8 @@ const BillingQuotesModuleInner: React.FC<BillingQuotesModuleProps> = ({
       }
     }
 
-    let finalQNo = qNo.trim();
-    if (!editingQuotationId && autoAtomicQuotation) {
+    let finalQNo = qNo.trim() || nextSequentialQuotationNo;
+    if (!editingQuotationId && autoAtomicQuotation && !qNoDirtyRef.current) {
       try {
         const serial = await reserveNextSerialNumber({
           type: 'quotation',
@@ -2494,6 +2600,14 @@ const BillingQuotesModuleInner: React.FC<BillingQuotesModuleProps> = ({
         goodsType: qObj.goodsType || '',
         rateMode: qObj.rateMode || 'Fixed',
         freight: qObj.freight,
+        gstRate: qObj.gstRate ?? 5,
+        reverseCharge: Boolean(qObj.reverseCharge),
+        interstate: Boolean(qObj.interstate),
+        cgstAmt: qObj.cgstAmt ?? 0,
+        sgstAmt: qObj.sgstAmt ?? 0,
+        igstAmt: qObj.igstAmt ?? 0,
+        totalTax: qObj.totalTax ?? 0,
+        grandTotal: qObj.grandTotal ?? qObj.freight,
         loadingCharge: qObj.loadingCharge,
         unloadingCharge: qObj.unloadingCharge,
         parkingCharge: qObj.parkingCharge,
@@ -2517,7 +2631,7 @@ const BillingQuotesModuleInner: React.FC<BillingQuotesModuleProps> = ({
       action: isNew ? 'Created Rate Quotation' : 'Rectified Rate Quotation',
       module: 'Billing',
       docRefCode: finalQNo,
-      summary: `${qObj.partyName} · ${qObj.destination} · ₹${formatINR(qObj.freight)}`,
+      summary: `${qObj.partyName} · ${qObj.destination} · ₹${formatINR(qObj.grandTotal ?? qObj.freight)}`,
       staffCode: activeStaffCode,
       staffName: activeStaffName,
       branchCode: activeBranchCode,
@@ -3797,15 +3911,17 @@ const BillingQuotesModuleInner: React.FC<BillingQuotesModuleProps> = ({
                 </div>
                 <div>
                   <label className="block font-semibold text-slate-700 mb-1">
-                    Invoice No * {!editingInvoiceId && docKind === 'Tax Invoice' && company.lastSavedNoLock !== false ? '(Last Saved No + 1 Lock)' : autoAtomicInvoice ? '(Atomic)' : ''}
+                    Invoice No * {!editingInvoiceId && docKind === 'Tax Invoice' ? '(Auto Last+1 · Editable)' : autoAtomicInvoice ? '(Atomic)' : ''}
                   </label>
                   <input
                     type="text"
                     required
-                    disabled={!editingInvoiceId && docKind === 'Tax Invoice' && company.lastSavedNoLock !== false}
-                    value={!editingInvoiceId && docKind === 'Tax Invoice' && company.lastSavedNoLock !== false ? nextSequentialBillInfo.formattedNo : invoiceNo}
-                    onChange={(e) => setInvoiceNo(e.target.value)}
-                    className="w-full px-2.5 py-1.5 rounded border border-slate-300 font-mono-num font-bold disabled:bg-blue-50 disabled:text-blue-800"
+                    value={invoiceNo}
+                    onChange={(e) => {
+                      invoiceNoDirtyRef.current = true;
+                      setInvoiceNo(e.target.value);
+                    }}
+                    className="w-full px-2.5 py-1.5 rounded border border-slate-300 font-mono-num font-bold"
                   />
                 </div>
                 <div className="grid grid-cols-3 gap-1.5">
@@ -4383,7 +4499,7 @@ const BillingQuotesModuleInner: React.FC<BillingQuotesModuleProps> = ({
                       className={`px-2 py-0.5 rounded text-[10px] font-bold ${
                         isExportCountry
                           ? 'bg-red-100 text-red-800'
-                          : /^19/.test(partyGstin.trim())
+                          : /^19/.test(partyGstin.trim()) || partyStateCode === '19'
                             ? 'bg-emerald-100 text-emerald-800'
                             : interstate
                               ? 'bg-blue-100 text-blue-800'
@@ -4392,7 +4508,7 @@ const BillingQuotesModuleInner: React.FC<BillingQuotesModuleProps> = ({
                     >
                       {isExportCountry
                         ? `${billingCountry}: GST Exempt (0%)`
-                        : /^19/.test(partyGstin.trim())
+                        : (/^19/.test(partyGstin.trim()) || partyStateCode === '19') && !interstate
                           ? `WB (19): CGST ${(effectiveGstRate / 2).toFixed(1)}% + SGST ${(effectiveGstRate / 2).toFixed(1)}%`
                           : interstate
                             ? `Interstate: IGST ${effectiveGstRate.toFixed(1)}%`
@@ -4429,8 +4545,9 @@ const BillingQuotesModuleInner: React.FC<BillingQuotesModuleProps> = ({
                           onChange={(val) => setGstRate(Number(val))}
                           options={[
                             { value: '0', label: '0% (Exempt)' },
-                            { value: '12', label: '12%' },
                             { value: '5', label: '5%' },
+                            { value: '12', label: '12%' },
+                            { value: '18', label: '18%' },
                           ]}
                           buttonClassName="font-mono-num"
                         />
@@ -4584,13 +4701,15 @@ const BillingQuotesModuleInner: React.FC<BillingQuotesModuleProps> = ({
                     </div>
                     <div>
                       <label className="block text-[10px] font-bold text-slate-600">Adv. Mode</label>
-                      <SearchableSelect
+                      <EditableSearchSelect
                         ariaLabel="Advance Payment Mode"
                         value={advanceMode}
                         onChange={setAdvanceMode}
-                        sortAlphabetically={false}
-                        options={PAYMENT_MODE_OPTIONS}
-                        buttonClassName="!py-1 !text-xs"
+                        options={effectivePaymentModes}
+                        onAddOption={(v) => addDropdownItem(ownerUid, company, 'paymentModes', v)}
+                        onEditOption={(o, n) => editDropdownItem(ownerUid, company, 'paymentModes', o, n)}
+                        onDeleteOption={(v) => deleteDropdownItem(ownerUid, company, 'paymentModes', v)}
+                        inputClassName="!py-1 !text-xs"
                       />
                     </div>
                     <div className="flex items-end pb-1">
@@ -4605,13 +4724,15 @@ const BillingQuotesModuleInner: React.FC<BillingQuotesModuleProps> = ({
                     </div>
                     <div>
                       <label className="block text-[10px] font-bold text-slate-600">Pay Mode</label>
-                      <SearchableSelect
+                      <EditableSearchSelect
                         ariaLabel="Full Payment Mode"
                         value={fullPaymentMode}
                         onChange={setFullPaymentMode}
-                        sortAlphabetically={false}
-                        options={PAYMENT_MODE_OPTIONS}
-                        buttonClassName="!py-1 !text-xs"
+                        options={effectivePaymentModes}
+                        onAddOption={(v) => addDropdownItem(ownerUid, company, 'paymentModes', v)}
+                        onEditOption={(o, n) => editDropdownItem(ownerUid, company, 'paymentModes', o, n)}
+                        onDeleteOption={(v) => deleteDropdownItem(ownerUid, company, 'paymentModes', v)}
+                        inputClassName="!py-1 !text-xs"
                       />
                     </div>
                   </div>
@@ -5108,15 +5229,17 @@ const BillingQuotesModuleInner: React.FC<BillingQuotesModuleProps> = ({
             <div className="p-4 grid grid-cols-1 md:grid-cols-3 gap-3 text-xs">
               <div>
                 <label className="block font-semibold text-slate-700 mb-1">
-                  Quotation No * {!editingQuotationId && company.lastSavedNoLock !== false ? '(Last Saved No + 1 Lock)' : autoAtomicQuotation ? '(Atomic)' : ''}
+                  Quotation No * {!editingQuotationId ? '(Auto Last+1 · Editable)' : autoAtomicQuotation ? '(Atomic)' : ''}
                 </label>
                 <input
                   type="text"
                   required
-                  disabled={!editingQuotationId && company.lastSavedNoLock !== false}
-                  value={!editingQuotationId && company.lastSavedNoLock !== false ? nextSequentialQuotationNo : qNo}
-                  onChange={(e) => setQNo(e.target.value)}
-                  className="w-full px-2.5 py-1.5 rounded border border-slate-300 font-mono-num disabled:bg-blue-50 disabled:text-blue-800 disabled:font-bold"
+                  value={qNo}
+                  onChange={(e) => {
+                    qNoDirtyRef.current = true;
+                    setQNo(e.target.value);
+                  }}
+                  className="w-full px-2.5 py-1.5 rounded border border-slate-300 font-mono-num font-bold"
                 />
               </div>
               <div>
@@ -5147,6 +5270,7 @@ const BillingQuotesModuleInner: React.FC<BillingQuotesModuleProps> = ({
                       setQGstin(p.gstin || '');
                       setQPhone(p.phone || '');
                       setQEmail(p.email || '');
+                      applyQuotationGstFromParty(p.gstin || '', p.address || '');
                     } else {
                       setSelectedQPartyId('');
                     }
@@ -5159,6 +5283,7 @@ const BillingQuotesModuleInner: React.FC<BillingQuotesModuleProps> = ({
                     setQGstin(p.gstin || '');
                     setQPhone(p.phone || '');
                     setQEmail(p.email || '');
+                    applyQuotationGstFromParty(p.gstin || '', p.address || '');
                     applyQuotationSmartAutoFill(p.name, qDest);
                   }}
                   items={billingCustomerParties}
@@ -5208,7 +5333,10 @@ const BillingQuotesModuleInner: React.FC<BillingQuotesModuleProps> = ({
                 <GstinInputField
                   label="Party GSTIN"
                   value={qGstin}
-                  onChange={setQGstin}
+                  onChange={(val) => {
+                    setQGstin(val);
+                    applyQuotationGstFromParty(val, qAddr);
+                  }}
                 />
               </div>
               <div>
@@ -5286,6 +5414,9 @@ const BillingQuotesModuleInner: React.FC<BillingQuotesModuleProps> = ({
                   value={qGoodsType}
                   onChange={setQGoodsType}
                   options={effectiveGoodsList}
+                  onAddOption={(v) => addDropdownItem(ownerUid, company, 'goodsTypes', v)}
+                  onEditOption={(o, n) => editDropdownItem(ownerUid, company, 'goodsTypes', o, n)}
+                  onDeleteOption={(v) => deleteDropdownItem(ownerUid, company, 'goodsTypes', v)}
                   placeholder="Search Goods A-Z..."
                 />
               </div>
@@ -5302,13 +5433,16 @@ const BillingQuotesModuleInner: React.FC<BillingQuotesModuleProps> = ({
               <div>
                 <label className="block font-semibold text-slate-700 mb-1">Rate Mode &amp; Freight Amount (₹) *</label>
                 <div className="flex gap-1.5">
-                  <div className="w-32">
-                    <SearchableSelect
+                  <div className="w-40">
+                    <EditableSearchSelect
                       ariaLabel="Quotation Rate Mode"
                       value={qRateMode}
-                      onChange={(val) => setQRateMode(val as 'Fixed' | 'Per Ton')}
-                      options={['Fixed', 'Per Ton']}
-                      buttonClassName="font-bold"
+                      onChange={setQRateMode}
+                      options={effectiveRateModes}
+                      onAddOption={(v) => addDropdownItem(ownerUid, company, 'rateModes', v)}
+                      onEditOption={(o, n) => editDropdownItem(ownerUid, company, 'rateModes', o, n)}
+                      onDeleteOption={(v) => deleteDropdownItem(ownerUid, company, 'rateModes', v)}
+                      inputClassName="font-bold"
                     />
                   </div>
                   <input
@@ -5560,6 +5694,87 @@ const BillingQuotesModuleInner: React.FC<BillingQuotesModuleProps> = ({
                     ))}
                   </tbody>
                 </table>
+              </div>
+            </div>
+
+            {/* Quotation 5% GTA GST Calculation & Indian Words Box */}
+            <div className="mx-4 mb-3 p-3.5 rounded-lg bg-slate-50 border border-slate-200 grid grid-cols-1 md:grid-cols-2 gap-3 text-xs">
+              <div className="space-y-2">
+                <div className="flex flex-wrap items-center justify-between gap-2">
+                  <span className="font-bold text-slate-900">QUOTATION GTA GST (5% / 0% / 12% / 18%)</span>
+                  <span
+                    className={`px-2 py-0.5 rounded text-[10px] font-bold ${
+                      qIsExport
+                        ? 'bg-red-100 text-red-800'
+                        : !qInterstate
+                          ? 'bg-emerald-100 text-emerald-800'
+                          : 'bg-blue-100 text-blue-800'
+                    }`}
+                  >
+                    {qIsExport
+                      ? `${qDestinationCountry}: GST Exempt (0%)`
+                      : qInterstate
+                        ? `IGST ${qEffectiveGstRate.toFixed(1)}%`
+                        : `WB/Intra: CGST ${(qEffectiveGstRate / 2).toFixed(1)}% + SGST ${(qEffectiveGstRate / 2).toFixed(1)}%`}
+                  </span>
+                </div>
+                <div className="flex flex-wrap items-center gap-3">
+                  <label className="inline-flex items-center gap-1.5 font-medium">
+                    <input
+                      type="checkbox"
+                      disabled={qIsExport}
+                      checked={!qIsExport && qReverseCharge}
+                      onChange={(e) => setQReverseCharge(e.target.checked)}
+                    />
+                    Reverse Charge (RCM)
+                  </label>
+                  <label className="inline-flex items-center gap-1.5 font-medium">
+                    <input
+                      type="checkbox"
+                      disabled={qIsExport}
+                      checked={!qIsExport && qInterstate}
+                      onChange={(e) => setQInterstate(e.target.checked)}
+                    />
+                    IGST (Outside WB)
+                  </label>
+                  <div className="flex items-center gap-1.5">
+                    <span>GST %:</span>
+                    <div className="w-32">
+                      <SearchableSelect
+                        ariaLabel="Quotation GST Percent"
+                        disabled={qIsExport}
+                        value={String(qEffectiveGstRate)}
+                        onChange={(val) => setQGstRate(Number(val))}
+                        options={[
+                          { value: '0', label: '0% (Exempt)' },
+                          { value: '5', label: '5%' },
+                          { value: '12', label: '12%' },
+                          { value: '18', label: '18%' },
+                        ]}
+                        buttonClassName="font-mono-num"
+                      />
+                    </div>
+                  </div>
+                </div>
+                <div className="grid grid-cols-2 sm:grid-cols-4 gap-1 text-[11px] font-mono-num text-slate-700">
+                  <span>CGST ({(qEffectiveGstRate / 2).toFixed(1)}%): ₹{formatINR(qCgstAmt)}</span>
+                  <span>SGST ({(qEffectiveGstRate / 2).toFixed(1)}%): ₹{formatINR(qSgstAmt)}</span>
+                  <span>IGST ({qEffectiveGstRate.toFixed(1)}%): ₹{formatINR(qIgstAmt)}</span>
+                  <span className="font-bold">Tax: ₹{formatINR(qTotalTax)}</span>
+                </div>
+              </div>
+              <div className="flex flex-col justify-center bg-white border border-slate-200 rounded-md px-3 py-2">
+                <div className="flex items-center justify-between gap-2">
+                  <span className="font-bold text-slate-700">
+                    Freight Subtotal: <span className="font-mono-num">₹{formatINR(qSubtotal)}</span>
+                  </span>
+                  <span className="font-extrabold text-sm font-mono-num text-[#0D47A1]">
+                    Total Quoted: ₹{formatINR(qGrandTotal)}
+                  </span>
+                </div>
+                <p className="text-[11px] font-semibold text-slate-700 mt-1">
+                  Amount in Words: {amountToIndianWords(qGrandTotal)}
+                </p>
               </div>
             </div>
 

@@ -1449,6 +1449,7 @@ function buildLR3CopyDoc(
         ? `Items: ${cn.multiGoodsItems.map((g) => `${g.description}(${g.packages} ${g.packageMode})`).join(', ')}`
         : '';
     const largeRemarksText = [
+      !hideFreight ? `Freight Words: ${amountToIndianWords(cn.totalFreight)}` : '',
       cn.remarks || '',
       extraGoodsSummary,
       allVehicles.length > 1 ? `All Vehicles: ${allVehicles.join(', ')}` : '',
@@ -1753,11 +1754,50 @@ function buildQuotationDoc(
   });
   ty += 2.5;
 
+  const qSubtotal =
+    routeRows.reduce((s, r) => s + (Number(r.freightRate) || 0), 0) ||
+    Number(quote.freight || 0);
+  const qGstPct = Number(quote.gstRate ?? 5);
+  const qRcm = quote.reverseCharge ?? true;
+  const qIsIgst = Boolean(quote.interstate);
+  const qTotalTax =
+    quote.totalTax !== undefined
+      ? Number(quote.totalTax || 0)
+      : Math.round(((qSubtotal * qGstPct) / 100) * 100) / 100;
+  const qCgst =
+    quote.cgstAmt !== undefined
+      ? Number(quote.cgstAmt || 0)
+      : qIsIgst
+        ? 0
+        : Math.round((qTotalTax / 2) * 100) / 100;
+  const qSgst =
+    quote.sgstAmt !== undefined
+      ? Number(quote.sgstAmt || 0)
+      : qIsIgst
+        ? 0
+        : Math.round((qTotalTax - qCgst) * 100) / 100;
+  const qGrandTotal =
+    quote.grandTotal !== undefined
+      ? Number(quote.grandTotal || 0)
+      : Math.round((qRcm ? qSubtotal : qSubtotal + qTotalTax) * 100) / 100;
+  const qGstSummaryText =
+    qGstPct <= 0
+      ? '0% GST (Exempt)'
+      : qRcm
+        ? `GTA ${qGstPct}% under RCM (Payable by Recipient; Tax Ref: Rs. ${formatINR(qTotalTax)})`
+        : qIsIgst
+          ? `IGST @ ${qGstPct}% = Rs. ${formatINR(qTotalTax)}`
+          : `CGST ${(qGstPct / 2).toFixed(1)}% (Rs. ${formatINR(qCgst)}) + SGST ${(qGstPct / 2).toFixed(1)}% (Rs. ${formatINR(qSgst)})`;
+
   const rows: Array<[string, string]> = [
     ...(quote.division && quote.division !== 'FTL'
       ? [['Division', `${String(quote.division).toUpperCase()} DIVISION`] as [string, string]]
       : []),
     ...(quote.goodsType ? [['Goods Type', quote.goodsType] as [string, string]] : []),
+    ['Rate Mode & Subtotal', `${quote.rateMode || 'Fixed'}  |  Freight Subtotal: Rs. ${formatINR(qSubtotal)}`],
+    ['GST / Tax Treatment', qGstSummaryText],
+    ['Total Quoted Amount', `Rs. ${formatINR(qGrandTotal)}`],
+    ['Amount in Words', amountToIndianWords(qGrandTotal)],
     ['Loading / Unloading', `${quote.loadingCharge || 'NO Extra'}  |  Unload: ${quote.unloadingCharge || 'YES Extra'}`],
     ['Parking / Detention', `${quote.parkingCharge || 'YES Extra'}  |  Detention: ${quote.detentionCharge || 'YES Extra'}`],
     ['Advance Policy', quote.advancePay || 'No Advance Before Lorry Loading'],
@@ -1785,8 +1825,10 @@ function buildQuotationDoc(
     doc.setFont('helvetica', 'bold');
     doc.setFontSize(7.6);
     doc.text(String(k ?? ''), SAFE_MARGIN + 2.5, ty + rowH - 1.6);
-    doc.setFont('helvetica', 'normal');
-    doc.text(String(v ?? '-'), SAFE_MARGIN + labelW + 3, ty + rowH - 1.6);
+    doc.setFont('helvetica', k === 'Total Quoted Amount' ? 'bold' : 'normal');
+    const valStr = String(v ?? '-');
+    doc.setFontSize(valStr.length > 82 ? 6.6 : 7.5);
+    doc.text(valStr, SAFE_MARGIN + labelW + 3, ty + rowH - 1.6);
     ty += rowH;
   });
 

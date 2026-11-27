@@ -210,3 +210,95 @@ export function makeSafeDocId(prefix: string): string {
   const rand = Math.random().toString(36).slice(2, 8);
   return `${prefix}_${Date.now()}_${rand}`.replace(/[^a-zA-Z0-9_\-]/g, '_');
 }
+
+export function isLumpSumRateMode(mode?: string): boolean {
+  const m = String(mode || '').trim().toLowerCase();
+  if (!m) return true;
+  if (
+    m.includes('fixed') ||
+    m.includes('lump') ||
+    m.includes('minimum guarantee') ||
+    m.includes('trip') ||
+    m.includes('trailer') ||
+    m.includes('odc')
+  ) {
+    return true;
+  }
+  if (
+    m.includes('mt') ||
+    m.includes('ton') ||
+    m.includes('kg') ||
+    m.includes('quintal') ||
+    m.includes('qtl') ||
+    m.includes('package') ||
+    m.includes('box') ||
+    m.includes('bag') ||
+    m.includes('drum') ||
+    m.includes('cft') ||
+    m.includes('cubic') ||
+    m.includes('km')
+  ) {
+    return false;
+  }
+  return true;
+}
+
+export function computeRateModeAmount(params: {
+  rateMode?: string;
+  ratePerUnit: number;
+  weightMt?: number;
+  weightKg?: number;
+  packages?: number;
+}): number {
+  const rate = Number(params.ratePerUnit) || 0;
+  if (rate <= 0) return 0;
+  const m = String(params.rateMode || '').trim().toLowerCase();
+  if (isLumpSumRateMode(m)) {
+    return roundPaise(rate);
+  }
+  const mt = Number(params.weightMt) || 0;
+  const kg = Number(params.weightKg) || (mt > 0 ? mt * 1000 : 0);
+  const pkgs = Number(params.packages) || 0;
+
+  if (m.includes('kg') || m.includes('kilogram')) {
+    return kg > 0 ? roundPaise(kg * rate) : roundPaise(rate);
+  }
+  if (m.includes('quintal') || m.includes('qtl')) {
+    const qtl = mt > 0 ? mt * 10 : kg > 0 ? kg / 100 : 0;
+    return qtl > 0 ? roundPaise(qtl * rate) : roundPaise(rate);
+  }
+  if (m.includes('mt') || m.includes('ton')) {
+    return mt > 0 ? roundPaise(mt * rate) : roundPaise(rate);
+  }
+  if (
+    m.includes('package') ||
+    m.includes('box') ||
+    m.includes('bag') ||
+    m.includes('drum') ||
+    m.includes('pcs')
+  ) {
+    return pkgs > 0 ? roundPaise(pkgs * rate) : roundPaise(rate);
+  }
+  if (mt > 0) return roundPaise(mt * rate);
+  if (pkgs > 0) return roundPaise(pkgs * rate);
+  return roundPaise(rate);
+}
+
+export function extractTrailingSerialNumber(docNo?: string | null): number {
+  const s = String(docNo || '').trim();
+  if (!s) return 0;
+  const beforeFy = s.match(/(\d+)(?=\s*\/\s*\d{2}\s*[-–/]\s*\d{2}\s*$)/);
+  if (beforeFy) {
+    const n = parseInt(beforeFy[1], 10);
+    if (Number.isFinite(n) && n < 1000000) return n;
+  }
+  const allNums = s.match(/\d+/g);
+  if (!allNums || allNums.length === 0) return 0;
+  for (let i = allNums.length - 1; i >= 0; i -= 1) {
+    const n = parseInt(allNums[i], 10);
+    if (Number.isFinite(n) && n > 0 && n < 1000000) {
+      return n;
+    }
+  }
+  return 0;
+}

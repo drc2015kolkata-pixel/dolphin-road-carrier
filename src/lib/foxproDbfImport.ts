@@ -9,7 +9,7 @@ import {
   TransactionRecord,
   Vehicle,
 } from '../types/erp';
-import { makeSafeDocId, normalizeFyLabel, resolveFinancialYearFromDate, roundPaise, todayISO } from './formatters';
+import { extractTrailingSerialNumber, makeSafeDocId, normalizeFyLabel, resolveFinancialYearFromDate, roundPaise, todayISO } from './formatters';
 import { sheetToObjectsSmartHeader } from './excelImport';
 import { buildAutomaticNarration, extractPaymentMetadata } from './paymentNarration';
 import { extractCreditReceiptsFromRows } from '../components/BankReceiptImportModule';
@@ -2118,4 +2118,72 @@ export async function autoCollectOldDataFiles(params: {
   result.brokersAddedCount = result.parties.filter((p) => p.partyType === 'Broker').length;
   result.destinations = Array.from(new Set(result.destinations.filter(Boolean))).sort();
   return result;
+}
+
+export interface DbfLatestSerialSummary {
+  maxCnNo: string;
+  maxCnNum: number;
+  maxCnParty: string;
+  maxBillNo: string;
+  maxBillNum: number;
+  maxBillParty: string;
+}
+
+export function extractHighestBillAndCnFromRawDbf(
+  tables: RawDbfTableDump[]
+): DbfLatestSerialSummary {
+  let maxCnNo = '';
+  let maxCnNum = 0;
+  let maxCnParty = '';
+  let maxBillNo = '';
+  let maxBillNum = 0;
+  let maxBillParty = '';
+
+  for (const t of tables || []) {
+    const leaf = String(t.fileName || '')
+      .split(/[\\/]/)
+      .pop()
+      ?.toLowerCase() || '';
+
+    if (leaf === 'courtran.dbf' || leaf.includes('courtran') || t.tableKind === 'CN_BOOKING') {
+      for (const row of t.rows || []) {
+        const cnNo = pickStr(row, ['cnno', 'lrno', 'biltyno', 'grno', 'cno', 'docno']);
+        if (!cnNo) continue;
+        const n = extractTrailingSerialNumber(cnNo);
+        const party =
+          pickStr(row, ['partyname', 'pname', 'bparty', 'consignor', 'cnor', 'cname']) || '';
+        if (n > 0 && n >= maxCnNum) {
+          maxCnNum = n;
+          maxCnNo = cnNo;
+          if (party) maxCnParty = party;
+        }
+      }
+    }
+
+    if (leaf === 'marbill.dbf' || leaf.includes('marbill') || t.tableKind === 'BILLING') {
+      for (const row of t.rows || []) {
+        const billNo = pickStr(row, ['billno', 'invno', 'invoiceno', 'bno', 'vno']);
+        if (!billNo) continue;
+        const bid = pickNum(row, ['billid', 'bid', 'slno']);
+        const parsed = extractTrailingSerialNumber(billNo);
+        const n = Math.max(Number.isFinite(bid) && bid < 1000000 ? bid : 0, parsed);
+        const party =
+          pickStr(row, ['partyname', 'pname', 'bparty', 'party', 'cname', 'acname']) || '';
+        if (n > 0 && n >= maxBillNum) {
+          maxBillNum = n;
+          maxBillNo = billNo;
+          if (party) maxBillParty = party;
+        }
+      }
+    }
+  }
+
+  return {
+    maxCnNo,
+    maxCnNum,
+    maxCnParty,
+    maxBillNo,
+    maxBillNum,
+    maxBillParty,
+  };
 }

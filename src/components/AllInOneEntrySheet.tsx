@@ -63,27 +63,38 @@ import {
   Vehicle,
 } from '../types/erp';
 import {
+  amountToIndianWords,
+  computeRateModeAmount,
+  extractTrailingSerialNumber,
   formatDateDDMMYYYY,
   formatINR,
+  getFyShortCode,
+  isLumpSumRateMode,
   makeSafeDocId,
   normalizeFyLabel,
   todayISO,
 } from '../lib/formatters';
 import { logBranchActivity, upsertDocument } from '../lib/firestoreStore';
 import {
+  addDropdownItem,
   ALL_INDIA_BRANCH_OPTIONS,
   ALL_INDIA_STATES_DISTRICTS,
   DEFAULT_RATE_MODES,
+  deleteDropdownItem,
   DELIVERY_MODE_CODES,
+  editDropdownItem,
   getEffectiveCreditDayPresets,
   getEffectiveDropdownList,
   GST_PAID_BY_CODES,
-  PAYMENT_MODE_OPTIONS,
   RISK_TYPE_CODES,
-  VEHICLE_BODY_TYPE_OPTIONS,
   VEHICLE_COLOR_OPTIONS,
   VEHICLE_MAKE_OPTIONS,
 } from '../lib/dropdownMasterStore';
+import {
+  DbfLatestSerialSummary,
+  extractHighestBillAndCnFromRawDbf,
+  loadRawDbfArchiveFromIdb,
+} from '../lib/foxproDbfImport';
 import {
   filterBillingCustomerParties,
   normalizePartyMatchKey,
@@ -276,25 +287,80 @@ const AllInOneEntrySheetInner: React.FC<AllInOneEntrySheetProps> = ({
   const [includeHireSection, setIncludeHireSection] = useState(true);
   const [includeStaffSection, setIncludeStaffSection] = useState(true);
 
+  const [dbfSerialStats, setDbfSerialStats] = useState<DbfLatestSerialSummary | null>(null);
+  const docNoDirtyRef = useRef(false);
+
+  useEffect(() => {
+    let cancelled = false;
+    void loadRawDbfArchiveFromIdb()
+      .then((tables) => {
+        if (!cancelled && tables && tables.length > 0) {
+          setDbfSerialStats(extractHighestBillAndCnFromRawDbf(tables));
+        }
+      })
+      .catch(() => {
+        // Ignore raw archive read errors
+      });
+    return () => {
+      cancelled = true;
+    };
+  }, []);
+
   const computedLastCnNo = useMemo(() => {
+    let bestNo = '';
+    let bestSeq = 0;
     if (isFtl) {
-      if (consignments.length === 0) return 'None';
-      const sorted = [...consignments].sort((a, b) => (b.cnDate || '').localeCompare(a.cnDate || ''));
-      return sorted[0]?.cnNo || 'None';
+      consignments.forEach((c) => {
+        const seq = extractTrailingSerialNumber(c.cnNo);
+        if (seq > bestSeq) {
+          bestSeq = seq;
+          bestNo = c.cnNo;
+        }
+      });
+      if (!bestNo && consignments.length > 0) {
+        const sorted = [...consignments].sort((a, b) => (b.cnDate || '').localeCompare(a.cnDate || ''));
+        bestNo = sorted[0]?.cnNo || '';
+        bestSeq = extractTrailingSerialNumber(bestNo);
+      }
+      if (dbfSerialStats?.maxCnNum && dbfSerialStats.maxCnNum >= bestSeq) {
+        return dbfSerialStats.maxCnNo || bestNo || 'None';
+      }
+      return bestNo || 'None';
     }
     if (logisticsDockets.length === 0) return 'None';
     const sorted = [...logisticsDockets].sort((a, b) => (b.docketDate || '').localeCompare(a.docketDate || ''));
     return sorted[0]?.docketNo || 'None';
-  }, [isFtl, consignments, logisticsDockets]);
+  }, [isFtl, consignments, logisticsDockets, dbfSerialStats]);
+
+  const nextSuggestedDocNo = useMemo(() => {
+    const prefix = isFtl
+      ? (company.serialConfig?.ftlCnPrefix || 'KOL').trim().toUpperCase()
+      : divisionMeta.docPrefix;
+    const fyShort = getFyShortCode(activeFy);
+    const baseStart = isFtl ? Number(company.serialConfig?.ftlCnStart || 150) : 150;
+    let maxSeq = 0;
+    if (isFtl) {
+      consignments.forEach((c) => {
+        const seq = extractTrailingSerialNumber(c.cnNo);
+        if (seq > maxSeq) maxSeq = seq;
+      });
+      if (dbfSerialStats?.maxCnNum && dbfSerialStats.maxCnNum > maxSeq) {
+        maxSeq = dbfSerialStats.maxCnNum;
+      }
+    } else {
+      logisticsDockets.forEach((d) => {
+        const seq = extractTrailingSerialNumber(d.docketNo);
+        if (seq > maxSeq) maxSeq = seq;
+      });
+    }
+    const nextSeq = Math.max(baseStart, maxSeq > 0 ? maxSeq + 1 : baseStart);
+    return `${prefix}-${nextSeq}/${fyShort}`;
+  }, [isFtl, company.serialConfig, divisionMeta.docPrefix, activeFy, consignments, logisticsDockets, dbfSerialStats]);
 
   // SECTION 1: CLASSIC FOXPRO BILTY RECORDS ENTRY FIELDS
   const [branchShort, setBranchShort] = useState(() => (isFtl ? 'KOL' : divisionMeta.docPrefix));
   const [refCnNo, setRefCnNo] = useState('');
-  const [docNo, setDocNo] = useState(() => {
-    const prefix = isFtl ? 'KOL' : divisionMeta.docPrefix;
-    const count = isFtl ? consignments.length : logisticsDockets.length;
-    return `${prefix}-${150 + count}/26-27`;
-  });
+  const [docNo, setDocNo] = useState(() => nextSuggestedDocNo);
   const [docDate, setDocDate] = useState(todayISO());
   const [billedAtBranch, setBilledAtBranch] = useState('Kolkata');
   const [transportMode, setTransportMode] = useState<'Road' | 'Rail' | 'Air'>('Road');
@@ -455,7 +521,7 @@ const AllInOneEntrySheetInner: React.FC<AllInOneEntrySheetProps> = ({
   const [ownerName, setOwnerName] = useState('');
   const [selectedOwnerId, setSelectedOwnerId] = useState('');
   const [hireWeightMt, setHireWeightMt] = useState('15');
-  const [hireRateMode, setHireRateMode] = useState<'Fixed' | 'Per MT'>('Fixed');
+  const [hireRateMode, setHireRateMode] = useState<string>('Fixed');
   const [hireRatePerUnit, setHireRatePerUnit] = useState('0');
   const [hireAmount, setHireAmount] = useState('0');
   const [detentionFromDate, setDetentionFromDate] = useState('');
@@ -536,7 +602,10 @@ const AllInOneEntrySheetInner: React.FC<AllInOneEntrySheetProps> = ({
       draftHydratedRef.current = true;
       if (cancelled || !draft || editingCnId || editingDocketId) return;
       if (draft.divisionMode && draft.divisionMode !== divisionMode) return;
-      if (typeof draft.docNo === 'string' && draft.docNo.trim()) setDocNo(draft.docNo);
+      if (typeof draft.docNo === 'string' && draft.docNo.trim()) {
+        setDocNo(draft.docNo);
+        docNoDirtyRef.current = true;
+      }
       if (typeof draft.docDate === 'string' && draft.docDate) setDocDate(draft.docDate);
       if (typeof draft.billedAtBranch === 'string' && draft.billedAtBranch) setBilledAtBranch(draft.billedAtBranch);
       if (draft.transportMode === 'Road' || draft.transportMode === 'Rail' || draft.transportMode === 'Air') setTransportMode(draft.transportMode);
@@ -580,6 +649,12 @@ const AllInOneEntrySheetInner: React.FC<AllInOneEntrySheetProps> = ({
       cancelled = true;
     };
   }, []);
+
+  useEffect(() => {
+    if (!editingCnId && !editingDocketId && !docNoDirtyRef.current) {
+      setDocNo(nextSuggestedDocNo);
+    }
+  }, [editingCnId, editingDocketId, nextSuggestedDocNo]);
 
   useEffect(() => {
     if (!draftHydratedRef.current || editingCnId || editingDocketId) return;
@@ -719,8 +794,22 @@ const AllInOneEntrySheetInner: React.FC<AllInOneEntrySheetProps> = ({
   const goodsOptions = useMemo(() => getEffectiveDropdownList(company, 'goodsTypes'), [company]);
   const pkgModeOptions = useMemo(() => getEffectiveDropdownList(company, 'packageModes'), [company]);
   const rateModeOptions = useMemo(
-    () => Array.from(new Set([...DEFAULT_RATE_MODES, ...(company.dropdownMaster?.rateModes || [])])),
-    [company.dropdownMaster?.rateModes]
+    () =>
+      Array.from(
+        new Set([
+          ...DEFAULT_RATE_MODES,
+          ...getEffectiveDropdownList(company, 'rateModes'),
+        ])
+      ),
+    [company]
+  );
+  const bodyTypeOptions = useMemo(
+    () => getEffectiveDropdownList(company, 'vehicleBodyTypes'),
+    [company]
+  );
+  const paymentModeOptions = useMemo(
+    () => getEffectiveDropdownList(company, 'paymentModes'),
+    [company]
   );
   const creditDayPresets = useMemo(() => getEffectiveCreditDayPresets(company), [company]);
   const allCities = useMemo(() => {
@@ -813,20 +902,23 @@ const AllInOneEntrySheetInner: React.FC<AllInOneEntrySheetProps> = ({
   };
 
   // Total Freight (Unlocked — auto calculates unless manually overridden in Total Freight input)
-  const autoComputedCnFreight = useMemo(() => {
-    const base = Number(baseFreight || 0);
+  const autoComputedCnBaseFreight = useMemo(() => {
     const rate = Number(ratePerUnit || 0);
     const wt = Number(chargedWeight || nettWeight || 0);
-    const calcBase =
-      rateMode === 'Per Ton' || rateMode === 'Per MT'
-        ? Math.round(rate * wt * 100) / 100
-        : rateMode === 'Per Package'
-        ? Math.round(rate * Number(packages || 0) * 100) / 100
-        : rateMode === 'Per Kg'
-        ? Math.round(rate * wt * 1000 * 100) / 100
-        : base;
-    return Math.round(((calcBase || base) + Number(otherCharge || 0)) * 100) / 100;
-  }, [baseFreight, ratePerUnit, rateMode, chargedWeight, nettWeight, packages, otherCharge]);
+    const pkgs = Number(packages || 0);
+    const calcBase = computeRateModeAmount({
+      rateMode,
+      ratePerUnit: rate,
+      weightMt: wt,
+      packages: pkgs,
+    });
+    if (calcBase > 0) return calcBase;
+    return Math.round(Number(baseFreight || 0) * 100) / 100;
+  }, [baseFreight, ratePerUnit, rateMode, chargedWeight, nettWeight, packages]);
+
+  const autoComputedCnFreight = useMemo(() => {
+    return Math.round((autoComputedCnBaseFreight + Number(otherCharge || 0)) * 100) / 100;
+  }, [autoComputedCnBaseFreight, otherCharge]);
 
   const computedCnFreight = useMemo(() => {
     if (manualFreightOverride !== null && manualFreightOverride !== '') {
@@ -852,11 +944,19 @@ const AllInOneEntrySheetInner: React.FC<AllInOneEntrySheetProps> = ({
   }, [detentionChargeOverride, autoDetentionCharge]);
 
   const effectiveHireGross = useMemo(() => {
-    if (hireRateMode === 'Per MT') {
-      return Math.round(Number(hireRatePerUnit || 0) * Number(hireWeightMt || 0) * 100) / 100;
+    const rate = Number(hireRatePerUnit || 0);
+    if (!isLumpSumRateMode(hireRateMode) && rate > 0) {
+      return computeRateModeAmount({
+        rateMode: hireRateMode,
+        ratePerUnit: rate,
+        weightMt: Number(hireWeightMt || 0),
+        packages: Number(packages || 0),
+      });
     }
-    return Math.round(Number(hireAmount || 0) * 100) / 100;
-  }, [hireRateMode, hireRatePerUnit, hireWeightMt, hireAmount]);
+    const amt = Number(hireAmount || 0);
+    if (amt > 0) return Math.round(amt * 100) / 100;
+    return Math.round(rate * 100) / 100;
+  }, [hireRateMode, hireRatePerUnit, hireWeightMt, hireAmount, packages]);
 
   const effectiveTdsAmt = useMemo(() => {
     if (payTdsOverride.trim() !== '') {
@@ -968,10 +1068,10 @@ const AllInOneEntrySheetInner: React.FC<AllInOneEntrySheetProps> = ({
     setEditingHireId(null);
     setEditingStaffId(null);
     const prefix = isFtl ? 'KOL' : divisionMeta.docPrefix;
-    const count = isFtl ? consignments.length : logisticsDockets.length;
+    docNoDirtyRef.current = false;
     setBranchShort(prefix);
     setRefCnNo('');
-    setDocNo(`${prefix}-${151 + count}/26-27`);
+    setDocNo(nextSuggestedDocNo);
     setDocDate(todayISO());
     setBillingPartyName('');
     setSelectedBillingPartyId('');
@@ -1068,8 +1168,11 @@ const AllInOneEntrySheetInner: React.FC<AllInOneEntrySheetProps> = ({
     setMultiAdvances([]);
     setMultiPaidReturns([]);
     setMultiBalanceDates([]);
+    setReceiptChallanNo('');
+    setReceiptChallanDate('');
+    setHireRemarks('');
     void deleteIdbObject('drc_draft_lr_allinone_v1');
-  }, [isFtl, divisionMeta.docPrefix, consignments.length, logisticsDockets.length]);
+  }, [isFtl, divisionMeta.docPrefix, nextSuggestedDocNo]);
 
   const buildCurrentCnSnapshot = useCallback((): ConsignmentNote => {
     const cnTruckValue = hasVehicleNo ? truckNo.trim() || 'UNASSIGNED' : 'UNASSIGNED';
@@ -1278,6 +1381,11 @@ const AllInOneEntrySheetInner: React.FC<AllInOneEntrySheetProps> = ({
       }
       if (!docNo.trim() || !consignorName.trim() || !fromCity.trim() || !toCity.trim()) {
         setStatusToast('Please fill C/N or Docket No, Consignor, From City, and To City.');
+        playAlertBeep();
+        return;
+      }
+      if (includeHireSection && receiptChallanNo.trim() && !receiptChallanDate.trim()) {
+        setStatusToast('Receipt Challan Date is mandatory when Receipt Challan No is entered.');
         playAlertBeep();
         return;
       }
@@ -2102,7 +2210,7 @@ const AllInOneEntrySheetInner: React.FC<AllInOneEntrySheetProps> = ({
       setBrokerName(lh.brokerName || '');
       setOwnerName(lh.ownerName || '');
       setHireWeightMt(String(lh.weightMt || 0));
-      setHireRateMode(lh.rateMode === 'Per MT' ? 'Per MT' : 'Fixed');
+      setHireRateMode(lh.rateMode || 'Fixed');
       setHireRatePerUnit(String(lh.ratePerUnit || 0));
       setHireAmount(String(lh.hireAmount || 0));
       setDetentionFromDate(lh.detentionFromDate || '');
@@ -2353,7 +2461,10 @@ const AllInOneEntrySheetInner: React.FC<AllInOneEntrySheetProps> = ({
               <input
                 type="text"
                 value={docNo}
-                onChange={(e) => setDocNo(e.target.value.toUpperCase())}
+                onChange={(e) => {
+                  docNoDirtyRef.current = true;
+                  setDocNo(e.target.value.toUpperCase());
+                }}
                 className="w-full px-2.5 py-1.5 rounded border border-slate-400 bg-amber-50/40 font-mono-num font-extrabold text-slate-950"
               />
             </div>
@@ -2700,6 +2811,9 @@ const AllInOneEntrySheetInner: React.FC<AllInOneEntrySheetProps> = ({
                   value={packageMode}
                   onChange={setPackageMode}
                   options={pkgModeOptions}
+                  onAddOption={(val) => addDropdownItem(ownerUid, company, 'packageModes', val)}
+                  onEditOption={(oldV, newV) => editDropdownItem(ownerUid, company, 'packageModes', oldV, newV)}
+                  onDeleteOption={(val) => deleteDropdownItem(ownerUid, company, 'packageModes', val)}
                   className="flex-1 min-w-0"
                 />
               </div>
@@ -2711,6 +2825,9 @@ const AllInOneEntrySheetInner: React.FC<AllInOneEntrySheetProps> = ({
                 value={particulars}
                 onChange={setParticulars}
                 options={goodsOptions}
+                onAddOption={(val) => addDropdownItem(ownerUid, company, 'goodsTypes', val)}
+                onEditOption={(oldV, newV) => editDropdownItem(ownerUid, company, 'goodsTypes', oldV, newV)}
+                onDeleteOption={(val) => deleteDropdownItem(ownerUid, company, 'goodsTypes', val)}
               />
             </div>
           </div>
@@ -2898,7 +3015,10 @@ const AllInOneEntrySheetInner: React.FC<AllInOneEntrySheetProps> = ({
                     ariaLabel="Body Type"
                     value={bodyType}
                     onChange={setBodyType}
-                    options={VEHICLE_BODY_TYPE_OPTIONS}
+                    options={bodyTypeOptions}
+                    onAddOption={(val) => addDropdownItem(ownerUid, company, 'vehicleBodyTypes', val)}
+                    onEditOption={(oldV, newV) => editDropdownItem(ownerUid, company, 'vehicleBodyTypes', oldV, newV)}
+                    onDeleteOption={(val) => deleteDropdownItem(ownerUid, company, 'vehicleBodyTypes', val)}
                     placeholder="Open Body, 32ft Container..."
                   />
                 </div>
@@ -3310,8 +3430,14 @@ const AllInOneEntrySheetInner: React.FC<AllInOneEntrySheetProps> = ({
                 <EditableSearchSelect
                   ariaLabel="Rate Mode"
                   value={rateMode}
-                  onChange={setRateMode}
+                  onChange={(val) => {
+                    setRateMode(val);
+                    setManualFreightOverride(null);
+                  }}
                   options={rateModeOptions}
+                  onAddOption={(val) => addDropdownItem(ownerUid, company, 'rateModes', val)}
+                  onEditOption={(oldV, newV) => editDropdownItem(ownerUid, company, 'rateModes', oldV, newV)}
+                  onDeleteOption={(val) => deleteDropdownItem(ownerUid, company, 'rateModes', val)}
                 />
               </div>
               <div>
@@ -3332,7 +3458,7 @@ const AllInOneEntrySheetInner: React.FC<AllInOneEntrySheetProps> = ({
                 <input
                   type="number"
                   step="0.01"
-                  value={baseFreight}
+                  value={!isLumpSumRateMode(rateMode) && Number(ratePerUnit || 0) > 0 ? autoComputedCnBaseFreight : baseFreight}
                   onChange={(e) => {
                     setBaseFreight(e.target.value);
                     setManualFreightOverride(null);
@@ -3365,6 +3491,17 @@ const AllInOneEntrySheetInner: React.FC<AllInOneEntrySheetProps> = ({
                   className="w-full px-2 py-1.5 rounded border-2 border-blue-400 bg-blue-50 font-mono-num font-extrabold text-[#0D47A1]"
                 />
               </div>
+            </div>
+            <div className="px-2.5 py-1.5 rounded bg-blue-50/70 border border-blue-200 flex flex-wrap items-center justify-between gap-2 text-[11px]">
+              <span className="font-bold text-[#0D47A1]">
+                Freight in Words:{' '}
+                <span className="font-extrabold text-slate-900">
+                  {amountToIndianWords(computedCnFreight)}
+                </span>
+              </span>
+              <span className="font-mono-num font-bold text-slate-700">
+                Base: ₹ {formatINR(autoComputedCnBaseFreight)} + Others: ₹ {formatINR(Number(otherCharge || 0))} = Total: ₹ {formatINR(computedCnFreight)}
+              </span>
             </div>
 
             {hasMultiWeight && (
@@ -3627,9 +3764,36 @@ const AllInOneEntrySheetInner: React.FC<AllInOneEntrySheetProps> = ({
             )}
           </div>
 
-          {/* Inline LR Quick Action Bar (Preview, Print, Low-MB PDF, Scan LR/POD, WhatsApp, Email) */}
+          {/* Inline LR Quick Action Bar (Save Y/N, Preview, Print, Low-MB PDF, Scan LR/POD, WhatsApp, Email) */}
           <div className="flex flex-wrap items-center justify-between gap-2 pt-2 border-t border-slate-200">
             <div className="flex flex-wrap items-center gap-1.5">
+              <div className="inline-flex items-center rounded-lg border border-emerald-300 bg-emerald-50/70 p-0.5 gap-0.5">
+                {(['Y', 'N'] as const).map((yn) => (
+                  <button
+                    key={yn}
+                    type="button"
+                    onClick={() => setSaveConfirmYN(yn)}
+                    className={`px-2 py-1 rounded text-[10px] font-extrabold cursor-pointer ${
+                      saveConfirmYN === yn
+                        ? yn === 'Y'
+                          ? 'bg-emerald-600 text-white'
+                          : 'bg-red-600 text-white'
+                        : 'text-slate-700 hover:bg-white'
+                    }`}
+                  >
+                    {yn === 'Y' ? 'Y (Ready)' : 'N (Hold)'}
+                  </button>
+                ))}
+              </div>
+              <button
+                type="button"
+                disabled={saving || readOnly}
+                onClick={() => void handleSaveCompleteSheet('stay')}
+                className="inline-flex items-center gap-1 px-3 py-1.5 rounded-lg bg-emerald-700 hover:bg-emerald-800 text-white text-[11px] font-extrabold shadow-sm cursor-pointer disabled:opacity-50"
+              >
+                <Save className="w-3.5 h-3.5" />
+                {saving ? 'Saving...' : '💾 Save LR/CN'}
+              </button>
               <button
                 type="button"
                 onClick={() => void handleInlineLrPdf('preview')}
@@ -3786,18 +3950,21 @@ const AllInOneEntrySheetInner: React.FC<AllInOneEntrySheetProps> = ({
               </div>
               <div>
                 <label className="block font-bold text-slate-700 mb-1">Hire Mode</label>
-                <SearchableSelect
+                <EditableSearchSelect
                   ariaLabel="Hire Rate Mode"
                   value={hireRateMode}
-                  onChange={(val) => setHireRateMode(val as 'Fixed' | 'Per MT')}
-                  sortAlphabetically={false}
-                  options={['Fixed', 'Per MT']}
-                  buttonClassName="!py-1.5 !font-semibold"
+                  onChange={setHireRateMode}
+                  options={rateModeOptions}
+                  onAddOption={(val) => addDropdownItem(ownerUid, company, 'rateModes', val)}
+                  onEditOption={(oldV, newV) => editDropdownItem(ownerUid, company, 'rateModes', oldV, newV)}
+                  onDeleteOption={(val) => deleteDropdownItem(ownerUid, company, 'rateModes', val)}
                 />
               </div>
-              {hireRateMode === 'Per MT' ? (
+              {!isLumpSumRateMode(hireRateMode) ? (
                 <div>
-                  <label className="block font-bold text-slate-700 mb-1">Hire Rate / MT</label>
+                  <label className="block font-bold text-slate-700 mb-1">
+                    Hire Rate ({hireRateMode}) · Gross ₹{formatINR(effectiveHireGross)}
+                  </label>
                   <input
                     type="number"
                     step="0.01"
@@ -3925,6 +4092,22 @@ const AllInOneEntrySheetInner: React.FC<AllInOneEntrySheetProps> = ({
               <div>
                 <label className="block font-semibold text-slate-600 mb-0.5">Recpt Challan No</label>
                 <input type="text" value={receiptChallanNo} onChange={(e) => setReceiptChallanNo(e.target.value)} className="w-full px-2 py-1 rounded border border-slate-300 font-mono-num" />
+              </div>
+              <div>
+                <label className="block font-semibold text-slate-600 mb-0.5">
+                  Recpt Challan Date {receiptChallanNo.trim() ? <span className="text-red-600">*</span> : ''}
+                </label>
+                <input
+                  type="date"
+                  required={Boolean(receiptChallanNo.trim())}
+                  value={receiptChallanDate}
+                  onChange={(e) => setReceiptChallanDate(e.target.value)}
+                  className={`w-full px-2 py-1 rounded border font-mono-num ${
+                    receiptChallanNo.trim() && !receiptChallanDate.trim()
+                      ? 'border-red-400 bg-red-50'
+                      : 'border-slate-300'
+                  }`}
+                />
               </div>
             </div>
 
@@ -4059,8 +4242,8 @@ const AllInOneEntrySheetInner: React.FC<AllInOneEntrySheetProps> = ({
                                 className="px-1 py-1 rounded border border-slate-300 font-mono-num"
                               />
                             </td>
-                            <td className="p-1 min-w-[110px]">
-                              <SearchableSelect
+                            <td className="p-1 min-w-[130px]">
+                              <EditableSearchSelect
                                 ariaLabel={`Advance ${idx + 1} Payment Mode`}
                                 value={adv.mode}
                                 onChange={(val) =>
@@ -4068,9 +4251,10 @@ const AllInOneEntrySheetInner: React.FC<AllInOneEntrySheetProps> = ({
                                     prev.map((r, i) => (i === idx ? { ...r, mode: val } : r))
                                   )
                                 }
-                                sortAlphabetically={false}
-                                options={PAYMENT_MODE_OPTIONS}
-                                buttonClassName="!py-1 !text-[11px]"
+                                options={paymentModeOptions}
+                                onAddOption={(val) => addDropdownItem(ownerUid, company, 'paymentModes', val)}
+                                onEditOption={(oldV, newV) => editDropdownItem(ownerUid, company, 'paymentModes', oldV, newV)}
+                                onDeleteOption={(val) => deleteDropdownItem(ownerUid, company, 'paymentModes', val)}
                               />
                             </td>
                             <td className="p-1">
@@ -4108,6 +4292,29 @@ const AllInOneEntrySheetInner: React.FC<AllInOneEntrySheetProps> = ({
                     })()}
                   </tbody>
                 </table>
+              </div>
+              <div className="rounded bg-white border border-amber-200 px-2.5 py-2 space-y-1 text-[11px]">
+                <div className="flex flex-wrap items-center justify-between gap-2 font-mono-num">
+                  <span>
+                    Gross Hire (+Detn): <strong>₹ {formatINR(hireNetSummary.grossWithDetention)}</strong>
+                  </span>
+                  <span>
+                    Advances + Extra: <strong>₹ {formatINR(totalMultiAdvancePaid + Number(extraAdvanceAmt || 0))}</strong>
+                  </span>
+                  <span>
+                    Deductions + TDS: <strong>₹ {formatINR(hireNetSummary.totalDeductions)}</strong>
+                  </span>
+                  <span className="text-emerald-800 font-extrabold">
+                    Net Balance Payable: ₹ {formatINR(hireNetSummary.balancePayable)}
+                  </span>
+                </div>
+                <div className="text-slate-700">
+                  <span className="font-bold text-amber-900">Advance in Words:</span>{' '}
+                  {amountToIndianWords(totalMultiAdvancePaid)}
+                  {' · '}
+                  <span className="font-bold text-emerald-900">Balance in Words:</span>{' '}
+                  {amountToIndianWords(hireNetSummary.balancePayable)}
+                </div>
               </div>
             </div>
 
