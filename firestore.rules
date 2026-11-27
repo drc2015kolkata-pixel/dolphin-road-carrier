@@ -93,14 +93,26 @@ service cloud.firestore {
     function isValidParty(data) {
       return data.keys().hasAll(['name', 'partyType', 'openingBalance', 'currentBalance', 'balanceType', 'ownerUid', 'createdAt', 'updatedAt']) &&
         data.keys().hasOnly([
-          'id', 'name', 'partyType', 'address', 'gstin', 'pan', 'aadhaarNo', 'tradeLicenseNo',
+          'id', 'name', 'partyCode', 'partyType', 'address', 'city', 'pinCode', 'country',
+          'stateCode', 'stateName', 'gstStateCode', 'gstStateName', 'contactPerson',
+          'gstin', 'pan', 'aadhaarNo', 'tradeLicenseNo',
           'bankName', 'bankAccountNo', 'bankIfsc', 'phone', 'email', 'preferredChannel',
+          'firstOwnerName', 'secondOwnerName', 'deedNo', 'deedDate',
           'openingBalance', 'currentBalance', 'balanceType', 'ownerUid', 'createdAt', 'updatedAt'
         ]) &&
         isValidOptStr(data, 'id', 128) &&
         data.name is string && data.name.size() >= 1 && data.name.size() <= 180 &&
+        isValidOptStr(data, 'partyCode', 40) &&
         data.partyType in ['Customer', 'Consignor', 'Consignee', 'TruckOwner', 'Broker', 'Vendor'] &&
         isValidOptStr(data, 'address', 400) &&
+        isValidOptStr(data, 'city', 100) &&
+        isValidOptStr(data, 'pinCode', 20) &&
+        isValidOptStr(data, 'country', 40) &&
+        isValidOptStr(data, 'stateCode', 10) &&
+        isValidOptStr(data, 'stateName', 80) &&
+        isValidOptStr(data, 'gstStateCode', 10) &&
+        isValidOptStr(data, 'gstStateName', 80) &&
+        isValidOptStr(data, 'contactPerson', 120) &&
         isValidOptStr(data, 'gstin', 20) &&
         isValidOptStr(data, 'pan', 15) &&
         isValidOptStr(data, 'aadhaarNo', 24) &&
@@ -111,6 +123,10 @@ service cloud.firestore {
         isValidOptStr(data, 'phone', 30) &&
         isValidOptStr(data, 'email', 160) &&
         isValidOptStr(data, 'preferredChannel', 40) &&
+        isValidOptStr(data, 'firstOwnerName', 180) &&
+        isValidOptStr(data, 'secondOwnerName', 180) &&
+        isValidOptStr(data, 'deedNo', 60) &&
+        isValidOptStr(data, 'deedDate', 20) &&
         (data.openingBalance is int || data.openingBalance is float) &&
         (data.currentBalance is int || data.currentBalance is float) &&
         data.balanceType in ['Dr', 'Cr'] &&
@@ -1038,8 +1054,11 @@ service cloud.firestore {
         incoming().updatedAt == request.time && (
           isAdmin() ||
           incoming().diff(existing()).affectedKeys().hasOnly([
-            'name', 'partyType', 'address', 'gstin', 'pan', 'aadhaarNo', 'tradeLicenseNo',
+            'name', 'partyCode', 'partyType', 'address', 'city', 'pinCode', 'country',
+            'stateCode', 'stateName', 'gstStateCode', 'gstStateName', 'contactPerson',
+            'gstin', 'pan', 'aadhaarNo', 'tradeLicenseNo',
             'bankName', 'bankAccountNo', 'bankIfsc', 'phone', 'email', 'preferredChannel',
+            'firstOwnerName', 'secondOwnerName', 'deedNo', 'deedDate',
             'openingBalance', 'currentBalance', 'balanceType', 'updatedAt'
           ])
         );

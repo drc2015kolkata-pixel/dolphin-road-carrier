@@ -19,6 +19,7 @@ interface PaginatedDataTableProps<T> {
   emptyMessage?: string;
   selectedRowId?: string | null;
   onRowClick?: (row: T) => void;
+  onRowDoubleClick?: (row: T) => void;
   maxHeightClass?: string;
   stickyHeader?: boolean;
 }
@@ -31,6 +32,7 @@ function PaginatedDataTableInner<T>({
   emptyMessage = 'No records found.',
   selectedRowId = null,
   onRowClick,
+  onRowDoubleClick,
   maxHeightClass = '',
   stickyHeader = false,
 }: PaginatedDataTableProps<T>) {
@@ -96,7 +98,8 @@ function PaginatedDataTableInner<T>({
                   <tr
                     key={rowId}
                     onClick={onRowClick ? () => onRowClick(row) : undefined}
-                    className={`${onRowClick ? 'cursor-pointer' : ''} transition-colors ${
+                    onDoubleClick={onRowDoubleClick ? () => onRowDoubleClick(row) : undefined}
+                    className={`${onRowClick || onRowDoubleClick ? 'cursor-pointer' : ''} transition-colors ${
                       isSelected
                         ? 'bg-[#1976D2] text-white'
                         : 'hover:bg-blue-50/70 text-slate-800'

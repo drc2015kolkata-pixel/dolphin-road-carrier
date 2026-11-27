@@ -103,6 +103,10 @@ export interface Party {
   phone?: string;
   email?: string;
   preferredChannel?: 'WhatsApp Only' | 'Email Only' | 'Both' | string;
+  firstOwnerName?: string;
+  secondOwnerName?: string;
+  deedNo?: string;
+  deedDate?: string;
   openingBalance: number;
   currentBalance: number;
   balanceType: 'Dr' | 'Cr';

@@ -120,6 +120,7 @@ export function buildAutomaticNarration(params: {
   txType: 'Income' | 'Expense' | 'Bill' | 'LorryHire';
   partyName: string;
   amount: number;
+  txDate?: string;
   ledgerAccount?: string;
   paymentMode?: string;
   upiRefId?: string;
@@ -134,6 +135,12 @@ export function buildAutomaticNarration(params: {
   const party = (params.partyName || 'Account Party').trim();
   const amtText = `Rs.${formatINR(Number(params.amount || 0))}`;
   const mode = (params.paymentMode || 'Bank Transfer').trim();
+  const datePart = (() => {
+    const raw = String(params.txDate || '').trim();
+    if (!raw) return '';
+    const m = raw.match(/^(\d{4})-(\d{2})-(\d{2})$/);
+    return m ? ` Dated ${m[3]}-${m[2]}-${m[1]}` : ` Dated ${raw}`;
+  })();
   const refChain = formatReferenceChain({
     upiRefId: params.upiRefId,
     utrNo: params.utrNo,
@@ -150,21 +157,21 @@ export function buildAutomaticNarration(params: {
       : '';
 
   if (params.txType === 'Bill') {
-    return `Being freight bill ${params.linkedInvoiceNo || ''} raised to ${party} for ${amtText}${cnPart}.`.replace(/\s+/g, ' ').trim();
+    return `Being freight bill ${params.linkedInvoiceNo || ''} raised to ${party} for ${amtText}${cnPart}${datePart}.`.replace(/\s+/g, ' ').trim();
   }
 
   if (params.txType === 'LorryHire') {
-    return `Being lorry hire paid to ${party} via ${mode}${refPart} for ${amtText}${cnPart}.`.replace(/\s+/g, ' ').trim();
+    return `Being lorry hire paid to ${party} via ${mode}${refPart} for ${amtText}${cnPart}${datePart}.`.replace(/\s+/g, ' ').trim();
   }
 
   if (params.txType === 'Income') {
-    return `Being amount ${amtText} received from ${party} via ${mode}${refPart}${invPart}${cnPart}${tdsPart}${bankPart}.`
+    return `Being amount ${amtText} received from ${party} via ${mode}${refPart}${invPart}${cnPart}${tdsPart}${bankPart}${datePart}.`
       .replace(/\s+/g, ' ')
       .trim();
   }
 
   const acct = params.ledgerAccount ? ` (${params.ledgerAccount})` : '';
-  return `Being payment of ${amtText} made to ${party}${acct} via ${mode}${refPart}${invPart}${cnPart}${bankPart}.`
+  return `Being payment of ${amtText} made to ${party}${acct} via ${mode}${refPart}${invPart}${cnPart}${bankPart}${datePart}.`
     .replace(/\s+/g, ' ')
     .trim();
 }

@@ -15,6 +15,7 @@ import {
   Plus,
   Printer,
   QrCode,
+  RotateCcw,
   Save,
   ScanLine,
   Search,
@@ -97,6 +98,7 @@ import { SearchableSelect } from './SearchableSelect';
 import { downloadNicPartBJson, getEwayBillExpiryState, ParsedQrPayload } from '../lib/ewayBillUtils';
 import { filterBillingCustomerParties } from '../lib/partySeparation';
 import { CameraPodQrScannerModal } from './CameraPodQrScannerModal';
+import { dataUrlToFile, openCameraStreamWithFallback, stopMediaStream } from '../lib/cameraHelper';
 import { playAlertBeep, playVerifiedBeep } from '../lib/audioFeedback';
 import { sharePdfDirect } from '../lib/shareUtils';
 import { SupportedCountry } from '../lib/postalPinLookup';
@@ -189,6 +191,8 @@ const ConsignmentModuleInner: React.FC<ConsignmentModuleProps> = ({
   });
   const [dbfSerialStats, setDbfSerialStats] = useState<DbfLatestSerialSummary | null>(null);
   const cnNoDirtyRef = useRef(false);
+  const savedRegisterRef = useRef<HTMLDivElement | null>(null);
+  const [directCnSearch, setDirectCnSearch] = useState('');
 
   useEffect(() => {
     let cancelled = false;
@@ -745,19 +749,15 @@ const ConsignmentModuleInner: React.FC<ConsignmentModuleProps> = ({
   }, [handleOCRFile, readOnly]);
 
   const stopLiveCamera = useCallback(() => {
-    if (liveStreamRef.current) {
-      liveStreamRef.current.getTracks().forEach((t) => t.stop());
-      liveStreamRef.current = null;
-    }
+    stopMediaStream(liveStreamRef.current);
+    liveStreamRef.current = null;
     setLiveCameraOpen(false);
   }, []);
 
   useEffect(() => {
     return () => {
-      if (liveStreamRef.current) {
-        liveStreamRef.current.getTracks().forEach((t) => t.stop());
-        liveStreamRef.current = null;
-      }
+      stopMediaStream(liveStreamRef.current);
+      liveStreamRef.current = null;
     };
   }, []);
 
@@ -765,7 +765,6 @@ const ConsignmentModuleInner: React.FC<ConsignmentModuleProps> = ({
     setOcrError(null);
     setUsbStatus(null);
     if (typeof navigator === 'undefined' || !navigator.mediaDevices?.getUserMedia) {
-      // Fall back to mobile rear camera input if getUserMedia unsupported
       if (cameraInputRef.current) {
         cameraInputRef.current.click();
       } else {
@@ -774,10 +773,7 @@ const ConsignmentModuleInner: React.FC<ConsignmentModuleProps> = ({
       return;
     }
     try {
-      const stream = await navigator.mediaDevices.getUserMedia({
-        video: { facingMode: { ideal: 'environment' }, width: { ideal: 1920 }, height: { ideal: 1080 } },
-        audio: false,
-      });
+      const stream = await openCameraStreamWithFallback();
       liveStreamRef.current = stream;
       setLiveCameraOpen(true);
       setTimeout(() => {
@@ -790,7 +786,7 @@ const ConsignmentModuleInner: React.FC<ConsignmentModuleProps> = ({
       if (cameraInputRef.current) {
         cameraInputRef.current.click();
       } else {
-        setOcrError('Camera permission denied. Allow camera access or use Upload / Ctrl+V.');
+        setOcrError('Camera permission denied or device busy. Use Upload / Ctrl+V.');
       }
     }
   };
@@ -2035,6 +2031,82 @@ const ConsignmentModuleInner: React.FC<ConsignmentModuleProps> = ({
             >
               <Printer className="w-3.5 h-3.5" />
               Preview 4-Copy LR
+            </button>
+          </div>
+        </div>
+
+        {/* Direct CN No Auto-Load & Clear / Skip Bar */}
+        <div className="px-4 py-2 bg-slate-100 border-b border-slate-200 flex flex-wrap items-center justify-between gap-2 text-xs">
+          <div className="flex flex-wrap items-center gap-2">
+            <span className="font-bold text-[#0D47A1]">Find / Auto-Load C/N No:</span>
+            <input
+              type="text"
+              value={directCnSearch}
+              onChange={(e) => setDirectCnSearch(e.target.value.toUpperCase())}
+              onKeyDown={(e) => {
+                if (e.key === 'Enter') {
+                  e.preventDefault();
+                  const q = directCnSearch.trim().toLowerCase();
+                  const match = consignments.find(
+                    (c) =>
+                      (c.cnNo || '').toLowerCase() === q ||
+                      (c.cnNo || '').toLowerCase().includes(q)
+                  );
+                  if (match) {
+                    handleLoadForEdit(match);
+                    setValidationError(null);
+                  } else if (q) {
+                    setValidationError(`No saved Consignment Note matching "${directCnSearch}".`);
+                  }
+                }
+              }}
+              placeholder="Enter C/N No (e.g. KOL-147/26-27)"
+              className="px-2.5 py-1 rounded border border-slate-300 bg-white font-mono-num text-xs w-52"
+            />
+            <button
+              type="button"
+              onClick={() => {
+                const q = directCnSearch.trim().toLowerCase();
+                if (!q) return;
+                const match = consignments.find(
+                  (c) =>
+                    (c.cnNo || '').toLowerCase() === q ||
+                    (c.cnNo || '').toLowerCase().includes(q)
+                );
+                if (match) {
+                  handleLoadForEdit(match);
+                  setValidationError(null);
+                } else {
+                  setValidationError(`No saved Consignment Note matching "${directCnSearch}".`);
+                }
+              }}
+              className="inline-flex items-center gap-1 px-2.5 py-1 rounded bg-[#0D47A1] hover:bg-blue-900 text-white font-bold cursor-pointer"
+            >
+              <Search className="w-3 h-3" />
+              Load CN
+            </button>
+          </div>
+          <div className="flex flex-wrap items-center gap-2">
+            <button
+              type="button"
+              onClick={() =>
+                savedRegisterRef.current?.scrollIntoView({ behavior: 'smooth', block: 'start' })
+              }
+              className="inline-flex items-center gap-1 px-2.5 py-1 rounded border border-slate-300 bg-white hover:bg-slate-50 text-slate-800 font-bold cursor-pointer"
+            >
+              <Edit3 className="w-3 h-3 text-amber-700" />
+              Saved List / Rectify ({filteredCNs.length})
+            </button>
+            <button
+              type="button"
+              onClick={() => {
+                setDirectCnSearch('');
+                resetForm();
+              }}
+              className="inline-flex items-center gap-1 px-2.5 py-1 rounded border border-slate-300 bg-white hover:bg-red-50 text-slate-700 hover:text-red-700 font-bold cursor-pointer"
+            >
+              <RotateCcw className="w-3 h-3" />
+              Clear / Skip
             </button>
           </div>
         </div>
@@ -3679,13 +3751,36 @@ const ConsignmentModuleInner: React.FC<ConsignmentModuleProps> = ({
             )}
             <button
               type="button"
+              onClick={() => {
+                setDirectCnSearch('');
+                resetForm();
+              }}
+              className="inline-flex items-center gap-1 px-2.5 py-1.5 rounded-md border border-slate-300 bg-white hover:bg-red-50 text-slate-700 hover:text-red-700 text-xs font-bold cursor-pointer"
+              title="Clear form / skip to fresh CN entry"
+            >
+              <RotateCcw className="w-3.5 h-3.5" />
+              <span>Clear / Skip</span>
+            </button>
+            <button
+              type="button"
+              onClick={() =>
+                savedRegisterRef.current?.scrollIntoView({ behavior: 'smooth', block: 'start' })
+              }
+              className="inline-flex items-center gap-1 px-2.5 py-1.5 rounded-md border border-amber-300 bg-amber-50 hover:bg-amber-100 text-amber-900 text-xs font-bold cursor-pointer"
+              title="Jump to Saved Consignment Notes list to Rectify"
+            >
+              <Edit3 className="w-3.5 h-3.5" />
+              <span>Saved List / Rectify</span>
+            </button>
+            <button
+              type="button"
               disabled={readOnly}
-              onClick={handleOneTapScanClick}
+              onClick={() => setEwbQrModalOpen(true)}
               className="inline-flex items-center gap-1 px-2.5 py-1.5 rounded-md border border-emerald-300 bg-emerald-50 hover:bg-emerald-100 text-emerald-900 text-xs font-bold cursor-pointer disabled:opacity-50"
-              title="Scan Physical LR / Document"
+              title="Open Interactive Camera & QR Scan Studio"
             >
               <ScanLine className="w-3.5 h-3.5" />
-              <span>Scan</span>
+              <span>Interactive Scan Studio</span>
             </button>
             <button
               type="button"
@@ -3708,10 +3803,10 @@ const ConsignmentModuleInner: React.FC<ConsignmentModuleProps> = ({
                 downloadPdfDirect(pdf);
               }}
               className="inline-flex items-center gap-1 px-2.5 py-1.5 rounded-md border border-blue-300 bg-blue-50 hover:bg-blue-100 text-blue-900 text-xs font-bold cursor-pointer"
-              title="Download Low-KB 1-Page LR PDF (<= 350 KB)"
+              title="Download Low-KB 1-Page LR PDF (100-350 KB)"
             >
               <Download className="w-3.5 h-3.5" />
-              <span>Low-KB PDF</span>
+              <span>Low-KB PDF (100-350 KB)</span>
             </button>
             <button
               type="button"
@@ -3778,7 +3873,7 @@ const ConsignmentModuleInner: React.FC<ConsignmentModuleProps> = ({
       </form>
 
       {/* Saved Consignments Table (Paginated 50 rows/page) */}
-      <div className="bg-white rounded-xl border border-slate-200 shadow-sm overflow-hidden">
+      <div ref={savedRegisterRef} className="bg-white rounded-xl border border-slate-200 shadow-sm overflow-hidden">
         <div className="bg-gradient-to-r from-[#0D47A1] to-[#1976D2] text-white px-4 py-2 flex flex-wrap items-center justify-between gap-2">
           <span className="text-sm font-bold">
             Saved Consignment Notes ({filteredCNs.length} · {activeFy})
@@ -3858,9 +3953,14 @@ const ConsignmentModuleInner: React.FC<ConsignmentModuleProps> = ({
       )}
       <CameraPodQrScannerModal
         open={ewbQrModalOpen}
-        mode="qr"
-        title="NIC E-Way Bill & DRC Verification QR Scanner"
+        mode="both"
+        title="Interactive Scan Studio — LR OCR, E-Way Bill QR & Camera Capture"
         onClose={() => setEwbQrModalOpen(false)}
+        onCapturePodImage={(dataUrl, fileName) => {
+          setScannedLrDataUrl(dataUrl);
+          const file = dataUrlToFile(dataUrl, fileName || `lr-scan-${Date.now()}.jpg`);
+          if (file) void handleOCRFile(file);
+        }}
         onQrDecoded={(parsed: ParsedQrPayload) => {
           if (parsed.ewbNo) setEwayBillNo(parsed.ewbNo);
           if (parsed.ewbDate) setEwayBillDate(parsed.ewbDate);

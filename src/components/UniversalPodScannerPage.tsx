@@ -7,17 +7,26 @@ import {
   Edit3,
   Eye,
   FolderOpen,
+  Mail,
+  MessageSquare,
   Printer,
   RefreshCw,
+  RotateCcw,
   RotateCw,
   Save,
   ScanLine,
-  Share2,
+  Search,
   Sparkles,
   Upload,
 } from 'lucide-react';
-import { BusinessMode, CompanySettings, ConsignmentNote, LorryHire } from '../types/erp';
-import { formatDateDDMMYYYY, todayISO } from '../lib/formatters';
+import {
+  BusinessMode,
+  CompanySettings,
+  ConsignmentNote,
+  Invoice,
+  LorryHire,
+} from '../types/erp';
+import { formatDateDDMMYYYY, makeSafeDocId, normalizeFyLabel, todayISO } from '../lib/formatters';
 import { validateSafeUploadFile } from '../lib/gstinValidator';
 import { autoRotateAndCompressImage, rotateDataUrlDegrees } from '../lib/ocrEngine';
 import {
@@ -29,8 +38,10 @@ import {
 import { sharePdfDirect } from '../lib/shareUtils';
 import { uploadRoleOrganizedPdfToDrive } from '../lib/driveBackup';
 import { upsertDocument } from '../lib/firestoreStore';
-import { playAlertBeep } from '../lib/audioFeedback';
+import { playAlertBeep, playVerifiedBeep } from '../lib/audioFeedback';
+import { openCameraStreamWithFallback, stopMediaStream } from '../lib/cameraHelper';
 import { RichEntityPicker } from './RichEntityPicker';
+import { CameraPodQrScannerModal } from './CameraPodQrScannerModal';
 
 interface UniversalPodScannerPageProps {
   ownerUid: string;
@@ -39,6 +50,7 @@ interface UniversalPodScannerPageProps {
   company: CompanySettings;
   lorryHires: LorryHire[];
   consignments: ConsignmentNote[];
+  invoices?: Invoice[];
   hasDriveToken: boolean;
   driveAccessToken: string | null;
   connectedDriveEmail?: string | null;
@@ -75,6 +87,7 @@ export const UniversalPodScannerPage: React.FC<UniversalPodScannerPageProps> = (
   company,
   lorryHires,
   consignments,
+  invoices = [],
   hasDriveToken,
   driveAccessToken,
   connectedDriveEmail,
@@ -87,6 +100,14 @@ export const UniversalPodScannerPage: React.FC<UniversalPodScannerPageProps> = (
 
   const [selectedHireId, setSelectedHireId] = useState('');
   const [hireSearchText, setHireSearchText] = useState('');
+  const [lookupMode, setLookupMode] = useState<'cn' | 'truckDate' | 'invEwb'>('cn');
+  const [lookupCnInput, setLookupCnInput] = useState('');
+  const [lookupTruckInput, setLookupTruckInput] = useState('');
+  const [lookupDateInput, setLookupDateInput] = useState('');
+  const [lookupInvEwbInput, setLookupInvEwbInput] = useState('');
+  const [showSavedList, setShowSavedList] = useState(false);
+  const [camStudioOpen, setCamStudioOpen] = useState(false);
+
   const [cnNo, setCnNo] = useState('');
   const [truckNo, setTruckNo] = useState('');
   const [partyName, setPartyName] = useState('');
@@ -116,15 +137,17 @@ export const UniversalPodScannerPage: React.FC<UniversalPodScannerPageProps> = (
     [sortedHires, selectedHireId]
   );
 
+  const savedPodHires = useMemo(
+    () =>
+      lorryHires
+        .filter((lh) => Boolean(lh.podReceived))
+        .sort((a, b) => (b.podReceiveDate || b.cnDate || '').localeCompare(a.podReceiveDate || a.cnDate || '')),
+    [lorryHires]
+  );
+
   const stopCamera = () => {
     if (streamRef.current) {
-      streamRef.current.getTracks().forEach((t) => {
-        try {
-          t.stop();
-        } catch {
-          // ignore
-        }
-      });
+      stopMediaStream(streamRef.current);
       streamRef.current = null;
     }
     if (videoRef.current) {
@@ -161,13 +184,32 @@ export const UniversalPodScannerPage: React.FC<UniversalPodScannerPageProps> = (
     return () => window.removeEventListener('paste', handlePaste);
   }, []);
 
+  const handleClearPodForm = () => {
+    stopCamera();
+    setSelectedHireId('');
+    setHireSearchText('');
+    setLookupCnInput('');
+    setLookupTruckInput('');
+    setLookupDateInput('');
+    setLookupInvEwbInput('');
+    setCnNo('');
+    setTruckNo('');
+    setPartyName('');
+    setPodDate(todayISO());
+    setRemarks('POD Received & Verified (Signed Copy)');
+    setPodImageUrl('');
+    setOriginalImageUrl('');
+    setGeneratedPdf(null);
+    setStatusMsg('');
+  };
+
   const handleSelectHire = (lh: LorryHire) => {
     setSelectedHireId(lh.id);
     setHireSearchText(`${lh.cnNo} · ${lh.truckNo}`);
     setCnNo(lh.cnNo || '');
     setTruckNo(lh.truckNo || '');
     const matchingCn = consignments.find(
-      (c) => c.cnNo.trim().toUpperCase() === (lh.cnNo || '').trim().toUpperCase()
+      (c) => (c.cnNo || '').trim().toUpperCase() === (lh.cnNo || '').trim().toUpperCase()
     );
     setPartyName(matchingCn?.billingPartyName || matchingCn?.consignorName || lh.ownerName || '');
     setPodDate(lh.podReceiveDate || todayISO());
@@ -175,8 +217,128 @@ export const UniversalPodScannerPage: React.FC<UniversalPodScannerPageProps> = (
       const existingImg = lh.podScanDataUrl || lh.podImageDataUrl || '';
       setOriginalImageUrl(existingImg);
       setPodImageUrl(existingImg);
+    } else {
+      setOriginalImageUrl('');
+      setPodImageUrl('');
     }
+    setGeneratedPdf(null);
     if (lh.podRemarks) setRemarks(lh.podRemarks);
+  };
+
+  const handleMatchTripForPod = () => {
+    let matchedHire: LorryHire | undefined;
+    let matchedCn: ConsignmentNote | undefined;
+    let matchedInvoice: Invoice | undefined;
+
+    if (lookupMode === 'cn') {
+      const q = lookupCnInput.trim().toUpperCase();
+      if (!q) {
+        setStatusMsg('Enter CN No to search and match.');
+        return;
+      }
+      matchedHire = lorryHires.find((lh) => (lh.cnNo || '').trim().toUpperCase() === q) ||
+        lorryHires.find((lh) => (lh.cnNo || '').trim().toUpperCase().includes(q));
+      matchedCn = consignments.find((c) => (c.cnNo || '').trim().toUpperCase() === q) ||
+        consignments.find((c) => (c.cnNo || '').trim().toUpperCase().includes(q));
+    } else if (lookupMode === 'truckDate') {
+      const tq = lookupTruckInput.trim().toUpperCase().replace(/\s+/g, '');
+      const dq = lookupDateInput.trim();
+      if (!tq) {
+        setStatusMsg('Enter Truck No (and optional Date) to match.');
+        return;
+      }
+      matchedHire =
+        lorryHires.find(
+          (lh) =>
+            (lh.truckNo || '').toUpperCase().replace(/\s+/g, '').includes(tq) &&
+            (!dq || lh.cnDate === dq)
+        ) ||
+        lorryHires.find((lh) => (lh.truckNo || '').toUpperCase().replace(/\s+/g, '').includes(tq));
+      matchedCn =
+        consignments.find(
+          (c) =>
+            (c.truckNo || '').toUpperCase().replace(/\s+/g, '').includes(tq) &&
+            (!dq || c.cnDate === dq)
+        ) ||
+        consignments.find((c) => (c.truckNo || '').toUpperCase().replace(/\s+/g, '').includes(tq));
+    } else {
+      const q = lookupInvEwbInput.trim().toUpperCase();
+      if (!q) {
+        setStatusMsg('Enter Party Invoice No or E-Way Bill No to match.');
+        return;
+      }
+      matchedCn = consignments.find((c) => {
+        const invHit =
+          (c.partyInvoiceNo || '').toUpperCase() === q ||
+          (c.partyInvoiceNo || '').toUpperCase().includes(q) ||
+          (c.extraTaxInvoices || []).some((ti) => (ti.no || '').toUpperCase().includes(q));
+        const ewbHit =
+          (c.ewayBillNo || '').toUpperCase() === q ||
+          (c.ewayBillNo || '').toUpperCase().includes(q) ||
+          (c.extraEwayBills || []).some((ew) => (ew.no || '').toUpperCase().includes(q));
+        return invHit || ewbHit;
+      });
+      if (!matchedCn) {
+        matchedInvoice = invoices.find(
+          (inv) =>
+            (inv.invoiceNo || '').toUpperCase() === q ||
+            (inv.invoiceNo || '').toUpperCase().includes(q)
+        );
+        const firstRowCn = matchedInvoice?.consignmentRows?.[0]?.cnNo;
+        if (firstRowCn) {
+          matchedCn = consignments.find(
+            (c) => (c.cnNo || '').trim().toUpperCase() === firstRowCn.trim().toUpperCase()
+          );
+        }
+      }
+      if (matchedCn) {
+        matchedHire = lorryHires.find(
+          (lh) => (lh.cnNo || '').trim().toUpperCase() === (matchedCn?.cnNo || '').trim().toUpperCase()
+        );
+      } else if (matchedInvoice?.consignmentRows?.[0]?.cnNo) {
+        const targetCnNo = matchedInvoice.consignmentRows[0].cnNo.trim().toUpperCase();
+        matchedHire = lorryHires.find((lh) => (lh.cnNo || '').trim().toUpperCase() === targetCnNo);
+      }
+    }
+
+    if (matchedHire) {
+      handleSelectHire(matchedHire);
+      playVerifiedBeep();
+      setStatusMsg(
+        `Matched Lorry Hire CN ${matchedHire.cnNo} (${matchedHire.truckNo}) · Ready for POD capture & save.`
+      );
+      return;
+    }
+
+    if (matchedCn) {
+      setSelectedHireId('');
+      setHireSearchText(`${matchedCn.cnNo} · ${matchedCn.truckNo || ''}`);
+      setCnNo(matchedCn.cnNo || '');
+      setTruckNo(matchedCn.truckNo || '');
+      setPartyName(matchedCn.billingPartyName || matchedCn.consignorName || '');
+      setPodDate(todayISO());
+      playVerifiedBeep();
+      setStatusMsg(
+        `Matched Consignment CN ${matchedCn.cnNo} (${matchedCn.truckNo || 'No Truck'}) — saving POD will auto-link & create its Lorry Hire POD record.`
+      );
+      return;
+    }
+
+    if (matchedInvoice) {
+      const firstRow = matchedInvoice.consignmentRows?.[0];
+      setSelectedHireId('');
+      setCnNo(firstRow?.cnNo || matchedInvoice.invoiceNo);
+      setTruckNo(firstRow?.vehicle || '');
+      setPartyName(matchedInvoice.partyName || '');
+      playVerifiedBeep();
+      setStatusMsg(
+        `Matched Party Bill ${matchedInvoice.invoiceNo} (${matchedInvoice.partyName}) — ready to save POD.`
+      );
+      return;
+    }
+
+    playAlertBeep();
+    setStatusMsg('No matching CN, Truck + Date, Party Invoice, or E-Way Bill found.');
   };
 
   const handleStartCamera = async () => {
@@ -186,17 +348,16 @@ export const UniversalPodScannerPage: React.FC<UniversalPodScannerPageProps> = (
       return;
     }
     try {
-      const stream = await navigator.mediaDevices.getUserMedia({
-        video: { facingMode: { ideal: 'environment' }, width: { ideal: 1440 }, height: { ideal: 1080 } },
-        audio: false,
-      });
+      const { stream, modeUsed } = await openCameraStreamWithFallback();
       streamRef.current = stream;
       if (videoRef.current) {
         videoRef.current.srcObject = stream;
         await videoRef.current.play().catch(() => undefined);
       }
       setCameraActive(true);
-      setStatusMsg('Rear Camera active — align signed POD page clearly and click Capture.');
+      setStatusMsg(
+        `${modeUsed === 'rear' ? 'Rear Camera' : modeUsed === 'front' ? 'Front Webcam' : 'USB / System Camera'} active — align signed POD page clearly and click Capture.`
+      );
     } catch {
       setStatusMsg('Camera access denied or unavailable. Please upload scan file or use USB Scanner folder.');
     }
@@ -306,11 +467,23 @@ export const UniversalPodScannerPage: React.FC<UniversalPodScannerPageProps> = (
     if (!pdf) return;
     setBusy(true);
     try {
-      if (selectedHire) {
-        const compressedImg = podImageUrl.slice(0, 420000);
+      const compressedImg = podImageUrl.slice(0, 420000);
+      const matchedCnObj = consignments.find(
+        (c) => (c.cnNo || '').trim().toUpperCase() === cnNo.trim().toUpperCase()
+      );
+      const targetHire =
+        selectedHire ||
+        lorryHires.find(
+          (lh) =>
+            cnNo.trim() && (lh.cnNo || '').trim().toUpperCase() === cnNo.trim().toUpperCase()
+        ) ||
+        null;
+
+      let savedTargetMsg = '';
+      if (targetHire) {
         await upsertDocument(
           'lorry_hires',
-          selectedHire.id,
+          targetHire.id,
           {
             podReceived: true,
             podReceiveDate: podDate,
@@ -321,9 +494,46 @@ export const UniversalPodScannerPage: React.FC<UniversalPodScannerPageProps> = (
             podRemarks: remarks,
             ownerUid,
           },
+          false
+        );
+        savedTargetMsg = `POD saved & linked to CN ${targetHire.cnNo}`;
+      } else if (cnNo.trim() || truckNo.trim()) {
+        const newHireId = makeSafeDocId('lh_pod');
+        await upsertDocument(
+          'lorry_hires',
+          newHireId,
+          {
+            cnNo: (cnNo.trim() || `POD-${todayISO()}`).slice(0, 40),
+            cnDate: matchedCnObj?.cnDate || podDate,
+            financialYear: normalizeFyLabel(activeFy),
+            division: businessMode,
+            truckNo: (truckNo.trim() || matchedCnObj?.truckNo || 'TRUCK').toUpperCase().slice(0, 24),
+            ownerName: matchedCnObj?.ownerName || '',
+            brokerName: matchedCnObj?.brokerName || '',
+            fromCity: matchedCnObj?.fromCity || '',
+            toCity: matchedCnObj?.toCity || '',
+            hireAmount: Number(matchedCnObj?.lorryHire || 0),
+            advancePaid: Number(matchedCnObj?.advancePaid || 0),
+            balancePayable: Math.max(
+              0,
+              Number(matchedCnObj?.lorryHire || 0) - Number(matchedCnObj?.advancePaid || 0)
+            ),
+            podReceived: true,
+            podReceiveDate: podDate,
+            podFileName: pdf.fileName,
+            podImageDataUrl: compressedImg,
+            podScanFileName: pdf.fileName,
+            podScanDataUrl: compressedImg,
+            podRemarks: remarks,
+            paid: false,
+            ownerUid,
+          },
           true
         );
+        setSelectedHireId(newHireId);
+        savedTargetMsg = `POD saved & linked to new Lorry Hire record (${cnNo || truckNo})`;
       }
+
       if (hasDriveToken && driveAccessToken) {
         const up = await uploadRoleOrganizedPdfToDrive({
           accessToken: driveAccessToken,
@@ -335,17 +545,18 @@ export const UniversalPodScannerPage: React.FC<UniversalPodScannerPageProps> = (
           connectedEmail: connectedDriveEmail,
         });
         setStatusMsg(
-          `Saved POD & uploaded to Drive (${up.folderPath}/${up.name} · ${pdf.sizeKB} KB${
+          `${savedTargetMsg || 'Saved POD'} & uploaded to Drive (${up.folderPath}/${up.name} · ${pdf.sizeKB} KB${
             up.cleanedScratchCount > 0 ? ` · Cleaned ${up.cleanedScratchCount} scratch file(s)` : ''
           }).`
         );
       } else {
         setStatusMsg(
-          selectedHire
-            ? `POD linked to CN ${cnNo} (${pdf.fileName} · ${pdf.sizeKB} KB).`
-            : `Low-KB POD PDF ready: ${pdf.fileName} (${pdf.sizeKB} KB). Select a Lorry Hire to link in ledger.`
+          savedTargetMsg
+            ? `${savedTargetMsg} (${pdf.fileName} · ${pdf.sizeKB} KB).`
+            : `Low-KB POD PDF ready: ${pdf.fileName} (${pdf.sizeKB} KB).`
         );
       }
+      playVerifiedBeep();
     } catch (err) {
       setStatusMsg(err instanceof Error ? err.message : 'Failed to save POD.');
     } finally {
@@ -372,12 +583,19 @@ export const UniversalPodScannerPage: React.FC<UniversalPodScannerPageProps> = (
           <div className="flex flex-wrap items-center gap-1.5 text-xs">
             <button
               type="button"
-              disabled={busy || !podImageUrl}
-              onClick={() => void handleSavePod()}
-              className="inline-flex items-center gap-1 px-3 py-1.5 rounded bg-emerald-600 hover:bg-emerald-700 text-white font-bold cursor-pointer disabled:opacity-50"
+              onClick={handleClearPodForm}
+              className="inline-flex items-center gap-1 px-2.5 py-1.5 rounded bg-white/15 hover:bg-white/25 text-white font-bold cursor-pointer border border-white/25"
             >
-              <Save className="w-3.5 h-3.5" />
-              Save
+              <RotateCcw className="w-3.5 h-3.5" />
+              Clear / Skip
+            </button>
+            <button
+              type="button"
+              onClick={() => setShowSavedList((v) => !v)}
+              className="inline-flex items-center gap-1 px-2.5 py-1.5 rounded bg-amber-100 hover:bg-amber-200 text-amber-950 font-bold cursor-pointer"
+            >
+              <Edit3 className="w-3.5 h-3.5" />
+              Saved List / Rectify ({savedPodHires.length})
             </button>
             <button
               type="button"
@@ -393,20 +611,12 @@ export const UniversalPodScannerPage: React.FC<UniversalPodScannerPageProps> = (
             </button>
             <button
               type="button"
-              onClick={() => void handleWatchUsbScannerFolder()}
-              className="inline-flex items-center gap-1 px-2.5 py-1.5 rounded bg-amber-400 hover:bg-amber-300 text-slate-950 font-bold cursor-pointer"
-            >
-              <ScanLine className="w-3.5 h-3.5" />
-              Scan
-            </button>
-            <button
-              type="button"
               disabled={busy || !podImageUrl}
               onClick={async () => {
                 const pdf = generatedPdf || (await handleBuildLowKbPdf());
                 if (pdf) downloadPdfDirect(pdf);
               }}
-              className="inline-flex items-center gap-1 px-2.5 py-1.5 rounded bg-white/15 hover:bg-white/25 text-white font-semibold cursor-pointer disabled:opacity-50"
+              className="inline-flex items-center gap-1 px-2.5 py-1.5 rounded bg-emerald-600 hover:bg-emerald-700 text-white font-bold cursor-pointer disabled:opacity-50"
             >
               <Download className="w-3.5 h-3.5" />
               Low-KB PDF
@@ -422,6 +632,14 @@ export const UniversalPodScannerPage: React.FC<UniversalPodScannerPageProps> = (
             >
               <Printer className="w-3.5 h-3.5" />
               Manual Print
+            </button>
+            <button
+              type="button"
+              onClick={() => setCamStudioOpen(true)}
+              className="inline-flex items-center gap-1 px-2.5 py-1.5 rounded bg-amber-400 hover:bg-amber-300 text-slate-950 font-bold cursor-pointer"
+            >
+              <Camera className="w-3.5 h-3.5" />
+              Interactive Scan Studio
             </button>
             <button
               type="button"
@@ -441,25 +659,184 @@ export const UniversalPodScannerPage: React.FC<UniversalPodScannerPageProps> = (
               }}
               className="inline-flex items-center gap-1 px-2.5 py-1.5 rounded bg-green-600 hover:bg-green-700 text-white font-bold cursor-pointer disabled:opacity-50"
             >
-              <Share2 className="w-3.5 h-3.5" />
-              Share
+              <MessageSquare className="w-3.5 h-3.5" />
+              WhatsApp PDF
             </button>
-            {selectedHire && (
-              <button
-                type="button"
-                onClick={() => handleSelectHire(selectedHire)}
-                className="inline-flex items-center gap-1 px-2.5 py-1.5 rounded bg-amber-50 text-amber-900 border border-amber-300 font-bold hover:bg-amber-100 cursor-pointer"
-              >
-                <Edit3 className="w-3.5 h-3.5" />
-                Rectify
-              </button>
-            )}
+            <button
+              type="button"
+              disabled={busy || !podImageUrl}
+              onClick={async () => {
+                const pdf = generatedPdf || (await handleBuildLowKbPdf());
+                if (!pdf) return;
+                const res = await sharePdfDirect({
+                  pdf,
+                  channel: 'email',
+                  partyName,
+                  docNo: cnNo || truckNo || 'POD',
+                  docLabel: 'Signed POD Copy',
+                  company,
+                });
+                setStatusMsg(res.message);
+              }}
+              className="inline-flex items-center gap-1 px-2.5 py-1.5 rounded bg-indigo-600 hover:bg-indigo-700 text-white font-bold cursor-pointer disabled:opacity-50"
+            >
+              <Mail className="w-3.5 h-3.5" />
+              Email PDF
+            </button>
+            <button
+              type="button"
+              disabled={busy || !podImageUrl}
+              onClick={() => void handleSavePod()}
+              className="inline-flex items-center gap-1 px-3 py-1.5 rounded bg-blue-900 hover:bg-blue-950 text-white font-extrabold cursor-pointer disabled:opacity-50 border border-blue-400"
+            >
+              <Save className="w-3.5 h-3.5" />
+              Save POD
+            </button>
           </div>
         </div>
+
+        {showSavedList && (
+          <div className="px-4 py-3 bg-amber-50 border-b border-amber-200">
+            <div className="flex items-center justify-between mb-2">
+              <span className="text-xs font-extrabold text-amber-950">
+                Saved POD Copies ({savedPodHires.length}) — Click any record to load &amp; rectify
+              </span>
+              <button
+                type="button"
+                onClick={() => setShowSavedList(false)}
+                className="text-xs font-bold text-amber-900 hover:underline cursor-pointer"
+              >
+                Close List
+              </button>
+            </div>
+            <div className="grid grid-cols-1 sm:grid-cols-2 lg:grid-cols-4 gap-2 max-h-48 overflow-y-auto">
+              {savedPodHires.slice(0, 24).map((lh) => (
+                <button
+                  key={lh.id}
+                  type="button"
+                  onClick={() => {
+                    handleSelectHire(lh);
+                    setShowSavedList(false);
+                  }}
+                  className="text-left p-2 rounded-lg bg-white border border-amber-300 hover:bg-amber-100/70 text-xs cursor-pointer"
+                >
+                  <div className="font-mono-num font-bold text-[#0D47A1]">
+                    {lh.cnNo} · {lh.truckNo}
+                  </div>
+                  <div className="text-[11px] text-slate-600">
+                    POD Date: {formatDateDDMMYYYY(lh.podReceiveDate)} · {lh.podFileName || 'POD Saved'}
+                  </div>
+                </button>
+              ))}
+              {savedPodHires.length === 0 && (
+                <div className="text-xs text-slate-500 col-span-full">No saved POD records yet.</div>
+              )}
+            </div>
+          </div>
+        )}
 
         <div className="p-4 grid grid-cols-1 lg:grid-cols-12 gap-4 text-xs">
           {/* Left Form & Capture Controls */}
           <div className="lg:col-span-5 space-y-3">
+            <div className="p-3 rounded-lg bg-blue-50/70 border border-blue-200 space-y-2">
+              <div className="font-bold text-[#0D47A1] flex items-center gap-1.5">
+                <Search className="w-3.5 h-3.5" />
+                Smart Match Trip by CN No, Truck No + Date, or Party Invoice / E-Way Bill
+              </div>
+              <div className="flex flex-wrap gap-1.5">
+                {[
+                  { id: 'cn', label: 'CN No' },
+                  { id: 'truckDate', label: 'Truck No + Date' },
+                  { id: 'invEwb', label: 'Party Inv / E-Way Bill' },
+                ].map((m) => (
+                  <button
+                    key={m.id}
+                    type="button"
+                    onClick={() => setLookupMode(m.id as 'cn' | 'truckDate' | 'invEwb')}
+                    className={`px-2 py-1 rounded text-[11px] font-bold cursor-pointer ${
+                      lookupMode === m.id
+                        ? 'bg-[#0D47A1] text-white'
+                        : 'bg-white text-slate-700 border border-slate-300'
+                    }`}
+                  >
+                    {m.label}
+                  </button>
+                ))}
+              </div>
+              {lookupMode === 'cn' && (
+                <div className="flex gap-1.5">
+                  <input
+                    type="text"
+                    value={lookupCnInput}
+                    onChange={(e) => setLookupCnInput(e.target.value)}
+                    onKeyDown={(e) => {
+                      if (e.key === 'Enter') {
+                        e.preventDefault();
+                        handleMatchTripForPod();
+                      }
+                    }}
+                    placeholder="Enter CN / Bilty No..."
+                    className="flex-1 px-2.5 py-1.5 rounded border border-slate-300 bg-white font-mono-num"
+                  />
+                  <button
+                    type="button"
+                    onClick={handleMatchTripForPod}
+                    className="px-3 py-1.5 rounded bg-[#0D47A1] hover:bg-blue-900 text-white font-bold cursor-pointer"
+                  >
+                    Find &amp; Load
+                  </button>
+                </div>
+              )}
+              {lookupMode === 'truckDate' && (
+                <div className="flex flex-wrap gap-1.5">
+                  <input
+                    type="text"
+                    value={lookupTruckInput}
+                    onChange={(e) => setLookupTruckInput(e.target.value.toUpperCase())}
+                    placeholder="Truck No (WB23...)"
+                    className="flex-1 min-w-[120px] px-2.5 py-1.5 rounded border border-slate-300 bg-white font-mono-num uppercase"
+                  />
+                  <input
+                    type="date"
+                    value={lookupDateInput}
+                    onChange={(e) => setLookupDateInput(e.target.value)}
+                    className="px-2 py-1.5 rounded border border-slate-300 bg-white font-mono-num"
+                  />
+                  <button
+                    type="button"
+                    onClick={handleMatchTripForPod}
+                    className="px-3 py-1.5 rounded bg-[#0D47A1] hover:bg-blue-900 text-white font-bold cursor-pointer"
+                  >
+                    Find
+                  </button>
+                </div>
+              )}
+              {lookupMode === 'invEwb' && (
+                <div className="flex gap-1.5">
+                  <input
+                    type="text"
+                    value={lookupInvEwbInput}
+                    onChange={(e) => setLookupInvEwbInput(e.target.value)}
+                    onKeyDown={(e) => {
+                      if (e.key === 'Enter') {
+                        e.preventDefault();
+                        handleMatchTripForPod();
+                      }
+                    }}
+                    placeholder="Party Invoice No or 12-digit E-Way Bill..."
+                    className="flex-1 px-2.5 py-1.5 rounded border border-slate-300 bg-white font-mono-num"
+                  />
+                  <button
+                    type="button"
+                    onClick={handleMatchTripForPod}
+                    className="px-3 py-1.5 rounded bg-[#0D47A1] hover:bg-blue-900 text-white font-bold cursor-pointer"
+                  >
+                    Match
+                  </button>
+                </div>
+              )}
+            </div>
+
             <div>
               <label className="block font-bold text-slate-700 mb-1">
                 1. Link to Lorry Hire / CN No (Unsettled Shown First)
@@ -687,6 +1064,29 @@ export const UniversalPodScannerPage: React.FC<UniversalPodScannerPageProps> = (
           </div>
         </div>
       </div>
+
+      <CameraPodQrScannerModal
+        open={camStudioOpen}
+        mode="both"
+        title="Interactive POD & E-Way Bill Scan Studio"
+        onClose={() => setCamStudioOpen(false)}
+        onCapturePodImage={(dataUrl) => {
+          setOriginalImageUrl(dataUrl);
+          setPodImageUrl(dataUrl);
+          setGeneratedPdf(null);
+          setStatusMsg('Captured POD scan via Interactive Scan Studio.');
+        }}
+        onQrDecoded={(parsed) => {
+          if (parsed.ewbNo) {
+            setLookupMode('invEwb');
+            setLookupInvEwbInput(parsed.ewbNo);
+          }
+          if (parsed.cnNo) {
+            setCnNo(parsed.cnNo);
+          }
+          setStatusMsg(`QR Decoded${parsed.ewbNo ? ` · EWB: ${parsed.ewbNo}` : ''}${parsed.cnNo ? ` · CN: ${parsed.cnNo}` : ''}`);
+        }}
+      />
     </div>
   );
 };

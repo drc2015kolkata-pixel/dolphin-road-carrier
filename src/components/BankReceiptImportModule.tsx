@@ -6,12 +6,13 @@ import {
   Download,
   Edit3,
   Eye,
+  FilePlus2,
   FileSpreadsheet,
   Landmark,
+  Mail,
   MessageSquareText,
   Printer,
   ScanLine,
-  Share2,
   Sparkles,
   Trash2,
   Upload,
@@ -55,6 +56,7 @@ interface BankReceiptImportModuleProps {
   driveAccessToken: string | null;
   readOnly?: boolean;
   onOpenPodScanner?: () => void;
+  onCreateCreditDebitNote?: (kind: 'Credit Note' | 'Debit Note') => void;
   onOpenPreview: (pdf: GeneratedPdfResult) => void;
 }
 
@@ -413,6 +415,7 @@ export const BankReceiptImportModule: React.FC<BankReceiptImportModuleProps> = (
   driveAccessToken,
   readOnly = false,
   onOpenPodScanner,
+  onCreateCreditDebitNote,
   onOpenPreview,
 }) => {
   const bankNames = useMemo(() => {
@@ -971,6 +974,26 @@ export const BankReceiptImportModule: React.FC<BankReceiptImportModuleProps> = (
           </div>
 
           <div className="flex flex-wrap items-center gap-1.5 text-xs">
+            {onCreateCreditDebitNote && !readOnly && (
+              <>
+                <button
+                  type="button"
+                  onClick={() => onCreateCreditDebitNote('Credit Note')}
+                  className="inline-flex items-center gap-1 px-2.5 py-1.5 rounded-lg bg-rose-600 hover:bg-rose-700 text-white font-bold cursor-pointer"
+                >
+                  <FilePlus2 className="w-3.5 h-3.5" />
+                  + Credit Note
+                </button>
+                <button
+                  type="button"
+                  onClick={() => onCreateCreditDebitNote('Debit Note')}
+                  className="inline-flex items-center gap-1 px-2.5 py-1.5 rounded-lg bg-amber-600 hover:bg-amber-700 text-white font-bold cursor-pointer"
+                >
+                  <FilePlus2 className="w-3.5 h-3.5" />
+                  + Debit Note
+                </button>
+              </>
+            )}
             <button
               type="button"
               onClick={() => void handlePrintSummary()}
@@ -1027,8 +1050,27 @@ export const BankReceiptImportModule: React.FC<BankReceiptImportModuleProps> = (
               }}
               className="inline-flex items-center gap-1 px-2.5 py-1.5 rounded-lg bg-green-600 hover:bg-green-700 text-white font-bold cursor-pointer"
             >
-              <Share2 className="w-3.5 h-3.5" />
-              Share
+              <MessageSquareText className="w-3.5 h-3.5" />
+              WhatsApp PDF
+            </button>
+            <button
+              type="button"
+              onClick={async () => {
+                const pdf = await buildSummaryPdf();
+                const res = await sharePdfDirect({
+                  pdf,
+                  channel: 'email',
+                  partyName: 'Bank Receipt Reconciliation',
+                  docNo: activeFy,
+                  docLabel: 'Bank Receipt & TDS Statement',
+                  company,
+                });
+                setStatusMsg(res.message);
+              }}
+              className="inline-flex items-center gap-1 px-2.5 py-1.5 rounded-lg bg-indigo-600 hover:bg-indigo-700 text-white font-bold cursor-pointer"
+            >
+              <Mail className="w-3.5 h-3.5" />
+              Email PDF
             </button>
             {!readOnly && (
               <button

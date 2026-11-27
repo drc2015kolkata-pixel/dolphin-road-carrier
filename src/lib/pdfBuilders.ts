@@ -1067,6 +1067,7 @@ function buildInvoiceDoc(
     doc.setFont('helvetica', 'normal');
     doc.setFontSize(6.6);
     const combinedRem = [
+      invoice.creditDebitReason ? `Reason: ${invoice.creditDebitReason}` : '',
       invoice.narrationText || '',
       invoice.remarks || '',
       invoice.additionalNotes || '',

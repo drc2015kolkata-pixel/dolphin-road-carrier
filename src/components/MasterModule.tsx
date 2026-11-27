@@ -13,6 +13,7 @@ import {
   MessageSquare,
   Plus,
   Printer,
+  RotateCcw,
   Save,
   ScanLine,
   Search,
@@ -30,6 +31,7 @@ import {
   X,
 } from 'lucide-react';
 import {
+  BankReceiptRecord,
   CompanySettings,
   ConsignmentNote,
   DEFAULT_COMPANY_SETTINGS,
@@ -38,6 +40,7 @@ import {
   Invoice,
   LorryHire,
   Party,
+  StaffCommissionEntry,
   TransactionRecord,
   Vehicle,
 } from '../types/erp';
@@ -94,8 +97,12 @@ import {
 } from '../lib/dropdownMasterStore';
 import { SupportedCountry } from '../lib/postalPinLookup';
 import { PinCountryInputs, useAutoPinLookup } from './CityPinCountryAutoFill';
+import { CameraPodQrScannerModal } from './CameraPodQrScannerModal';
+import { dataUrlToFile } from '../lib/cameraHelper';
+import { computeTallyRoleLedger, LedgerRoleType, TallyLedgerStatement } from '../lib/tallyLedgerEngine';
 
 export type MasterTabId = 'parties' | 'owners' | 'brokers' | 'vehicles' | 'drivers';
+type KycEntityRole = 'Lorry Owner' | 'Broker' | 'Vehicle' | 'Driver';
 
 interface MasterModuleProps {
   ownerUid: string;
@@ -108,6 +115,8 @@ interface MasterModuleProps {
   consignments?: ConsignmentNote[];
   lorryHires?: LorryHire[];
   transactions?: TransactionRecord[];
+  bankReceipts?: BankReceiptRecord[];
+  staffCommissions?: StaffCommissionEntry[];
   company?: CompanySettings;
   initialTab?: MasterTabId;
   initialEditParty?: Party | null;
@@ -168,6 +177,8 @@ const MasterModuleInner: React.FC<MasterModuleProps> = ({
   consignments = [],
   lorryHires = [],
   transactions = [],
+  bankReceipts = [],
+  staffCommissions = [],
   company,
   initialTab = 'parties',
   initialEditParty = null,
@@ -178,6 +189,9 @@ const MasterModuleInner: React.FC<MasterModuleProps> = ({
 }) => {
   const [tab, setTab] = useState<MasterTabId>(initialTab);
   const [search, setSearch] = useState('');
+  const savedListRef = useRef<HTMLDivElement | null>(null);
+  const [scanStudioOpen, setScanStudioOpen] = useState(false);
+  const [scanStudioRole, setScanStudioRole] = useState<'Party' | KycEntityRole>('Party');
   const debouncedSearch = useDebouncedValue(search, 200);
   const [statusMsg, setStatusMsg] = useState<string | null>(null);
   const [cleaningParties, setCleaningParties] = useState(false);
@@ -248,6 +262,10 @@ const MasterModuleInner: React.FC<MasterModuleProps> = ({
   // Lorry Owner form + Inline Edit state
   const [editingOwnerId, setEditingOwnerId] = useState<string | null>(null);
   const [oName, setOName] = useState('');
+  const [oFirstOwner, setOFirstOwner] = useState('');
+  const [oSecondOwner, setOSecondOwner] = useState('');
+  const [oDeedNo, setODeedNo] = useState('');
+  const [oDeedDate, setODeedDate] = useState('');
   const [oPhone, setOPhone] = useState('');
   const [oAddr, setOAddr] = useState('');
   const [oPinCode, setOPinCode] = useState('');
@@ -509,6 +527,10 @@ const MasterModuleInner: React.FC<MasterModuleProps> = ({
     setPickerOwnerId('');
     setPickerOwnerText('');
     setOName('');
+    setOFirstOwner('');
+    setOSecondOwner('');
+    setODeedNo('');
+    setODeedDate('');
     setOPhone('');
     setOAddr('');
     setOPinCode('');
@@ -524,10 +546,15 @@ const MasterModuleInner: React.FC<MasterModuleProps> = ({
   };
 
   const loadOwnerForEdit = (o: Party) => {
+    const first = o.firstOwnerName || o.name || '';
     setEditingOwnerId(o.id);
     setPickerOwnerId(o.id);
-    setPickerOwnerText(o.name);
-    setOName(o.name || '');
+    setPickerOwnerText(o.name || first);
+    setOName(first);
+    setOFirstOwner(first);
+    setOSecondOwner(o.secondOwnerName || '');
+    setODeedNo(o.deedNo || '');
+    setODeedDate(o.deedDate || '');
     setOPhone(o.phone || '');
     setOAddr(o.address || '');
     setOPinCode(o.pinCode || '');
@@ -744,7 +771,8 @@ const MasterModuleInner: React.FC<MasterModuleProps> = ({
 
   const handleSaveOwner = async (e: React.FormEvent) => {
     e.preventDefault();
-    if (!oName.trim() || readOnly) return;
+    const primaryOwnerName = (oFirstOwner.trim() || oName.trim());
+    if (!primaryOwnerName || readOnly) return;
     if (oGstin.trim()) {
       const gstCheck = validateIndianGstin(oGstin);
       if (!gstCheck.valid) {
@@ -760,7 +788,11 @@ const MasterModuleInner: React.FC<MasterModuleProps> = ({
       'parties',
       targetId,
       {
-        name: oName.trim(),
+        name: primaryOwnerName,
+        firstOwnerName: primaryOwnerName,
+        secondOwnerName: oSecondOwner.trim(),
+        deedNo: oDeedNo.trim().toUpperCase(),
+        deedDate: oDeedDate,
         partyType: 'TruckOwner',
         phone: oPhone.trim(),
         address: oAddr.trim(),
@@ -781,7 +813,7 @@ const MasterModuleInner: React.FC<MasterModuleProps> = ({
       isNew
     );
     playVerifiedBeep();
-    setStatusMsg(`${isNew ? 'Added' : 'Updated'} Lorry Owner "${oName.trim()}".`);
+    setStatusMsg(`${isNew ? 'Added' : 'Updated'} Lorry Owner "${primaryOwnerName}".`);
     resetOwnerForm();
   };
 
@@ -893,8 +925,6 @@ const MasterModuleInner: React.FC<MasterModuleProps> = ({
     resetDriverForm();
   };
 
-  type KycEntityRole = 'Lorry Owner' | 'Broker' | 'Vehicle' | 'Driver';
-
   const handleScanKycDocument = async (
     file: File | undefined,
     role: KycEntityRole,
@@ -937,7 +967,10 @@ const MasterModuleInner: React.FC<MasterModuleProps> = ({
       };
 
       if (role === 'Lorry Owner') {
-        if (hit(extracted.name)) setOName(extracted.name!.trim());
+        if (hit(extracted.name)) {
+          setOName(extracted.name!.trim());
+          setOFirstOwner(extracted.name!.trim());
+        }
         if (hit(extracted.phone)) setOPhone(extracted.phone!.trim());
         if (hit(extracted.address)) setOAddr(extracted.address!.trim());
         if (hit(extracted.pinCode)) setOPinCode(extracted.pinCode!.trim());
@@ -1029,10 +1062,15 @@ const MasterModuleInner: React.FC<MasterModuleProps> = ({
   ): Promise<{ pdf: GeneratedPdfResult; phone: string; recordName: string }> => {
     if (role === 'Lorry Owner') {
       const o = record?.party;
-      const name = (o ? o.name : oName).trim() || 'Lorry_Owner';
+      const first = (o ? o.firstOwnerName || o.name : oFirstOwner || oName).trim() || 'Lorry_Owner';
+      const second = (o ? o.secondOwnerName : oSecondOwner) || '';
+      const deedNoVal = (o ? o.deedNo : oDeedNo) || '';
+      const deedDtVal = (o ? o.deedDate : oDeedDate) || '';
       const phone = (o ? o.phone : oPhone) || '';
       const fields = [
-        { label: 'Lorry Owner Name', value: name },
+        { label: '1st Owner Name', value: first },
+        { label: '2nd Owner Name', value: second || '-' },
+        { label: 'Deed No / Date', value: `${deedNoVal || '-'}${deedDtVal ? ` (${formatDateDDMMYYYY(deedDtVal)})` : ''}` },
         { label: 'Mobile / Phone', value: phone || '-' },
         { label: 'Address / City', value: (o ? o.address : oAddr) || '-' },
         { label: 'PIN Code / Country', value: `${(o ? o.pinCode : oPinCode) || '-'} (${(o ? o.country : oCountry) || 'India'})` },
@@ -1046,13 +1084,13 @@ const MasterModuleInner: React.FC<MasterModuleProps> = ({
       ];
       const pdf = await generateEntityKycPDF({
         role: 'Lorry Owner',
-        recordName: name,
+        recordName: first,
         fields,
         attachedImageDataUrl: !o && oKycImg ? oKycImg : undefined,
         company: effectiveCompany,
         orientation: 'p',
       });
-      return { pdf, phone, recordName: name };
+      return { pdf, phone, recordName: first };
     }
 
     if (role === 'Broker') {
@@ -1702,8 +1740,338 @@ const MasterModuleInner: React.FC<MasterModuleProps> = ({
     else downloadPdfDirect(pdf);
   };
 
+  const activeEntityTallyLedger = useMemo<{
+    role: LedgerRoleType;
+    accountName: string;
+    statement: TallyLedgerStatement | null;
+    phone?: string;
+    email?: string;
+  }>(() => {
+    let role: LedgerRoleType = 'party';
+    let accountName = '';
+    let entityId: string | undefined;
+    let phone: string | undefined;
+    let email: string | undefined;
+
+    if (tab === 'parties') {
+      role = 'party';
+      const target = selectedPartyObj || parties.find((p) => p.id === editingPartyId);
+      accountName = target?.name || pName.trim();
+      entityId = target?.id;
+      phone = target?.phone || pPhone.trim() || undefined;
+      email = target?.email || pEmail.trim() || undefined;
+    } else if (tab === 'owners') {
+      role = 'owner';
+      const target = ownersList.find((o) => o.id === (pickerOwnerId || editingOwnerId));
+      accountName = target?.name || oFirstOwner.trim() || oName.trim();
+      entityId = target?.id;
+      phone = target?.phone || oPhone.trim() || undefined;
+      email = target?.email || undefined;
+    } else if (tab === 'brokers') {
+      role = 'broker';
+      const target = brokersList.find((b) => b.id === (pickerBrokerId || editingBrokerId));
+      accountName = target?.name || bName.trim();
+      entityId = target?.id;
+      phone = target?.phone || bPhone.trim() || undefined;
+      email = target?.email || undefined;
+    } else if (tab === 'vehicles') {
+      role = 'vehicle';
+      const target = vehicles.find((v) => v.id === (pickerVehicleId || editingVehicleId));
+      accountName = target?.truckNo || vTruck.trim().toUpperCase();
+      entityId = target?.id;
+      phone = target?.ownerPhone || vPhone.trim() || undefined;
+    } else {
+      role = 'driver';
+      const target = drivers.find((d) => d.id === (pickerDriverId || editingDriverId));
+      accountName = target?.name || dName.trim();
+      entityId = target?.id;
+      phone = target?.phone || dPhone.trim() || undefined;
+    }
+
+    if (!accountName.trim()) {
+      return { role, accountName: '', statement: null, phone, email };
+    }
+
+    const statement = computeTallyRoleLedger({
+      role,
+      accountName,
+      entityId,
+      fy: activeFy,
+      company: effectiveCompany,
+      parties,
+      consignments,
+      invoices,
+      lorryHires,
+      transactions,
+      bankReceipts,
+      staffCommissions,
+      vehicles,
+      drivers,
+    });
+    return { role, accountName, statement, phone, email };
+  }, [
+    tab,
+    selectedPartyObj,
+    parties,
+    editingPartyId,
+    pName,
+    pPhone,
+    pEmail,
+    ownersList,
+    pickerOwnerId,
+    editingOwnerId,
+    oFirstOwner,
+    oName,
+    oPhone,
+    brokersList,
+    pickerBrokerId,
+    editingBrokerId,
+    bName,
+    bPhone,
+    vehicles,
+    pickerVehicleId,
+    editingVehicleId,
+    vTruck,
+    vPhone,
+    drivers,
+    pickerDriverId,
+    editingDriverId,
+    dName,
+    dPhone,
+    activeFy,
+    effectiveCompany,
+    consignments,
+    invoices,
+    lorryHires,
+    transactions,
+    bankReceipts,
+    staffCommissions,
+  ]);
+
+  const handleActiveRoleLedgerPdfAction = async (
+    action: 'preview' | 'print' | 'download' | 'whatsapp' | 'email'
+  ) => {
+    const st = activeEntityTallyLedger.statement;
+    if (!st) return;
+    const roleLabel =
+      st.role === 'party'
+        ? 'PARTY'
+        : st.role === 'owner'
+          ? 'LORRY OWNER'
+          : st.role === 'broker'
+            ? 'BROKER'
+            : st.role === 'vehicle'
+              ? 'VEHICLE / TRUCK'
+              : 'DRIVER';
+    const pdf = await generateFoxproStatementPDF(
+      {
+        title: `T-A-L-L-Y   ${roleLabel}   L-E-D-G-E-R   :   ${st.accountName.toUpperCase()}`,
+        subtitle: `FY: ${activeFy} · Trips: ${st.tripCount} · Closing: Rs. ${formatINR(st.closingBalance)} ${st.closingSide}`,
+        fileName: `${roleLabel.replace(/\s+/g, '_')}_Ledger_${st.accountName.replace(/[^a-zA-Z0-9]/g, '_')}_${activeFy.replace(/\s+/g, '_')}.pdf`,
+        orientation: 'l',
+        summaryLines: [
+          { label: `${roleLabel} Account`, value: st.accountName },
+          { label: 'Yearly Trips', value: String(st.tripCount) },
+          { label: 'Opening Balance', value: `Rs. ${formatINR(st.openingAmount)} ${st.openingSide}` },
+          { label: 'Total Debit / Credit', value: `Dr ${formatINR(st.totalDr)} / Cr ${formatINR(st.totalCr)}` },
+          { label: 'Closing Balance', value: `Rs. ${formatINR(st.closingBalance)} ${st.closingSide}` },
+        ],
+        columns: [
+          { label: 'DATE', widthPct: 11, align: 'left' },
+          { label: 'PARTICULARS', widthPct: 33, align: 'left' },
+          { label: 'VCH TYPE', widthPct: 12, align: 'left' },
+          { label: 'VCH NO.', widthPct: 14, align: 'left' },
+          { label: 'DEBIT (₹)', widthPct: 10, align: 'right' },
+          { label: 'CREDIT (₹)', widthPct: 10, align: 'right' },
+          { label: 'BALANCE', widthPct: 10, align: 'right' },
+        ],
+        rows: st.rows.map((r) => ({
+          line1: [
+            r.date ? formatDateDDMMYYYY(r.date) : 'Opening',
+            r.particulars || r.narration,
+            r.voucherType,
+            r.voucherNo || '-',
+            r.debit > 0 ? formatINR(r.debit) : '-',
+            r.credit > 0 ? formatINR(r.credit) : '-',
+            `${formatINR(r.runningBalance)} ${r.runningSide}`,
+          ],
+          ...(r.narration && r.narration !== r.particulars
+            ? { line2: ['', r.narration, '', '', '', '', ''] }
+            : {}),
+        })),
+        totalsLabel: 'CLOSING BALANCE :',
+        totalsLine1: [
+          '',
+          `Total Trips: ${st.tripCount}`,
+          '',
+          '',
+          formatINR(st.totalDr),
+          formatINR(st.totalCr),
+          `${formatINR(st.closingBalance)} ${st.closingSide}`,
+        ],
+        totalAmountForWords: st.closingBalance,
+      },
+      effectiveCompany,
+      'l'
+    );
+
+    if (action === 'preview' && onPreviewPdf) {
+      onPreviewPdf(pdf, 'Reports_Ledgers');
+    } else if (action === 'print') {
+      printPdfDirect(pdf);
+    } else if (action === 'download') {
+      downloadPdfDirect(pdf);
+    } else {
+      const res = await sharePdfDirect({
+        pdf,
+        channel: action,
+        phone: activeEntityTallyLedger.phone,
+        email: activeEntityTallyLedger.email,
+        partyName: st.accountName,
+        docNo: activeFy,
+        docLabel: `${roleLabel} Tally Ledger`,
+        company: effectiveCompany,
+      });
+      setStatusMsg(res.message);
+    }
+  };
+
+  const renderActiveRoleTallyLedgerPanel = (roleLabel: string) => {
+    const st = activeEntityTallyLedger.statement;
+    if (!st) {
+      return (
+        <div className="bg-slate-50 rounded-xl border border-slate-200 px-4 py-3 text-xs text-slate-600 flex items-center justify-between gap-2">
+          <span className="font-semibold">
+            Select or type any {roleLabel} above to view its live Yearly Trips &amp; Tally Ledger ({activeFy}).
+          </span>
+        </div>
+      );
+    }
+    return (
+      <div className="bg-white rounded-xl border border-blue-200 shadow-sm overflow-hidden">
+        <div className="bg-slate-900 text-white px-4 py-2.5 flex flex-wrap items-center justify-between gap-2 text-xs">
+          <div className="flex flex-wrap items-center gap-2">
+            <FileText className="w-4 h-4 text-amber-300" />
+            <span className="font-extrabold">
+              Yearly Trips &amp; Tally Ledger ({activeFy}) — {st.accountName}
+            </span>
+            <span className="px-2 py-0.5 rounded bg-blue-800 text-blue-100 font-mono-num font-bold">
+              Trips: {st.tripCount}
+            </span>
+            <span className="px-2 py-0.5 rounded bg-slate-800 text-slate-200 font-mono-num">
+              Opening: ₹{formatINR(st.openingAmount)} {st.openingSide}
+            </span>
+            <span className="px-2 py-0.5 rounded bg-emerald-700 text-white font-mono-num font-bold">
+              Closing: ₹{formatINR(st.closingBalance)} {st.closingSide}
+            </span>
+          </div>
+          <div className="flex flex-wrap items-center gap-1.5">
+            {onPreviewPdf && (
+              <button
+                type="button"
+                onClick={() => void handleActiveRoleLedgerPdfAction('preview')}
+                className="inline-flex items-center gap-1 px-2 py-1 rounded bg-white text-[#0D47A1] hover:bg-blue-50 text-[11px] font-bold cursor-pointer"
+              >
+                <Eye className="w-3 h-3" /> Preview Ledger
+              </button>
+            )}
+            <button
+              type="button"
+              onClick={() => void handleActiveRoleLedgerPdfAction('download')}
+              className="inline-flex items-center gap-1 px-2 py-1 rounded bg-emerald-600 hover:bg-emerald-700 text-white text-[11px] font-bold cursor-pointer"
+            >
+              <Download className="w-3 h-3" /> Low-KB PDF
+            </button>
+            <button
+              type="button"
+              onClick={() => void handleActiveRoleLedgerPdfAction('print')}
+              className="inline-flex items-center gap-1 px-2 py-1 rounded bg-amber-500 hover:bg-amber-400 text-slate-950 text-[11px] font-bold cursor-pointer"
+            >
+              <Printer className="w-3 h-3" /> Print
+            </button>
+            <button
+              type="button"
+              onClick={() => void handleActiveRoleLedgerPdfAction('whatsapp')}
+              className="inline-flex items-center gap-1 px-2 py-1 rounded bg-green-600 hover:bg-green-700 text-white text-[11px] font-bold cursor-pointer"
+            >
+              <MessageSquare className="w-3 h-3" /> WhatsApp PDF
+            </button>
+            <button
+              type="button"
+              onClick={() => void handleActiveRoleLedgerPdfAction('email')}
+              className="inline-flex items-center gap-1 px-2 py-1 rounded bg-indigo-600 hover:bg-indigo-700 text-white text-[11px] font-bold cursor-pointer"
+            >
+              <Mail className="w-3 h-3" /> Email PDF
+            </button>
+          </div>
+        </div>
+        <div className="grid grid-cols-2 sm:grid-cols-4 gap-2 px-4 py-2 bg-slate-50 border-b border-slate-200 text-xs font-mono-num">
+          <div>
+            <span className="text-slate-500 font-sans">Gross Trip/Bill: </span>
+            <strong className="text-slate-900">₹{formatINR(st.totalGrossAmount)}</strong>
+          </div>
+          <div>
+            <span className="text-slate-500 font-sans">Paid / Adv: </span>
+            <strong className="text-emerald-800">₹{formatINR(st.totalAdvanceOrPaid)}</strong>
+          </div>
+          <div>
+            <span className="text-slate-500 font-sans">Total Debit: </span>
+            <strong className="text-blue-900">₹{formatINR(st.totalDr)}</strong>
+          </div>
+          <div>
+            <span className="text-slate-500 font-sans">Total Credit: </span>
+            <strong className="text-indigo-900">₹{formatINR(st.totalCr)}</strong>
+          </div>
+        </div>
+        <div className="max-h-60 overflow-y-auto overflow-x-auto">
+          <table className="w-full text-xs text-left border-collapse">
+            <thead className="bg-slate-100 text-slate-700 sticky top-0 border-b border-slate-200">
+              <tr>
+                <th className="p-2">Date</th>
+                <th className="p-2">Particulars</th>
+                <th className="p-2">Vch Type</th>
+                <th className="p-2">Vch No.</th>
+                <th className="p-2 text-right">Debit (₹)</th>
+                <th className="p-2 text-right">Credit (₹)</th>
+                <th className="p-2 text-right">Balance</th>
+              </tr>
+            </thead>
+            <tbody className="divide-y divide-slate-100 font-mono-num">
+              {st.rows.length === 0 ? (
+                <tr>
+                  <td colSpan={7} className="p-4 text-center font-sans text-slate-500">
+                    No ledger entries in {activeFy} for {st.accountName}.
+                  </td>
+                </tr>
+              ) : (
+                st.rows.map((r, idx) => (
+                  <tr key={`${r.id}_${idx}`} className="hover:bg-blue-50/40">
+                    <td className="p-2 whitespace-nowrap">{r.date ? formatDateDDMMYYYY(r.date) : 'OB'}</td>
+                    <td className="p-2 font-sans">
+                      <div className="font-semibold text-slate-800">{r.particulars}</div>
+                      {r.narration && r.narration !== r.particulars && (
+                        <div className="text-[11px] text-slate-500">{r.narration}</div>
+                      )}
+                    </td>
+                    <td className="p-2 font-sans text-slate-700">{r.voucherType}</td>
+                    <td className="p-2">{r.voucherNo || '-'}</td>
+                    <td className="p-2 text-right">{r.debit > 0 ? formatINR(r.debit) : '-'}</td>
+                    <td className="p-2 text-right">{r.credit > 0 ? formatINR(r.credit) : '-'}</td>
+                    <td className="p-2 text-right font-bold text-slate-900 whitespace-nowrap">
+                      {formatINR(r.runningBalance)} {r.runningSide}
+                    </td>
+                  </tr>
+                ))
+              )}
+            </tbody>
+          </table>
+        </div>
+      </div>
+    );
+  };
+
   const handlePartyMasterAction = async (
-    action: 'preview' | 'print' | 'download' | 'share'
+    action: 'preview' | 'print' | 'download' | 'whatsapp' | 'email'
   ) => {
     const pdf = await generateFoxproStatementPDF(
       {
@@ -1737,11 +2105,13 @@ const MasterModuleInner: React.FC<MasterModuleProps> = ({
       onPreviewPdf(pdf, 'Reports_Ledgers');
     } else if (action === 'print') {
       printPdfDirect(pdf);
-    } else if (action === 'share') {
+    } else if (action === 'whatsapp' || action === 'email') {
       const shareRes = await sharePdfDirect({
         pdf,
-        channel: 'whatsapp',
-        partyName: pName || 'Party Master Register',
+        channel: action,
+        phone: selectedPartyObj?.phone || pPhone || undefined,
+        email: selectedPartyObj?.email || pEmail || undefined,
+        partyName: selectedPartyObj?.name || pName || 'Party Master Register',
         docNo: activeFy,
         docLabel: 'Party Master Register',
         company: effectiveCompany,
@@ -1754,19 +2124,42 @@ const MasterModuleInner: React.FC<MasterModuleProps> = ({
 
   const handleSheetAction = async (
     sheetKind: 'drivers' | 'owners' | 'brokers' | 'vehicles',
-    action: 'preview' | 'print' | 'download' | 'share',
+    action: 'preview' | 'print' | 'download' | 'whatsapp' | 'email',
     singleProfileId?: string
   ) => {
-    const pdf = await buildSheetPdf(sheetKind, singleProfileId);
+    const resolvedSingleId =
+      singleProfileId ||
+      (sheetKind === 'owners'
+        ? pickerOwnerId || editingOwnerId || undefined
+        : sheetKind === 'brokers'
+          ? pickerBrokerId || editingBrokerId || undefined
+          : sheetKind === 'vehicles'
+            ? pickerVehicleId || editingVehicleId || undefined
+            : pickerDriverId || editingDriverId || undefined);
+    const pdf = await buildSheetPdf(sheetKind, resolvedSingleId);
     if (action === 'preview' && onPreviewPdf) {
       onPreviewPdf(pdf, 'Reports_Ledgers');
     } else if (action === 'print') {
       printPdfDirect(pdf);
-    } else if (action === 'share') {
+    } else if (action === 'whatsapp' || action === 'email') {
+      const matchedContact =
+        sheetKind === 'owners'
+          ? ownersList.find((o) => o.id === resolvedSingleId)
+          : sheetKind === 'brokers'
+            ? brokersList.find((b) => b.id === resolvedSingleId)
+            : undefined;
+      const matchedDriver = sheetKind === 'drivers' ? drivers.find((d) => d.id === resolvedSingleId) : undefined;
+      const matchedVehicle = sheetKind === 'vehicles' ? vehicles.find((v) => v.id === resolvedSingleId) : undefined;
       const shareRes = await sharePdfDirect({
         pdf,
-        channel: 'whatsapp',
-        partyName: `DRC ${sheetKind.toUpperCase()} Master`,
+        channel: action,
+        phone: matchedContact?.phone || matchedDriver?.phone || matchedVehicle?.ownerPhone || undefined,
+        email: matchedContact?.email || undefined,
+        partyName:
+          matchedContact?.name ||
+          matchedDriver?.name ||
+          matchedVehicle?.truckNo ||
+          `DRC ${sheetKind.toUpperCase()} Master`,
         docNo: activeFy,
         docLabel: `${sheetKind.toUpperCase()} Master Sheet`,
         company: effectiveCompany,
@@ -1777,71 +2170,101 @@ const MasterModuleInner: React.FC<MasterModuleProps> = ({
     }
   };
 
-  const renderTopRightSheetButtons = (sheetKind: 'drivers' | 'owners' | 'brokers' | 'vehicles') => (
-    <div className="flex flex-wrap items-center gap-1.5">
-      {!readOnly && (
+  const renderTopRightSheetButtons = (sheetKind: 'drivers' | 'owners' | 'brokers' | 'vehicles') => {
+    const kycRole: KycEntityRole =
+      sheetKind === 'owners'
+        ? 'Lorry Owner'
+        : sheetKind === 'brokers'
+          ? 'Broker'
+          : sheetKind === 'vehicles'
+            ? 'Vehicle'
+            : 'Driver';
+    return (
+      <div className="flex flex-wrap items-center gap-1.5">
+        {!readOnly && (
+          <button
+            type="submit"
+            className="inline-flex items-center gap-1 px-2.5 py-1 rounded bg-emerald-500 hover:bg-emerald-400 text-slate-950 text-[11px] font-extrabold cursor-pointer whitespace-nowrap"
+          >
+            <Save className="w-3 h-3" />
+            Save
+          </button>
+        )}
         <button
           type="button"
-          onClick={() => {
-            if (sheetKind === 'owners' && ownersList[0]) loadOwnerForEdit(ownersList[0]);
-            else if (sheetKind === 'brokers' && brokersList[0]) loadBrokerForEdit(brokersList[0]);
-            else if (sheetKind === 'vehicles' && vehicles[0]) loadVehicleForEdit(vehicles[0]);
-            else if (sheetKind === 'drivers' && drivers[0]) loadDriverForEdit(drivers[0]);
-          }}
+          onClick={() => savedListRef.current?.scrollIntoView({ behavior: 'smooth', block: 'start' })}
           className="inline-flex items-center gap-1 px-2 py-1 rounded bg-amber-100 hover:bg-amber-200 text-amber-950 text-[11px] font-bold cursor-pointer whitespace-nowrap"
         >
           <Edit3 className="w-3 h-3" />
-          Rectify
+          Saved List / Rectify
         </button>
-      )}
-      <button
-        type="button"
-        onClick={() => void handleSheetAction(sheetKind, 'preview')}
-        className="inline-flex items-center gap-1 px-2 py-1 rounded bg-white text-[#0D47A1] hover:bg-blue-50 text-[11px] font-bold cursor-pointer whitespace-nowrap"
-      >
-        <Eye className="w-3.5 h-3.5" />
-        Preview
-      </button>
-      <button
-        type="button"
-        onClick={() => {
-          if (onOpenPodScanner) {
-            onOpenPodScanner();
-          } else {
-            kycFileInputRef.current?.click();
-          }
-        }}
-        className="inline-flex items-center gap-1 px-2 py-1 rounded bg-amber-400 hover:bg-amber-300 text-slate-950 text-[11px] font-extrabold cursor-pointer whitespace-nowrap"
-      >
-        <ScanLine className="w-3.5 h-3.5" />
-        Scan
-      </button>
-      <button
-        type="button"
-        onClick={() => void handleSheetAction(sheetKind, 'download')}
-        className="inline-flex items-center gap-1 px-2 py-1 rounded bg-emerald-600 hover:bg-emerald-700 text-white text-[11px] font-bold cursor-pointer whitespace-nowrap"
-      >
-        <Download className="w-3.5 h-3.5" />
-        Low-KB PDF
-      </button>
-      <button
-        type="button"
-        onClick={() => void handleSheetAction(sheetKind, 'print')}
-        className="inline-flex items-center gap-1 px-2 py-1 rounded bg-white/15 hover:bg-white/25 text-white text-[11px] font-bold cursor-pointer whitespace-nowrap"
-      >
-        <Printer className="w-3.5 h-3.5" />
-        Manual Print
-      </button>
-      <button
-        type="button"
-        onClick={() => void handleSheetAction(sheetKind, 'share')}
-        className="inline-flex items-center gap-1 px-2 py-1 rounded bg-green-600 hover:bg-green-700 text-white text-[11px] font-bold cursor-pointer whitespace-nowrap"
-      >
-        <Share2 className="w-3.5 h-3.5" />
-        Share
-      </button>
-    </div>
-  );
+        <button
+          type="button"
+          onClick={() => {
+            if (sheetKind === 'owners') resetOwnerForm();
+            else if (sheetKind === 'brokers') resetBrokerForm();
+            else if (sheetKind === 'vehicles') resetVehicleForm();
+            else resetDriverForm();
+          }}
+          className="inline-flex items-center gap-1 px-2 py-1 rounded bg-white/15 hover:bg-white/25 text-white text-[11px] font-bold cursor-pointer whitespace-nowrap"
+        >
+          <RotateCcw className="w-3 h-3" />
+          Clear / Skip
+        </button>
+        <button
+          type="button"
+          onClick={() => void handleSheetAction(sheetKind, 'preview')}
+          className="inline-flex items-center gap-1 px-2 py-1 rounded bg-white text-[#0D47A1] hover:bg-blue-50 text-[11px] font-bold cursor-pointer whitespace-nowrap"
+        >
+          <Eye className="w-3.5 h-3.5" />
+          Preview
+        </button>
+        <button
+          type="button"
+          onClick={() => void handleSheetAction(sheetKind, 'download')}
+          className="inline-flex items-center gap-1 px-2 py-1 rounded bg-emerald-600 hover:bg-emerald-700 text-white text-[11px] font-bold cursor-pointer whitespace-nowrap"
+        >
+          <Download className="w-3.5 h-3.5" />
+          Low-KB PDF (100-350 KB)
+        </button>
+        <button
+          type="button"
+          onClick={() => void handleSheetAction(sheetKind, 'print')}
+          className="inline-flex items-center gap-1 px-2 py-1 rounded bg-white/15 hover:bg-white/25 text-white text-[11px] font-bold cursor-pointer whitespace-nowrap"
+        >
+          <Printer className="w-3.5 h-3.5" />
+          Manual Print
+        </button>
+        <button
+          type="button"
+          onClick={() => {
+            setScanStudioRole(kycRole);
+            setScanStudioOpen(true);
+          }}
+          className="inline-flex items-center gap-1 px-2 py-1 rounded bg-amber-400 hover:bg-amber-300 text-slate-950 text-[11px] font-extrabold cursor-pointer whitespace-nowrap"
+        >
+          <ScanLine className="w-3.5 h-3.5" />
+          Interactive Scan Studio
+        </button>
+        <button
+          type="button"
+          onClick={() => void handleSheetAction(sheetKind, 'whatsapp')}
+          className="inline-flex items-center gap-1 px-2 py-1 rounded bg-green-600 hover:bg-green-700 text-white text-[11px] font-bold cursor-pointer whitespace-nowrap"
+        >
+          <MessageSquare className="w-3.5 h-3.5" />
+          WhatsApp PDF
+        </button>
+        <button
+          type="button"
+          onClick={() => void handleSheetAction(sheetKind, 'email')}
+          className="inline-flex items-center gap-1 px-2 py-1 rounded bg-indigo-600 hover:bg-indigo-700 text-white text-[11px] font-bold cursor-pointer whitespace-nowrap"
+        >
+          <Mail className="w-3.5 h-3.5" />
+          Email PDF
+        </button>
+      </div>
+    );
+  };
 
   const partyColumns = useMemo<Array<TableColumn<Party>>>(
     () => [
@@ -1940,7 +2363,24 @@ const MasterModuleInner: React.FC<MasterModuleProps> = ({
 
   const ownerColumns = useMemo<Array<TableColumn<Party>>>(
     () => [
-      { key: 'name', header: 'Lorry Owner Name', cellClassName: 'font-bold text-blue-900', render: (o) => o.name },
+      {
+        key: 'name',
+        header: '1st / 2nd Owner & Deed',
+        cellClassName: 'font-bold text-blue-900',
+        render: (o) => (
+          <div>
+            <div>{o.firstOwnerName || o.name}</div>
+            {o.secondOwnerName && (
+              <div className="text-[11px] font-semibold text-slate-600">2nd: {o.secondOwnerName}</div>
+            )}
+            {(o.deedNo || o.deedDate) && (
+              <div className="text-[10px] font-mono-num text-amber-800">
+                Deed: {o.deedNo || '-'}{o.deedDate ? ` · ${formatDateDDMMYYYY(o.deedDate)}` : ''}
+              </div>
+            )}
+          </div>
+        ),
+      },
       { key: 'phone', header: 'Phone', cellClassName: 'font-mono-num', render: (o) => o.phone || '-' },
       {
         key: 'kyc',
@@ -2565,6 +3005,13 @@ const MasterModuleInner: React.FC<MasterModuleProps> = ({
                         }`}
                   </button>
                 )}
+                <button
+                  type="button"
+                  onClick={resetPartyForm}
+                  className="inline-flex items-center gap-1 px-2.5 py-1 rounded border border-slate-300 bg-white hover:bg-red-50 text-slate-700 hover:text-red-700 text-[11px] font-bold cursor-pointer"
+                >
+                  <RotateCcw className="w-3 h-3" /> Clear / Skip
+                </button>
                 {!readOnly && (
                   <button
                     type="button"
@@ -2699,15 +3146,28 @@ const MasterModuleInner: React.FC<MasterModuleProps> = ({
                   <ShieldCheck className="w-3.5 h-3.5 text-emerald-300" />
                   {Math.max(0, parties.length - contactHealth.length)} Verified
                 </span>
-                {!readOnly && parties[0] && (
+                {!readOnly && (
                   <button
-                    type="button"
-                    onClick={() => loadPartyForEdit(parties[0])}
-                    className="inline-flex items-center gap-1 px-2 py-1 rounded bg-amber-100 hover:bg-amber-200 text-amber-950 font-bold cursor-pointer"
+                    type="submit"
+                    className="inline-flex items-center gap-1 px-2.5 py-1 rounded bg-emerald-500 hover:bg-emerald-400 text-slate-950 font-extrabold cursor-pointer"
                   >
-                    <Edit3 className="w-3 h-3" /> Rectify
+                    <Save className="w-3 h-3" /> Save
                   </button>
                 )}
+                <button
+                  type="button"
+                  onClick={() => savedListRef.current?.scrollIntoView({ behavior: 'smooth', block: 'start' })}
+                  className="inline-flex items-center gap-1 px-2 py-1 rounded bg-amber-100 hover:bg-amber-200 text-amber-950 font-bold cursor-pointer"
+                >
+                  <Edit3 className="w-3 h-3" /> Saved List / Rectify
+                </button>
+                <button
+                  type="button"
+                  onClick={resetPartyForm}
+                  className="inline-flex items-center gap-1 px-2 py-1 rounded bg-white/15 hover:bg-white/25 text-white font-bold cursor-pointer"
+                >
+                  <RotateCcw className="w-3 h-3" /> Clear / Skip
+                </button>
                 <button
                   type="button"
                   onClick={() => void handlePartyMasterAction('preview')}
@@ -2715,21 +3175,12 @@ const MasterModuleInner: React.FC<MasterModuleProps> = ({
                 >
                   <Eye className="w-3 h-3" /> Preview
                 </button>
-                {onOpenPodScanner && (
-                  <button
-                    type="button"
-                    onClick={onOpenPodScanner}
-                    className="inline-flex items-center gap-1 px-2 py-1 rounded bg-amber-400 hover:bg-amber-300 text-slate-950 font-extrabold cursor-pointer"
-                  >
-                    <ScanLine className="w-3 h-3" /> Scan
-                  </button>
-                )}
                 <button
                   type="button"
                   onClick={() => void handlePartyMasterAction('download')}
                   className="inline-flex items-center gap-1 px-2 py-1 rounded bg-emerald-600 hover:bg-emerald-700 text-white font-bold cursor-pointer"
                 >
-                  <Download className="w-3 h-3" /> Low-KB PDF
+                  <Download className="w-3 h-3" /> Low-KB PDF (100-350 KB)
                 </button>
                 <button
                   type="button"
@@ -2740,10 +3191,27 @@ const MasterModuleInner: React.FC<MasterModuleProps> = ({
                 </button>
                 <button
                   type="button"
-                  onClick={() => void handlePartyMasterAction('share')}
+                  onClick={() => {
+                    setScanStudioRole('Party');
+                    setScanStudioOpen(true);
+                  }}
+                  className="inline-flex items-center gap-1 px-2 py-1 rounded bg-amber-400 hover:bg-amber-300 text-slate-950 font-extrabold cursor-pointer"
+                >
+                  <ScanLine className="w-3 h-3" /> Interactive Scan Studio
+                </button>
+                <button
+                  type="button"
+                  onClick={() => void handlePartyMasterAction('whatsapp')}
                   className="inline-flex items-center gap-1 px-2 py-1 rounded bg-green-600 hover:bg-green-700 text-white font-bold cursor-pointer"
                 >
-                  <Share2 className="w-3 h-3" /> Share
+                  <MessageSquare className="w-3 h-3" /> WhatsApp PDF
+                </button>
+                <button
+                  type="button"
+                  onClick={() => void handlePartyMasterAction('email')}
+                  className="inline-flex items-center gap-1 px-2 py-1 rounded bg-indigo-600 hover:bg-indigo-700 text-white font-bold cursor-pointer"
+                >
+                  <Mail className="w-3 h-3" /> Email PDF
                 </button>
               </div>
             </div>
@@ -2982,7 +3450,9 @@ const MasterModuleInner: React.FC<MasterModuleProps> = ({
             </div>
           </form>
 
-          <div className="bg-white rounded-xl border border-slate-200 shadow-sm overflow-hidden">
+          {renderActiveRoleTallyLedgerPanel('Party / Customer')}
+
+          <div ref={savedListRef} className="bg-white rounded-xl border border-slate-200 shadow-sm overflow-hidden">
             <PaginatedDataTable
               data={filteredParties}
               columns={partyColumns}
@@ -3004,13 +3474,22 @@ const MasterModuleInner: React.FC<MasterModuleProps> = ({
                 Select Lorry Owner from Dropdown or Type to Search ({ownersList.length})
               </span>
               {!readOnly && (
-                <button
-                  type="button"
-                  onClick={resetOwnerForm}
-                  className="inline-flex items-center gap-1 px-2.5 py-1 rounded bg-blue-700 hover:bg-blue-800 text-white text-[11px] font-bold cursor-pointer"
-                >
-                  <Plus className="w-3 h-3" /> Add New Lorry Owner
-                </button>
+                <div className="flex items-center gap-1.5">
+                  <button
+                    type="button"
+                    onClick={resetOwnerForm}
+                    className="inline-flex items-center gap-1 px-2.5 py-1 rounded border border-slate-300 bg-white hover:bg-red-50 text-slate-700 hover:text-red-700 text-[11px] font-bold cursor-pointer"
+                  >
+                    <RotateCcw className="w-3 h-3" /> Clear / Skip
+                  </button>
+                  <button
+                    type="button"
+                    onClick={resetOwnerForm}
+                    className="inline-flex items-center gap-1 px-2.5 py-1 rounded bg-blue-700 hover:bg-blue-800 text-white text-[11px] font-bold cursor-pointer"
+                  >
+                    <Plus className="w-3 h-3" /> Add New Lorry Owner
+                  </button>
+                </div>
               )}
             </div>
             <RichEntityPicker<Party>
@@ -3026,14 +3505,16 @@ const MasterModuleInner: React.FC<MasterModuleProps> = ({
               getId={(o) => o.id}
               getValue={(o) => o.name}
               getSearchText={(o) =>
-                `${o.name} ${o.pan || ''} ${o.phone || ''} ${o.address || ''}`
+                `${o.name} ${o.firstOwnerName || ''} ${o.secondOwnerName || ''} ${o.deedNo || ''} ${o.pan || ''} ${o.phone || ''} ${o.address || ''}`
               }
-              renderTitle={(o) => o.name}
+              renderTitle={(o) =>
+                o.secondOwnerName ? `${o.firstOwnerName || o.name} & ${o.secondOwnerName}` : o.name
+              }
               renderDetails={(o) =>
-                `PAN: ${o.pan || '-'} | Mob: ${o.phone || '-'} | City: ${extractCityFromAddress(o.address)}`
+                `PAN: ${o.pan || '-'} | Mob: ${o.phone || '-'}${o.deedNo ? ` | Deed: ${o.deedNo}` : ''} | City: ${extractCityFromAddress(o.address)}`
               }
               renderBadge={(o) => (o.bankAccountNo ? 'Bank KYC' : 'Owner')}
-              placeholder="Click to browse Lorry Owners or type Name / PAN / Mobile / City..."
+              placeholder="Click to browse Lorry Owners or type Name / Deed No / PAN / Mobile..."
               quickPreview={
                 pickerOwnerId ? (
                   <EntityQuickPreviewCard
@@ -3051,7 +3532,7 @@ const MasterModuleInner: React.FC<MasterModuleProps> = ({
           >
             <div className="bg-gradient-to-r from-[#0D47A1] to-[#1976D2] text-white px-4 py-2.5 flex flex-wrap items-center justify-between gap-2">
               <span className="text-sm font-bold">
-                {editingOwnerId ? `Edit Lorry Owner: ${oName}` : `Lorry Owner Master & KYC Sheet (${filteredOwners.length})`}
+                {editingOwnerId ? `Edit Lorry Owner: ${oFirstOwner || oName}` : `Lorry Owner Master & KYC Sheet (${filteredOwners.length})`}
               </span>
               {renderTopRightSheetButtons('owners')}
             </div>
@@ -3074,13 +3555,46 @@ const MasterModuleInner: React.FC<MasterModuleProps> = ({
             <fieldset disabled={readOnly || blockLocks.owners} className="contents">
             <div className="p-4 grid grid-cols-1 md:grid-cols-4 gap-3 text-xs">
               <div>
-                <label className="block font-semibold text-slate-700 mb-1">Owner Name *</label>
+                <label className="block font-semibold text-slate-700 mb-1">1st Owner Name *</label>
                 <input
                   type="text"
                   required
-                  value={oName}
-                  onChange={(e) => setOName(e.target.value)}
+                  value={oFirstOwner || oName}
+                  onChange={(e) => {
+                    setOFirstOwner(e.target.value);
+                    setOName(e.target.value);
+                  }}
+                  placeholder="Primary Lorry Owner Name"
                   className="w-full px-2.5 py-1.5 rounded border border-slate-300"
+                />
+              </div>
+              <div>
+                <label className="block font-semibold text-slate-700 mb-1">2nd Owner Name (Optional)</label>
+                <input
+                  type="text"
+                  value={oSecondOwner}
+                  onChange={(e) => setOSecondOwner(e.target.value)}
+                  placeholder="Co-owner / Partner Name"
+                  className="w-full px-2.5 py-1.5 rounded border border-slate-300"
+                />
+              </div>
+              <div>
+                <label className="block font-semibold text-slate-700 mb-1">Deed No (Optional)</label>
+                <input
+                  type="text"
+                  value={oDeedNo}
+                  onChange={(e) => setODeedNo(e.target.value.toUpperCase())}
+                  placeholder="Partnership / Sale Deed No"
+                  className="w-full px-2.5 py-1.5 rounded border border-slate-300 font-mono-num uppercase"
+                />
+              </div>
+              <div>
+                <label className="block font-semibold text-slate-700 mb-1">Deed Date (Optional)</label>
+                <input
+                  type="date"
+                  value={oDeedDate}
+                  onChange={(e) => setODeedDate(e.target.value)}
+                  className="w-full px-2.5 py-1.5 rounded border border-slate-300 font-mono-num"
                 />
               </div>
               <div>
@@ -3201,7 +3715,9 @@ const MasterModuleInner: React.FC<MasterModuleProps> = ({
             </fieldset>
           </form>
 
-          <div className="bg-white rounded-xl border border-slate-200 shadow-sm overflow-hidden">
+          {renderActiveRoleTallyLedgerPanel('Lorry Owner')}
+
+          <div ref={savedListRef} className="bg-white rounded-xl border border-slate-200 shadow-sm overflow-hidden">
             <PaginatedDataTable
               data={filteredOwners}
               columns={ownerColumns}
@@ -3223,13 +3739,22 @@ const MasterModuleInner: React.FC<MasterModuleProps> = ({
                 Select Broker from Dropdown or Type to Search ({brokersList.length})
               </span>
               {!readOnly && (
-                <button
-                  type="button"
-                  onClick={resetBrokerForm}
-                  className="inline-flex items-center gap-1 px-2.5 py-1 rounded bg-blue-700 hover:bg-blue-800 text-white text-[11px] font-bold cursor-pointer"
-                >
-                  <Plus className="w-3 h-3" /> Add New Broker
-                </button>
+                <div className="flex items-center gap-1.5">
+                  <button
+                    type="button"
+                    onClick={resetBrokerForm}
+                    className="inline-flex items-center gap-1 px-2.5 py-1 rounded border border-slate-300 bg-white hover:bg-red-50 text-slate-700 hover:text-red-700 text-[11px] font-bold cursor-pointer"
+                  >
+                    <RotateCcw className="w-3 h-3" /> Clear / Skip
+                  </button>
+                  <button
+                    type="button"
+                    onClick={resetBrokerForm}
+                    className="inline-flex items-center gap-1 px-2.5 py-1 rounded bg-blue-700 hover:bg-blue-800 text-white text-[11px] font-bold cursor-pointer"
+                  >
+                    <Plus className="w-3 h-3" /> Add New Broker
+                  </button>
+                </div>
               )}
             </div>
             <RichEntityPicker<Party>
@@ -3433,7 +3958,9 @@ const MasterModuleInner: React.FC<MasterModuleProps> = ({
             </fieldset>
           </form>
 
-          <div className="bg-white rounded-xl border border-slate-200 shadow-sm overflow-hidden">
+          {renderActiveRoleTallyLedgerPanel('Broker')}
+
+          <div ref={savedListRef} className="bg-white rounded-xl border border-slate-200 shadow-sm overflow-hidden">
             <PaginatedDataTable
               data={filteredBrokers}
               columns={brokerColumns}
@@ -3455,13 +3982,22 @@ const MasterModuleInner: React.FC<MasterModuleProps> = ({
                 Select Lorry from Dropdown or Type to Search ({vehicles.length})
               </span>
               {!readOnly && (
-                <button
-                  type="button"
-                  onClick={resetVehicleForm}
-                  className="inline-flex items-center gap-1 px-2.5 py-1 rounded bg-blue-700 hover:bg-blue-800 text-white text-[11px] font-bold cursor-pointer"
-                >
-                  <Plus className="w-3 h-3" /> Add New Lorry
-                </button>
+                <div className="flex items-center gap-1.5">
+                  <button
+                    type="button"
+                    onClick={resetVehicleForm}
+                    className="inline-flex items-center gap-1 px-2.5 py-1 rounded border border-slate-300 bg-white hover:bg-red-50 text-slate-700 hover:text-red-700 text-[11px] font-bold cursor-pointer"
+                  >
+                    <RotateCcw className="w-3 h-3" /> Clear / Skip
+                  </button>
+                  <button
+                    type="button"
+                    onClick={resetVehicleForm}
+                    className="inline-flex items-center gap-1 px-2.5 py-1 rounded bg-blue-700 hover:bg-blue-800 text-white text-[11px] font-bold cursor-pointer"
+                  >
+                    <Plus className="w-3 h-3" /> Add New Lorry
+                  </button>
+                </div>
               )}
             </div>
             <RichEntityPicker<Vehicle>
@@ -3701,7 +4237,9 @@ const MasterModuleInner: React.FC<MasterModuleProps> = ({
             </fieldset>
           </form>
 
-          <div className="bg-white rounded-xl border border-slate-200 shadow-sm overflow-hidden">
+          {renderActiveRoleTallyLedgerPanel('Vehicle / Truck')}
+
+          <div ref={savedListRef} className="bg-white rounded-xl border border-slate-200 shadow-sm overflow-hidden">
             <PaginatedDataTable
               data={filteredVehicles}
               columns={vehicleColumns}
@@ -3723,13 +4261,22 @@ const MasterModuleInner: React.FC<MasterModuleProps> = ({
                 Select Driver from Dropdown or Type to Search ({drivers.length})
               </span>
               {!readOnly && (
-                <button
-                  type="button"
-                  onClick={resetDriverForm}
-                  className="inline-flex items-center gap-1 px-2.5 py-1 rounded bg-blue-700 hover:bg-blue-800 text-white text-[11px] font-bold cursor-pointer"
-                >
-                  <Plus className="w-3 h-3" /> Add New Driver
-                </button>
+                <div className="flex items-center gap-1.5">
+                  <button
+                    type="button"
+                    onClick={resetDriverForm}
+                    className="inline-flex items-center gap-1 px-2.5 py-1 rounded border border-slate-300 bg-white hover:bg-red-50 text-slate-700 hover:text-red-700 text-[11px] font-bold cursor-pointer"
+                  >
+                    <RotateCcw className="w-3 h-3" /> Clear / Skip
+                  </button>
+                  <button
+                    type="button"
+                    onClick={resetDriverForm}
+                    className="inline-flex items-center gap-1 px-2.5 py-1 rounded bg-blue-700 hover:bg-blue-800 text-white text-[11px] font-bold cursor-pointer"
+                  >
+                    <Plus className="w-3 h-3" /> Add New Driver
+                  </button>
+                </div>
               )}
             </div>
             <RichEntityPicker<Driver>
@@ -3922,7 +4469,9 @@ const MasterModuleInner: React.FC<MasterModuleProps> = ({
             </fieldset>
           </form>
 
-          <div className="bg-white rounded-xl border border-slate-200 shadow-sm overflow-hidden">
+          {renderActiveRoleTallyLedgerPanel('Driver')}
+
+          <div ref={savedListRef} className="bg-white rounded-xl border border-slate-200 shadow-sm overflow-hidden">
             <PaginatedDataTable
               data={filteredDrivers}
               columns={driverColumns}
@@ -3933,6 +4482,52 @@ const MasterModuleInner: React.FC<MasterModuleProps> = ({
           </div>
         </div>
       )}
+
+      <CameraPodQrScannerModal
+        open={scanStudioOpen}
+        mode="both"
+        title={`Interactive Scan Studio — ${scanStudioRole} KYC & Document OCR`}
+        onClose={() => setScanStudioOpen(false)}
+        onCapturePodImage={(dataUrl, fileName) => {
+          const file = dataUrlToFile(dataUrl, fileName || `kyc-scan-${Date.now()}.jpg`);
+          if (!file) return;
+          if (scanStudioRole === 'Party') {
+            setKycScanning(true);
+            void extractKycFieldsFromDocument({
+              fileOrDataUrl: dataUrl,
+              entityRole: 'Broker',
+              onStatus: (m) => setKycScanStatus(m),
+              allowOnlineAi: Boolean(company?.backgroundAiEnabled),
+            })
+              .then((ext) => {
+                if (ext.name && !pName.trim()) setPName(ext.name.trim());
+                if (ext.gstin) {
+                  setPGstin(ext.gstin.trim().toUpperCase());
+                  const inf = inferGstStateCodeAndName({ gstin: ext.gstin, address: pAddr });
+                  if (inf.code) {
+                    setPStateCode(inf.code);
+                    setPStateName(inf.name);
+                  }
+                }
+                if (ext.panNo) setPPan(ext.panNo.trim().toUpperCase());
+                if (ext.phone) setPPhone(ext.phone.trim());
+                if (ext.address) setPAddr(ext.address.trim());
+                if (ext.pinCode) setPPinCode(ext.pinCode.trim());
+                setStatusMsg('Party KYC / GST document scanned cleanly via Interactive Scan Studio.');
+              })
+              .catch(() => setStatusMsg('Captured document image in Interactive Scan Studio.'))
+              .finally(() => setKycScanning(false));
+          } else {
+            void handleScanKycDocument(file, scanStudioRole, 'Interactive Scan Studio');
+          }
+        }}
+        onQrDecoded={(parsed) => {
+          if (parsed.vehicleNo && tab === 'vehicles' && !vTruck.trim()) {
+            setVTruck(parsed.vehicleNo);
+          }
+          setStatusMsg(`QR Verified inside Scan Studio: ${parsed.summary}`);
+        }}
+      />
     </div>
   );
 };

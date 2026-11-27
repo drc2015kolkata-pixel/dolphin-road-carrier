@@ -4,6 +4,7 @@ import { ParsedQrPayload, parseQrOrEwbPayload } from '../lib/ewayBillUtils';
 import { autoRotateAndCompressImage, rotateDataUrlDegrees } from '../lib/ocrEngine';
 import { validateSafeUploadFile } from '../lib/gstinValidator';
 import { playAlertBeep } from '../lib/audioFeedback';
+import { openCameraStreamWithFallback, stopMediaStream } from '../lib/cameraHelper';
 
 interface CameraPodQrScannerModalProps {
   open: boolean;
@@ -65,13 +66,7 @@ export const CameraPodQrScannerModal: React.FC<CameraPodQrScannerModalProps> = (
       scanTimerRef.current = null;
     }
     if (streamRef.current) {
-      streamRef.current.getTracks().forEach((t) => {
-        try {
-          t.stop();
-        } catch {
-          // ignore
-        }
-      });
+      stopMediaStream(streamRef.current);
       streamRef.current = null;
     }
     if (videoRef.current) {
@@ -96,10 +91,7 @@ export const CameraPodQrScannerModal: React.FC<CameraPodQrScannerModalProps> = (
       return;
     }
     try {
-      const stream = await navigator.mediaDevices.getUserMedia({
-        video: { facingMode: { ideal: 'environment' }, width: { ideal: 1280 }, height: { ideal: 720 } },
-        audio: false,
-      });
+      const { stream } = await openCameraStreamWithFallback();
       streamRef.current = stream;
       if (videoRef.current) {
         videoRef.current.srcObject = stream;

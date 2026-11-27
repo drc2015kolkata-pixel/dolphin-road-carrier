@@ -196,6 +196,8 @@ const LorryHirePodModuleInner: React.FC<LorryHirePodModuleProps> = ({
   const [showCommissionLedger, setShowCommissionLedger] = useState(false);
   const podFileRef = useRef<HTMLInputElement | null>(null);
   const podCamRef = useRef<HTMLInputElement | null>(null);
+  const savedRegisterRef = useRef<HTMLDivElement | null>(null);
+  const [directHireSearch, setDirectHireSearch] = useState('');
 
   const effectiveCompany: CompanySettings = useMemo(
     () =>
@@ -1416,6 +1418,86 @@ const LorryHirePodModuleInner: React.FC<LorryHirePodModuleProps> = ({
           </div>
         </div>
 
+        {/* Direct CN / Truck Auto-Load & Clear / Skip Bar */}
+        <div className="px-4 py-2 bg-slate-100 border-b border-slate-200 flex flex-wrap items-center justify-between gap-2 text-xs">
+          <div className="flex flex-wrap items-center gap-2">
+            <span className="font-bold text-[#0D47A1]">Find / Load Lorry Hire (CN / Truck):</span>
+            <input
+              type="text"
+              value={directHireSearch}
+              onChange={(e) => setDirectHireSearch(e.target.value.toUpperCase())}
+              onKeyDown={(e) => {
+                if (e.key === 'Enter') {
+                  e.preventDefault();
+                  const q = directHireSearch.trim().toLowerCase();
+                  if (!q) return;
+                  const match = lorryHires.find(
+                    (h) =>
+                      (h.cnNo || '').toLowerCase() === q ||
+                      (h.truckNo || '').toLowerCase() === q ||
+                      (h.cnNo || '').toLowerCase().includes(q)
+                  );
+                  if (match) {
+                    handleLoadForEdit(match);
+                    setFormError(null);
+                  } else {
+                    setFormError(`No saved Lorry Hire found for "${directHireSearch}".`);
+                  }
+                }
+              }}
+              placeholder="Enter C/N No or Truck No..."
+              className="px-2.5 py-1 rounded border border-slate-300 bg-white font-mono-num text-xs w-52"
+            />
+            <button
+              type="button"
+              onClick={() => {
+                const q = directHireSearch.trim().toLowerCase();
+                if (!q) return;
+                const match = lorryHires.find(
+                  (h) =>
+                    (h.cnNo || '').toLowerCase() === q ||
+                    (h.truckNo || '').toLowerCase() === q ||
+                    (h.cnNo || '').toLowerCase().includes(q)
+                );
+                if (match) {
+                  handleLoadForEdit(match);
+                  setFormError(null);
+                } else {
+                  setFormError(`No saved Lorry Hire found for "${directHireSearch}".`);
+                }
+              }}
+              className="inline-flex items-center gap-1 px-2.5 py-1 rounded bg-[#0D47A1] hover:bg-blue-900 text-white font-bold cursor-pointer"
+            >
+              <Search className="w-3 h-3" />
+              Load Trip
+            </button>
+          </div>
+          <div className="flex flex-wrap items-center gap-2">
+            <button
+              type="button"
+              onClick={() =>
+                savedRegisterRef.current?.scrollIntoView({ behavior: 'smooth', block: 'start' })
+              }
+              className="inline-flex items-center gap-1 px-2.5 py-1 rounded border border-slate-300 bg-white hover:bg-slate-50 text-slate-800 font-bold cursor-pointer"
+            >
+              <Edit3 className="w-3 h-3 text-amber-700" />
+              Saved List / Rectify ({filteredHires.length})
+            </button>
+            <button
+              type="button"
+              onClick={() => {
+                setDirectHireSearch('');
+                setFormError(null);
+                resetForm();
+              }}
+              className="inline-flex items-center gap-1 px-2.5 py-1 rounded border border-slate-300 bg-white hover:bg-red-50 text-slate-700 hover:text-red-700 font-bold cursor-pointer"
+            >
+              <RotateCcw className="w-3 h-3" />
+              Clear / Skip
+            </button>
+          </div>
+        </div>
+
         <div className="p-4 space-y-4 text-xs">
           {/* Trip & Pkgs Reconciliation */}
           <div className="grid grid-cols-1 md:grid-cols-4 gap-3">
@@ -2256,52 +2338,62 @@ const LorryHirePodModuleInner: React.FC<LorryHirePodModuleProps> = ({
         </div>
 
         <div className="px-4 py-3 bg-slate-50 border-t border-slate-200 flex flex-wrap items-center justify-end gap-2">
-          {filteredHires.length > 0 && !editingHireId && (
-            <button
-              type="button"
-              disabled={readOnly}
-              onClick={() => {
-                const target = filteredHires.find((x) => !x.balancePaid) || filteredHires[0];
-                if (target) handleLoadForEdit(target);
-              }}
-              className="inline-flex items-center gap-1 px-2.5 py-1.5 rounded-md bg-amber-50 border border-amber-300 hover:bg-amber-100 text-amber-900 text-xs font-bold cursor-pointer disabled:opacity-40"
-              title="Reload latest Lorry Hire into form for Rectification"
-            >
-              <Edit3 className="w-3.5 h-3.5" />
-              Rectify Last
-            </button>
-          )}
+          <button
+            type="button"
+            onClick={() => {
+              setDirectHireSearch('');
+              setFormError(null);
+              resetForm();
+            }}
+            className="inline-flex items-center gap-1 px-2.5 py-1.5 rounded-md border border-slate-300 bg-white hover:bg-red-50 text-slate-700 hover:text-red-700 text-xs font-bold cursor-pointer"
+            title="Clear form / skip to fresh Lorry Hire"
+          >
+            <RotateCcw className="w-3.5 h-3.5" />
+            Clear / Skip
+          </button>
+          <button
+            type="button"
+            onClick={() =>
+              savedRegisterRef.current?.scrollIntoView({ behavior: 'smooth', block: 'start' })
+            }
+            className="inline-flex items-center gap-1 px-2.5 py-1.5 rounded-md bg-amber-50 border border-amber-300 hover:bg-amber-100 text-amber-900 text-xs font-bold cursor-pointer"
+            title="Jump to Saved Lorry Hire list to Rectify"
+          >
+            <Edit3 className="w-3.5 h-3.5" />
+            Saved List / Rectify
+          </button>
           <button
             type="button"
             onClick={() => {
               const target =
                 (editingHireId && lorryHires.find((x) => x.id === editingHireId)) ||
                 filteredHires[0];
-              if (!target) return;
-              setActivePodTarget(target);
-              setPodTruckNo(target.truckNo || '');
-              setPodDate(target.podReceiveDate || todayISO());
-              setPodBookedPkgs(target.bookedPkgs != null ? String(target.bookedPkgs) : '');
-              setPodDeliveredPkgs(
-                target.deliveredPkgs != null
-                  ? String(target.deliveredPkgs)
-                  : target.bookedPkgs != null
-                    ? String(target.bookedPkgs)
-                    : ''
-              );
-              setPodShortageCharge(String(target.shortageCharge ?? 0));
-              setPodDamageCharge(String(target.damageCharge ?? 0));
-              setPodRemarks(target.podRemarks || '');
-              setPodShortageAlert(false);
-              setPodImageUrl(target.podImageDataUrl || '');
-              setPodFileName(target.podFileName || '');
-              setPodScanStatus(null);
+              if (target) {
+                setActivePodTarget(target);
+                setPodTruckNo(target.truckNo || '');
+                setPodDate(target.podReceiveDate || todayISO());
+                setPodBookedPkgs(target.bookedPkgs != null ? String(target.bookedPkgs) : '');
+                setPodDeliveredPkgs(
+                  target.deliveredPkgs != null
+                    ? String(target.deliveredPkgs)
+                    : target.bookedPkgs != null
+                      ? String(target.bookedPkgs)
+                      : ''
+                );
+                setPodShortageCharge(String(target.shortageCharge ?? 0));
+                setPodDamageCharge(String(target.damageCharge ?? 0));
+                setPodRemarks(target.podRemarks || '');
+                setPodShortageAlert(false);
+                setPodImageUrl(target.podImageDataUrl || '');
+                setPodFileName(target.podFileName || '');
+                setPodScanStatus(null);
+              }
+              setCamScannerOpen(true);
             }}
-            disabled={filteredHires.length === 0 && !editingHireId}
-            className="inline-flex items-center gap-1 px-2.5 py-1.5 rounded-md border border-emerald-300 bg-emerald-50 hover:bg-emerald-100 text-emerald-900 text-xs font-bold cursor-pointer disabled:opacity-40"
+            className="inline-flex items-center gap-1 px-2.5 py-1.5 rounded-md border border-emerald-300 bg-emerald-50 hover:bg-emerald-100 text-emerald-900 text-xs font-bold cursor-pointer"
           >
             <ScanLine className="w-3.5 h-3.5" />
-            Scan POD
+            Interactive Scan Studio
           </button>
           <button
             type="button"
@@ -2323,7 +2415,7 @@ const LorryHirePodModuleInner: React.FC<LorryHirePodModuleProps> = ({
             className="inline-flex items-center gap-1 px-2.5 py-1.5 rounded-md border border-blue-300 bg-blue-50 hover:bg-blue-100 text-blue-900 text-xs font-bold cursor-pointer"
           >
             <Download className="w-3.5 h-3.5" />
-            Low-KB PDF
+            Low-KB PDF (100-350 KB)
           </button>
           <button
             type="button"
@@ -2360,7 +2452,33 @@ const LorryHirePodModuleInner: React.FC<LorryHirePodModuleProps> = ({
             className="inline-flex items-center gap-1 px-2.5 py-1.5 rounded-md bg-emerald-600 hover:bg-emerald-700 text-white text-xs font-bold cursor-pointer"
           >
             <MessageSquare className="w-3.5 h-3.5" />
-            Share WA
+            WhatsApp PDF
+          </button>
+          <button
+            type="button"
+            onClick={async () => {
+              const snap = buildCurrentHireSnapshot();
+              const pdf = await buildHireVoucherPdf(snap);
+              const matchedParty = parties.find(
+                (p) =>
+                  p.name.trim().toLowerCase() === (snap.ownerName || '').trim().toLowerCase() ||
+                  p.name.trim().toLowerCase() === (snap.brokerName || '').trim().toLowerCase()
+              );
+              await sharePdfDirect({
+                pdf,
+                channel: 'email',
+                phone: matchedParty?.phone,
+                email: matchedParty?.email,
+                partyName: snap.ownerName || snap.brokerName || snap.truckNo,
+                docNo: snap.cnNo,
+                docLabel: 'Lorry Hire Challan',
+                company: effectiveCompany,
+              });
+            }}
+            className="inline-flex items-center gap-1 px-2.5 py-1.5 rounded-md bg-indigo-600 hover:bg-indigo-700 text-white text-xs font-bold cursor-pointer"
+          >
+            <Mail className="w-3.5 h-3.5" />
+            Email PDF
           </button>
           <button
             type="submit"
@@ -2378,7 +2496,7 @@ const LorryHirePodModuleInner: React.FC<LorryHirePodModuleProps> = ({
       </form>
 
       {/* Paginated Lorry Hire Register Table */}
-      <div className="bg-white rounded-xl border border-slate-200 shadow-sm overflow-hidden">
+      <div ref={savedRegisterRef} className="bg-white rounded-xl border border-slate-200 shadow-sm overflow-hidden">
         <div className="bg-gradient-to-r from-[#0D47A1] to-[#1976D2] text-white px-4 py-2 flex flex-wrap items-center justify-between gap-2">
           <span className="text-sm font-bold">Lorry Hire Register ({filteredHires.length})</span>
           <div className="flex items-center gap-2">

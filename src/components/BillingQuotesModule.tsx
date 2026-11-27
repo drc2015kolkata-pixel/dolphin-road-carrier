@@ -117,6 +117,8 @@ import {
   loadRawDbfArchiveFromIdb,
 } from '../lib/foxproDbfImport';
 import { buildAutoCreditDebitNoteForRectifiedInvoice } from '../lib/autoCreditDebitNote';
+import { CameraPodQrScannerModal } from './CameraPodQrScannerModal';
+import { dataUrlToFile } from '../lib/cameraHelper';
 
 interface BillingQuotesModuleProps {
   ownerUid: string;
@@ -129,6 +131,7 @@ interface BillingQuotesModuleProps {
   quotationsAccess?: 'edit' | 'view' | 'blocked';
   declarationsAccess?: 'edit' | 'view' | 'blocked';
   initialSubTab?: 'invoice' | 'quotation' | '194c';
+  initialDocKind?: 'Tax Invoice' | 'Credit Note' | 'Debit Note';
   invoices: Invoice[];
   quotations: Quotation[];
   declarations: Declaration194C[];
@@ -181,6 +184,7 @@ const BillingQuotesModuleInner: React.FC<BillingQuotesModuleProps> = ({
   quotationsAccess = 'edit',
   declarationsAccess = 'edit',
   initialSubTab = 'invoice',
+  initialDocKind,
   invoices,
   quotations,
   declarations,
@@ -280,6 +284,9 @@ const BillingQuotesModuleInner: React.FC<BillingQuotesModuleProps> = ({
   const billDateInputRef = useRef<HTMLInputElement | null>(null);
   const remarksInputRef = useRef<HTMLInputElement | null>(null);
   const saveInvBtnRef = useRef<HTMLButtonElement | null>(null);
+  const invoiceListRef = useRef<HTMLDivElement | null>(null);
+  const quoteListRef = useRef<HTMLDivElement | null>(null);
+  const declListRef = useRef<HTMLDivElement | null>(null);
   const invoiceNoDirtyRef = useRef(false);
   const qNoDirtyRef = useRef(false);
   const fyShort = getFyShortCode(activeFy);
@@ -322,15 +329,39 @@ const BillingQuotesModuleInner: React.FC<BillingQuotesModuleProps> = ({
   const [billedAtBranch, setBilledAtBranch] = useState(defaultBranchLabel);
   const [billId, setBillId] = useState(() => String(nextSequentialBillInfo.seqNum));
   const [billedByCode, setBilledByCode] = useState<'B' | 'P'>('B');
-  const [docKind, setDocKind] = useState<'Tax Invoice' | 'Credit Note' | 'Debit Note'>('Tax Invoice');
+  const [docKind, setDocKind] = useState<'Tax Invoice' | 'Credit Note' | 'Debit Note'>(
+    () => initialDocKind || 'Tax Invoice'
+  );
   const [againstInvoiceId, setAgainstInvoiceId] = useState('');
   const [againstInvoiceNo, setAgainstInvoiceNo] = useState('');
+  const [creditDebitReason, setCreditDebitReason] = useState('');
+  const [billingScanStudioOpen, setBillingScanStudioOpen] = useState(false);
+  const [directBillSearch, setDirectBillSearch] = useState('');
+  const [directQuoteSearch, setDirectQuoteSearch] = useState('');
+  const [directDeclSearch, setDirectDeclSearch] = useState('');
   const [poWorkOrderNo, setPoWorkOrderNo] = useState('');
   const [creditDays, setCreditDays] = useState<number>(15);
   const [autoRoundOff, setAutoRoundOff] = useState(true);
   const [narrationText, setNarrationText] = useState('');
   const [narrationCustom, setNarrationCustom] = useState(false);
   const [finalizeBill, setFinalizeBill] = useState(false);
+
+  useEffect(() => {
+    if (!initialDocKind) return;
+    setDocKind(initialDocKind);
+    setSubTab('invoice');
+    if (initialDocKind !== 'Tax Invoice') {
+      invoiceNoDirtyRef.current = false;
+      const code =
+        (billedAtBranch || branchTag).replace(/[^A-Z0-9]/gi, '').slice(0, 3).toUpperCase() ||
+        branchTag;
+      const pref = initialDocKind === 'Credit Note' ? `CRN/${code}` : `DRN/${code}`;
+      const seq = String(100 + invoices.length);
+      setBillId(seq);
+      setInvoiceNo(`${pref}/${seq}/${fyShort}`);
+    }
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [initialDocKind]);
   const [savedFingerprint, setSavedFingerprint] = useState('');
   const [syncCounter, setSyncCounter] = useState(0);
   const [lastSavedInvoiceId, setLastSavedInvoiceId] = useState<string | null>(null);
@@ -762,8 +793,10 @@ const BillingQuotesModuleInner: React.FC<BillingQuotesModuleProps> = ({
         ? `GTA ${effectiveGstRate}% under RCM`
         : `GTA ${effectiveGstRate}% FCM`;
     const refPart = againstInvoiceNo ? ` against Inv ${againstInvoiceNo}` : '';
+    const reasonPart = creditDebitReason.trim() ? ` [${creditDebitReason.trim()}]` : '';
+    const datePart = invoiceDate ? ` Dated ${formatDateDDMMYYYY(invoiceDate)}` : '';
     const poPart = poWorkOrderNo.trim() ? ` | PO/WO: ${poWorkOrderNo.trim()}` : '';
-    return `Being ${docKind} raised on M/s ${partyName.trim() || 'Customer'}${refPart}${cnPart ? ` for CN ${cnPart}${moreText}` : ''} (${gstText}${poPart}).`;
+    return `Being ${docKind} raised on M/s ${partyName.trim() || 'Customer'}${refPart}${cnPart ? ` for CN ${cnPart}${moreText}` : ''}${reasonPart} (${gstText}${poPart})${datePart}.`;
   }, [
     rows,
     isExportCountry,
@@ -771,6 +804,8 @@ const BillingQuotesModuleInner: React.FC<BillingQuotesModuleProps> = ({
     reverseCharge,
     effectiveGstRate,
     againstInvoiceNo,
+    creditDebitReason,
+    invoiceDate,
     poWorkOrderNo,
     docKind,
     partyName,
@@ -1748,6 +1783,8 @@ const BillingQuotesModuleInner: React.FC<BillingQuotesModuleProps> = ({
     setDocKind('Tax Invoice');
     setAgainstInvoiceId('');
     setAgainstInvoiceNo('');
+    setCreditDebitReason('');
+    setDirectBillSearch('');
     setPoWorkOrderNo('');
     setCreditDays(15);
     setAutoRoundOff(true);
@@ -1819,6 +1856,7 @@ const BillingQuotesModuleInner: React.FC<BillingQuotesModuleProps> = ({
     setDocKind(kind);
     setAgainstInvoiceId(inv.againstInvoiceId || '');
     setAgainstInvoiceNo(inv.againstInvoiceNo || '');
+    setCreditDebitReason(inv.creditDebitReason || '');
     setPoWorkOrderNo(inv.poWorkOrderNo || '');
     setCreditDays(Number(inv.creditDays ?? 15));
     setAutoRoundOff(inv.roundOffAmt !== 0);
@@ -1915,6 +1953,7 @@ const BillingQuotesModuleInner: React.FC<BillingQuotesModuleProps> = ({
     setDocKind('Credit Note');
     setAgainstInvoiceId(origInv.id);
     setAgainstInvoiceNo(origInv.invoiceNo);
+    setCreditDebitReason(`Credit reversal against Tax Invoice ${origInv.invoiceNo}`);
     setBillId(String(nextSeq));
     setInvoiceNo(`CRN/${branchPref}/${nextSeq}/${fyShort}`);
     setInvoiceDate(todayISO());
@@ -1923,7 +1962,7 @@ const BillingQuotesModuleInner: React.FC<BillingQuotesModuleProps> = ({
     setFinalizeBill(false);
     setNarrationCustom(false);
     setScanMsg(
-      `Credit Note drafted against ${origInv.invoiceNo}. Click Save to reverse GST & unlock its Bilty/CNs for Re-Billing!`
+      `Credit Note drafted against ${origInv.invoiceNo}. Set date/amount/reason and click Save to reverse GST & unlock Bilty/CNs!`
     );
   };
 
@@ -1942,6 +1981,7 @@ const BillingQuotesModuleInner: React.FC<BillingQuotesModuleProps> = ({
     setDocKind('Debit Note');
     setAgainstInvoiceId(origInv.id);
     setAgainstInvoiceNo(origInv.invoiceNo);
+    setCreditDebitReason(`Supplementary / detention adjustment against Tax Invoice ${origInv.invoiceNo}`);
     setBillId(String(nextSeq));
     setInvoiceNo(`DRN/${branchPref}/${nextSeq}/${fyShort}`);
     setInvoiceDate(todayISO());
@@ -1978,6 +2018,40 @@ const BillingQuotesModuleInner: React.FC<BillingQuotesModuleProps> = ({
     );
   };
 
+  const applyOriginalInvoiceLinkForNote = (origInv: Invoice) => {
+    setAgainstInvoiceId(origInv.id);
+    setAgainstInvoiceNo(origInv.invoiceNo);
+    setPartyName(origInv.partyName || '');
+    const matched = billingCustomerParties.find(
+      (p) => p.name.trim().toLowerCase() === (origInv.partyName || '').trim().toLowerCase()
+    );
+    setSelectedInvPartyId(matched?.id || '');
+    setPartyAddress(origInv.partyAddress || '');
+    setPartyGstin(origInv.partyGstin || '');
+    setPartyPan(origInv.partyPan || '');
+    const ctry = (origInv.billingCountry as 'India' | 'Nepal' | 'Bangladesh' | 'Bhutan') || 'India';
+    setBillingCountry(ctry);
+    const st = resolveGstStateCode(origInv.partyGstin || '', origInv.partyAddress || '', ctry);
+    setPartyStateCode(st.code);
+    setSac(origInv.sac || company.hsn || '996791');
+    setReverseCharge(Boolean(origInv.reverseCharge));
+    setInterstate(Boolean(origInv.interstate));
+    setGstPaidBy((origInv.gstPaidBy as 'Consignee' | 'Consignor' | 'Transporter' | 'Others') || 'Consignee');
+    setGstRate(Number(origInv.gstRate ?? 5));
+    const hasEmptyFirstRow =
+      rows.length === 1 && !rows[0].cnNo && !rows[0].vehicle && Number(rows[0].freight || 0) === 0;
+    if (hasEmptyFirstRow && origInv.consignmentRows && origInv.consignmentRows.length > 0) {
+      setRows(origInv.consignmentRows);
+    }
+    if (!creditDebitReason.trim()) {
+      setCreditDebitReason(
+        `${docKind === 'Credit Note' ? 'Freight/GST Credit Adjustment' : 'Supplementary Freight/Detention'} against ${origInv.invoiceNo}`
+      );
+    }
+    setNarrationCustom(false);
+    setScanMsg(`Linked ${docKind} to original Tax Invoice ${origInv.invoiceNo} (${origInv.partyName}).`);
+  };
+
   const buildInvoiceObject = (overrideNo?: string): Invoice => {
     const settlement = computeSettlementAmounts();
     const matchedStateObj = ALL_INDIA_STATES_DISTRICTS.find((s) => s.code === partyStateCode);
@@ -1992,6 +2066,7 @@ const BillingQuotesModuleInner: React.FC<BillingQuotesModuleProps> = ({
       docKind,
       againstInvoiceId: againstInvoiceId || '',
       againstInvoiceNo: againstInvoiceNo || '',
+      creditDebitReason: creditDebitReason.trim(),
       finalized: finalizeBill,
       roundOffAmt,
       narrationText: effectiveNarration,
@@ -2112,6 +2187,7 @@ const BillingQuotesModuleInner: React.FC<BillingQuotesModuleProps> = ({
           docKind: invObj.docKind || 'Tax Invoice',
           againstInvoiceId: invObj.againstInvoiceId || '',
           againstInvoiceNo: invObj.againstInvoiceNo || '',
+          creditDebitReason: invObj.creditDebitReason || '',
           finalized: Boolean(finalizeBill),
           roundOffAmt: invObj.roundOffAmt ?? 0,
           narrationText: invObj.narrationText || '',
@@ -3441,10 +3517,76 @@ const BillingQuotesModuleInner: React.FC<BillingQuotesModuleProps> = ({
             <div className="bg-gradient-to-r from-[#0D47A1] to-[#1976D2] text-white px-4 py-2.5 flex flex-wrap items-center justify-between gap-2">
               <span className="text-sm font-bold">
                 {editingInvoiceId
-                  ? `Editing Invoice ${invoiceNo} (${billedAtBranch})`
-                  : `Tax Invoice / Bill of Supply Builder (${billedAtBranch}) — Background PDF & Atomic Serials`}
+                  ? `Editing ${docKind} ${invoiceNo} (${billedAtBranch})`
+                  : `${docKind} Builder (${billedAtBranch}) — Background PDF & Atomic Serials`}
               </span>
               <div className="flex flex-wrap items-center gap-2">
+                <div className="flex items-center gap-1 bg-white/10 rounded px-1.5 py-0.5">
+                  <input
+                    type="text"
+                    value={directBillSearch}
+                    onChange={(e) => setDirectBillSearch(e.target.value)}
+                    onKeyDown={(e) => {
+                      if (e.key === 'Enter') {
+                        e.preventDefault();
+                        const q = directBillSearch.trim().toUpperCase();
+                        if (!q) return;
+                        const found =
+                          invoices.find((x) => (x.invoiceNo || '').toUpperCase() === q) ||
+                          invoices.find(
+                            (x) =>
+                              (x.invoiceNo || '').toUpperCase().includes(q) ||
+                              (x.billId || '').toUpperCase() === q ||
+                              (x.partyName || '').toUpperCase().includes(q)
+                          );
+                        if (found) {
+                          handleLoadInvoiceForEdit(found);
+                          playVerifiedBeep();
+                        } else {
+                          playAlertBeep();
+                          setScanMsg(`No Bill / Credit Note found matching "${directBillSearch}".`);
+                        }
+                      }
+                    }}
+                    placeholder="Bill / CRN No Load..."
+                    className="w-32 px-2 py-0.5 rounded bg-white text-slate-900 text-[11px] font-mono-num focus:outline-none"
+                  />
+                  <button
+                    type="button"
+                    onClick={() => {
+                      const q = directBillSearch.trim().toUpperCase();
+                      if (!q) {
+                        invoiceListRef.current?.scrollIntoView({ behavior: 'smooth', block: 'start' });
+                        return;
+                      }
+                      const found =
+                        invoices.find((x) => (x.invoiceNo || '').toUpperCase() === q) ||
+                        invoices.find(
+                          (x) =>
+                            (x.invoiceNo || '').toUpperCase().includes(q) ||
+                            (x.billId || '').toUpperCase() === q ||
+                            (x.partyName || '').toUpperCase().includes(q)
+                        );
+                      if (found) {
+                        handleLoadInvoiceForEdit(found);
+                        playVerifiedBeep();
+                      } else {
+                        playAlertBeep();
+                        setScanMsg(`No Bill / Credit Note found matching "${directBillSearch}".`);
+                      }
+                    }}
+                    className="px-2 py-0.5 rounded bg-amber-300 hover:bg-amber-200 text-slate-950 text-[11px] font-extrabold cursor-pointer"
+                  >
+                    Load
+                  </button>
+                  <button
+                    type="button"
+                    onClick={resetInvoiceForm}
+                    className="px-2 py-0.5 rounded bg-white/20 hover:bg-white/30 text-white text-[11px] font-bold cursor-pointer"
+                  >
+                    Clear / Skip
+                  </button>
+                </div>
                 {editingInvoiceId && (
                   <button
                     type="button"
@@ -3477,11 +3619,11 @@ const BillingQuotesModuleInner: React.FC<BillingQuotesModuleProps> = ({
                 </label>
                 <button
                   type="button"
-                  onClick={() => lrScanRef.current?.click()}
+                  onClick={() => setBillingScanStudioOpen(true)}
                   className="inline-flex items-center gap-1.5 px-3 py-1 rounded bg-emerald-600 hover:bg-emerald-700 text-white text-xs font-bold cursor-pointer whitespace-nowrap"
                 >
                   <ScanLine className="w-3.5 h-3.5" />
-                  Scan LR &amp; Auto-Paste
+                  Interactive Scan Studio
                 </button>
                 <button
                   type="button"
@@ -3663,6 +3805,57 @@ const BillingQuotesModuleInner: React.FC<BillingQuotesModuleProps> = ({
                 </button>
               </div>
             </div>
+
+            {/* Credit / Debit Note Original Tax Invoice Linker & Reason Strip */}
+            {docKind !== 'Tax Invoice' && (
+              <div className="px-4 py-2.5 bg-amber-50 border-b border-amber-300 grid grid-cols-1 md:grid-cols-3 gap-2.5 text-xs">
+                <div>
+                  <label className="block font-extrabold text-amber-950 mb-1">
+                    Link Original Tax Invoice (Auto-Fills Party &amp; GST) *
+                  </label>
+                  <SearchableSelect
+                    ariaLabel="Link Original Tax Invoice"
+                    value={againstInvoiceId}
+                    onChange={(nextId) => {
+                      const orig = invoices.find((x) => x.id === nextId);
+                      if (orig) applyOriginalInvoiceLinkForNote(orig);
+                    }}
+                    placeholder="-- Select Original Tax Invoice --"
+                    searchPlaceholder="Search Invoice No or Party..."
+                    options={[
+                      { value: '', label: '-- Select Original Tax Invoice --' },
+                      ...invoices
+                        .filter((x) => !x.docKind || x.docKind === 'Tax Invoice')
+                        .map((x) => ({
+                          value: x.id,
+                          label: `${x.invoiceNo} · ${x.partyName} (₹${formatINR(x.grandTotal)})`,
+                        })),
+                    ]}
+                    buttonClassName="bg-white border-amber-400 font-bold"
+                  />
+                </div>
+                <div>
+                  <label className="block font-extrabold text-amber-950 mb-1">
+                    Reason for {docKind} * (Prints on PDF &amp; Tally Narration)
+                  </label>
+                  <input
+                    type="text"
+                    value={creditDebitReason}
+                    onChange={(e) => setCreditDebitReason(e.target.value)}
+                    placeholder="e.g. Rate Difference / Freight Deduction / Detention / GST Reversal"
+                    className="w-full px-2.5 py-1.5 rounded border border-amber-400 bg-white text-slate-900 font-semibold"
+                  />
+                </div>
+                <div className="flex flex-col justify-center bg-white/80 rounded border border-amber-200 px-3 py-1.5">
+                  <span className="font-bold text-amber-950">
+                    Custom / Backdated Date Supported (Edit &quot;Inv Date&quot; below, e.g. 14-11-2026)
+                  </span>
+                  <span className="text-[11px] text-amber-800">
+                    GST Tax ({effectiveGstRate}%), Grand Total &amp; Indian Words update automatically.
+                  </span>
+                </div>
+              </div>
+            )}
 
             {scanMsg && (
               <div className="px-4 py-2 bg-emerald-50 border-b border-emerald-200 text-xs font-semibold text-emerald-800 flex items-center gap-2">
@@ -4987,25 +5180,28 @@ const BillingQuotesModuleInner: React.FC<BillingQuotesModuleProps> = ({
                 </div>
 
                 <div className="flex flex-wrap items-center gap-2">
-                  {!editingInvoiceId && filteredInvoices.length > 0 && (
-                    <button
-                      type="button"
-                      disabled={readOnly}
-                      onClick={() => handleLoadInvoiceForEdit(filteredInvoices[0])}
-                      className="inline-flex items-center gap-1 px-2.5 py-1.5 rounded-md bg-amber-50 border border-amber-300 hover:bg-amber-100 text-amber-900 text-xs font-bold cursor-pointer disabled:opacity-40"
-                      title="Reload latest Tax Invoice for Rectification (keeps serial number & creates CRN/DRN on amount change)"
-                    >
-                      <Edit3 className="w-3.5 h-3.5" />
-                      Rectify Last
-                    </button>
-                  )}
                   <button
                     type="button"
-                    onClick={() => lrScanRef.current?.click()}
+                    onClick={() => {
+                      if (!editingInvoiceId && filteredInvoices.length > 0) {
+                        handleLoadInvoiceForEdit(filteredInvoices[0]);
+                      } else {
+                        invoiceListRef.current?.scrollIntoView({ behavior: 'smooth', block: 'start' });
+                      }
+                    }}
+                    className="inline-flex items-center gap-1 px-2.5 py-1.5 rounded-md bg-amber-50 border border-amber-300 hover:bg-amber-100 text-amber-900 text-xs font-bold cursor-pointer"
+                    title="Jump to Saved List or Load Latest for Rectification"
+                  >
+                    <Edit3 className="w-3.5 h-3.5" />
+                    Saved List / Rectify
+                  </button>
+                  <button
+                    type="button"
+                    onClick={() => setBillingScanStudioOpen(true)}
                     className="inline-flex items-center gap-1 px-2.5 py-1.5 rounded-md border border-emerald-300 bg-emerald-50 hover:bg-emerald-100 text-xs font-bold text-emerald-900 cursor-pointer"
                   >
                     <ScanLine className="w-3.5 h-3.5" />
-                    Scan LR
+                    Interactive Scan Studio
                   </button>
                   <button
                     type="button"
@@ -5127,8 +5323,8 @@ const BillingQuotesModuleInner: React.FC<BillingQuotesModuleProps> = ({
                     onClick={resetInvoiceForm}
                     className="inline-flex items-center gap-1 px-3 py-1.5 rounded-md border border-slate-300 bg-white hover:bg-slate-100 text-xs font-bold text-slate-700 cursor-pointer"
                   >
-                    <Plus className="w-3.5 h-3.5" />
-                    New Bill
+                    <RotateCcw className="w-3.5 h-3.5" />
+                    Clear / Skip
                   </button>
                   <button
                     ref={saveInvBtnRef}
@@ -5140,8 +5336,8 @@ const BillingQuotesModuleInner: React.FC<BillingQuotesModuleProps> = ({
                     {savingInv
                       ? 'Saving...'
                       : editingInvoiceId
-                        ? 'Save Rectified Bill'
-                        : 'Save Bill'}
+                        ? `Save Rectified ${docKind}`
+                        : `Save ${docKind}`}
                   </button>
                 </div>
               </div>
@@ -5161,9 +5357,9 @@ const BillingQuotesModuleInner: React.FC<BillingQuotesModuleProps> = ({
           )}
 
           {/* Saved Invoices Table (Paginated 50/page) */}
-          <div className="bg-white rounded-xl border border-slate-200 shadow-sm overflow-hidden">
+          <div ref={invoiceListRef} className="bg-white rounded-xl border border-slate-200 shadow-sm overflow-hidden scroll-mt-20">
             <div className="bg-gradient-to-r from-[#0D47A1] to-[#1976D2] text-white px-4 py-2 flex flex-wrap items-center justify-between gap-2">
-              <span className="text-sm font-bold">Saved Tax Invoices ({filteredInvoices.length})</span>
+              <span className="text-sm font-bold">Saved Tax Invoices &amp; Credit/Debit Notes ({filteredInvoices.length})</span>
               <div className="relative">
                 <Search className="w-3.5 h-3.5 text-slate-400 absolute left-2.5 top-2" />
                 <input
@@ -5198,6 +5394,73 @@ const BillingQuotesModuleInner: React.FC<BillingQuotesModuleProps> = ({
             <div className="bg-gradient-to-r from-[#0D47A1] to-[#1976D2] text-white px-4 py-2.5 flex flex-wrap items-center justify-between gap-2">
               <span className="text-sm font-bold">Proforma Invoice / Rate of Quotation Generator</span>
               <div className="flex flex-wrap items-center gap-2">
+                <div className="flex items-center gap-1 bg-white/10 rounded px-1.5 py-0.5">
+                  <input
+                    type="text"
+                    value={directQuoteSearch}
+                    onChange={(e) => setDirectQuoteSearch(e.target.value)}
+                    onKeyDown={(e) => {
+                      if (e.key === 'Enter') {
+                        e.preventDefault();
+                        const q = directQuoteSearch.trim().toUpperCase();
+                        if (!q) return;
+                        const found =
+                          quotations.find((x) => (x.quotationNo || '').toUpperCase() === q) ||
+                          quotations.find(
+                            (x) =>
+                              (x.quotationNo || '').toUpperCase().includes(q) ||
+                              (x.partyName || '').toUpperCase().includes(q)
+                          );
+                        if (found) {
+                          loadQuotationForEdit(found);
+                          playVerifiedBeep();
+                        } else {
+                          playAlertBeep();
+                          setScanMsg(`No Quotation found matching "${directQuoteSearch}".`);
+                        }
+                      }
+                    }}
+                    placeholder="Quote No Load..."
+                    className="w-28 px-2 py-0.5 rounded bg-white text-slate-900 text-[11px] font-mono-num focus:outline-none"
+                  />
+                  <button
+                    type="button"
+                    onClick={() => {
+                      const q = directQuoteSearch.trim().toUpperCase();
+                      if (!q) {
+                        quoteListRef.current?.scrollIntoView({ behavior: 'smooth', block: 'start' });
+                        return;
+                      }
+                      const found =
+                        quotations.find((x) => (x.quotationNo || '').toUpperCase() === q) ||
+                        quotations.find(
+                          (x) =>
+                            (x.quotationNo || '').toUpperCase().includes(q) ||
+                            (x.partyName || '').toUpperCase().includes(q)
+                        );
+                      if (found) {
+                        loadQuotationForEdit(found);
+                        playVerifiedBeep();
+                      } else {
+                        playAlertBeep();
+                        setScanMsg(`No Quotation found matching "${directQuoteSearch}".`);
+                      }
+                    }}
+                    className="px-2 py-0.5 rounded bg-amber-300 hover:bg-amber-200 text-slate-950 text-[11px] font-extrabold cursor-pointer"
+                  >
+                    Load
+                  </button>
+                  <button
+                    type="button"
+                    onClick={() => {
+                      resetQuotationForm();
+                      setDirectQuoteSearch('');
+                    }}
+                    className="px-2 py-0.5 rounded bg-white/20 hover:bg-white/30 text-white text-[11px] font-bold cursor-pointer"
+                  >
+                    Clear / Skip
+                  </button>
+                </div>
                 <div className="w-44">
                   <SearchableSelect
                     ariaLabel="Quotation Division"
@@ -5785,25 +6048,28 @@ const BillingQuotesModuleInner: React.FC<BillingQuotesModuleProps> = ({
               </span>
             </div>
             <div className="px-4 py-3 bg-slate-50 border-t border-slate-200 flex flex-wrap justify-end gap-2">
-              {!editingQuotationId && filteredQuotations.length > 0 && (
-                <button
-                  type="button"
-                  disabled={quotationReadOnly}
-                  onClick={() => loadQuotationForEdit(filteredQuotations[0])}
-                  className="inline-flex items-center gap-1 px-2.5 py-1.5 rounded-md bg-amber-50 border border-amber-300 hover:bg-amber-100 text-amber-900 text-xs font-bold cursor-pointer disabled:opacity-40"
-                  title="Reload latest Quotation for Rectification (keeps serial no intact)"
-                >
-                  <Edit3 className="w-3.5 h-3.5" />
-                  Rectify Last
-                </button>
-              )}
               <button
                 type="button"
-                onClick={() => lrScanRef.current?.click()}
+                onClick={() => {
+                  if (!editingQuotationId && filteredQuotations.length > 0) {
+                    loadQuotationForEdit(filteredQuotations[0]);
+                  } else {
+                    quoteListRef.current?.scrollIntoView({ behavior: 'smooth', block: 'start' });
+                  }
+                }}
+                className="inline-flex items-center gap-1 px-2.5 py-1.5 rounded-md bg-amber-50 border border-amber-300 hover:bg-amber-100 text-amber-900 text-xs font-bold cursor-pointer"
+                title="Jump to Saved Quotations or Load Latest for Rectification"
+              >
+                <Edit3 className="w-3.5 h-3.5" />
+                Saved List / Rectify
+              </button>
+              <button
+                type="button"
+                onClick={() => setBillingScanStudioOpen(true)}
                 className="inline-flex items-center gap-1 px-2.5 py-1.5 rounded-md border border-emerald-300 bg-emerald-50 hover:bg-emerald-100 text-emerald-900 text-xs font-bold cursor-pointer"
               >
                 <ScanLine className="w-3.5 h-3.5" />
-                Scan
+                Interactive Scan Studio
               </button>
               <button
                 type="button"
@@ -5927,7 +6193,7 @@ const BillingQuotesModuleInner: React.FC<BillingQuotesModuleProps> = ({
             </div>
           </form>
 
-          <div className="bg-white rounded-xl border border-slate-200 shadow-sm overflow-hidden">
+          <div ref={quoteListRef} className="bg-white rounded-xl border border-slate-200 shadow-sm overflow-hidden scroll-mt-20">
             <div className="bg-slate-800 text-white px-4 py-2 flex flex-wrap items-center justify-between gap-2">
               <span className="text-xs font-bold">Saved Quotations ({filteredQuotations.length})</span>
               <div className="relative">
@@ -5965,23 +6231,88 @@ const BillingQuotesModuleInner: React.FC<BillingQuotesModuleProps> = ({
               <span className="text-sm font-bold">
                 Declaration Under Section 194C (Non-Deduction of Tax) — Proprietor: Subhajit Saha (PAN: {company.pan})
               </span>
-              <div className="w-44">
-                <SearchableSelect
-                  ariaLabel="194C Division"
-                  value={dDivision}
-                  onChange={(val) =>
-                    setDDivision(
-                      val === 'LOGISTICS' || val === 'PTL' || val === 'COURIER' ? val : 'FTL'
-                    )
-                  }
-                  options={[
-                    { value: 'FTL', label: 'FTL Division' },
-                    { value: 'LOGISTICS', label: 'LOGISTICS Division' },
-                    { value: 'PTL', label: 'PTL Division' },
-                    { value: 'COURIER', label: 'COURIER Division' },
-                  ]}
-                  buttonClassName="py-1 text-[#0D47A1] font-extrabold"
-                />
+              <div className="flex flex-wrap items-center gap-2">
+                <div className="flex items-center gap-1 bg-white/10 rounded px-1.5 py-0.5">
+                  <input
+                    type="text"
+                    value={directDeclSearch}
+                    onChange={(e) => setDirectDeclSearch(e.target.value)}
+                    onKeyDown={(e) => {
+                      if (e.key === 'Enter') {
+                        e.preventDefault();
+                        const q = directDeclSearch.trim().toUpperCase();
+                        if (!q) return;
+                        const found = declarations.find(
+                          (x) =>
+                            (x.partyName || '').toUpperCase().includes(q) ||
+                            (x.declarationDate || '').includes(q)
+                        );
+                        if (found) {
+                          loadDeclForEdit(found);
+                          playVerifiedBeep();
+                        } else {
+                          playAlertBeep();
+                          setScanMsg(`No 194C Declaration found matching "${directDeclSearch}".`);
+                        }
+                      }
+                    }}
+                    placeholder="Party / Date Load..."
+                    className="w-32 px-2 py-0.5 rounded bg-white text-slate-900 text-[11px] focus:outline-none"
+                  />
+                  <button
+                    type="button"
+                    onClick={() => {
+                      const q = directDeclSearch.trim().toUpperCase();
+                      if (!q) {
+                        declListRef.current?.scrollIntoView({ behavior: 'smooth', block: 'start' });
+                        return;
+                      }
+                      const found = declarations.find(
+                        (x) =>
+                          (x.partyName || '').toUpperCase().includes(q) ||
+                          (x.declarationDate || '').includes(q)
+                      );
+                      if (found) {
+                        loadDeclForEdit(found);
+                        playVerifiedBeep();
+                      } else {
+                        playAlertBeep();
+                        setScanMsg(`No 194C Declaration found matching "${directDeclSearch}".`);
+                      }
+                    }}
+                    className="px-2 py-0.5 rounded bg-amber-300 hover:bg-amber-200 text-slate-950 text-[11px] font-extrabold cursor-pointer"
+                  >
+                    Load
+                  </button>
+                  <button
+                    type="button"
+                    onClick={() => {
+                      resetDeclForm();
+                      setDirectDeclSearch('');
+                    }}
+                    className="px-2 py-0.5 rounded bg-white/20 hover:bg-white/30 text-white text-[11px] font-bold cursor-pointer"
+                  >
+                    Clear / Skip
+                  </button>
+                </div>
+                <div className="w-44">
+                  <SearchableSelect
+                    ariaLabel="194C Division"
+                    value={dDivision}
+                    onChange={(val) =>
+                      setDDivision(
+                        val === 'LOGISTICS' || val === 'PTL' || val === 'COURIER' ? val : 'FTL'
+                      )
+                    }
+                    options={[
+                      { value: 'FTL', label: 'FTL Division' },
+                      { value: 'LOGISTICS', label: 'LOGISTICS Division' },
+                      { value: 'PTL', label: 'PTL Division' },
+                      { value: 'COURIER', label: 'COURIER Division' },
+                    ]}
+                    buttonClassName="py-1 text-[#0D47A1] font-extrabold"
+                  />
+                </div>
               </div>
             </div>
             <div className="p-4 grid grid-cols-1 md:grid-cols-3 gap-3 text-xs">
@@ -6105,25 +6436,28 @@ const BillingQuotesModuleInner: React.FC<BillingQuotesModuleProps> = ({
               Includes Royal Blue Dolphin Ring top-left logo, 11% Twin-Dolphin Heart D.R.C center watermark, Proprietor PAN Card photo bottom-left (PAN: {company.pan}), and Subhajit Saha Proprietor Signature with Blue Round Seal bottom-right identically across all 4 divisions.
             </div>
             <div className="px-4 py-3 bg-slate-50 border-t border-slate-200 flex flex-wrap justify-end gap-2">
-              {!editingDeclId && filteredDeclarations.length > 0 && (
-                <button
-                  type="button"
-                  disabled={declarationReadOnly}
-                  onClick={() => loadDeclForEdit(filteredDeclarations[0])}
-                  className="inline-flex items-center gap-1 px-2.5 py-1.5 rounded-md bg-amber-50 border border-amber-300 hover:bg-amber-100 text-amber-900 text-xs font-bold cursor-pointer disabled:opacity-40"
-                  title="Reload latest Section 194C Declaration for Rectification"
-                >
-                  <Edit3 className="w-3.5 h-3.5" />
-                  Rectify Last
-                </button>
-              )}
               <button
                 type="button"
-                onClick={() => lrScanRef.current?.click()}
+                onClick={() => {
+                  if (!editingDeclId && filteredDeclarations.length > 0) {
+                    loadDeclForEdit(filteredDeclarations[0]);
+                  } else {
+                    declListRef.current?.scrollIntoView({ behavior: 'smooth', block: 'start' });
+                  }
+                }}
+                className="inline-flex items-center gap-1 px-2.5 py-1.5 rounded-md bg-amber-50 border border-amber-300 hover:bg-amber-100 text-amber-900 text-xs font-bold cursor-pointer"
+                title="Jump to Saved 194C List or Load Latest for Rectification"
+              >
+                <Edit3 className="w-3.5 h-3.5" />
+                Saved List / Rectify
+              </button>
+              <button
+                type="button"
+                onClick={() => setBillingScanStudioOpen(true)}
                 className="inline-flex items-center gap-1 px-2.5 py-1.5 rounded-md border border-emerald-300 bg-emerald-50 hover:bg-emerald-100 text-emerald-900 text-xs font-bold cursor-pointer"
               >
                 <ScanLine className="w-3.5 h-3.5" />
-                Scan
+                Interactive Scan Studio
               </button>
               <button
                 type="button"
@@ -6256,7 +6590,7 @@ const BillingQuotesModuleInner: React.FC<BillingQuotesModuleProps> = ({
           </form>
 
           {declarations.length > 0 && (
-            <div className="bg-white rounded-xl border border-slate-200 shadow-sm overflow-hidden">
+            <div ref={declListRef} className="bg-white rounded-xl border border-slate-200 shadow-sm overflow-hidden scroll-mt-20">
               <div className="bg-slate-800 text-white px-4 py-2 flex flex-wrap items-center justify-between gap-2">
                 <span className="text-xs font-bold">
                   Issued Section 194C Declarations ({filteredDeclarations.length})
@@ -6283,6 +6617,27 @@ const BillingQuotesModuleInner: React.FC<BillingQuotesModuleProps> = ({
           )}
         </div>
       )}
+
+      <CameraPodQrScannerModal
+        open={billingScanStudioOpen}
+        mode="both"
+        title="Billing / Quotation / 194C Interactive Scan Studio"
+        onClose={() => setBillingScanStudioOpen(false)}
+        onCapturePodImage={(dataUrl, fileName) => {
+          const f = dataUrlToFile(dataUrl, fileName);
+          void handleScanLRIntoBill(f);
+        }}
+        onQrDecoded={(parsed) => {
+          if (parsed.ewbNo) {
+            setAdditionalNotes((prev) =>
+              prev ? `${prev} | EWB: ${parsed.ewbNo}` : `EWB: ${parsed.ewbNo}`
+            );
+          }
+          if (parsed.cnNo) {
+            setScanMsg(`QR Decoded CN ${parsed.cnNo}${parsed.ewbNo ? ` / EWB ${parsed.ewbNo}` : ''}.`);
+          }
+        }}
+      />
     </div>
   );
 };

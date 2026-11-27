@@ -22,6 +22,7 @@ import {
   Printer,
   RotateCcw,
   Save,
+  ScanLine,
   Search,
   Settings2,
   Smartphone,
@@ -131,6 +132,9 @@ import { SupportedCountry } from '../lib/postalPinLookup';
 import { VoiceDraftFields } from '../lib/voicePilot';
 import { PinCountryInputs, useAutoPinLookup } from './CityPinCountryAutoFill';
 import { deleteIdbObject, loadIdbObject, saveIdbObject } from '../lib/indexedDbStore';
+import { CameraPodQrScannerModal } from './CameraPodQrScannerModal';
+import { dataUrlToFile } from '../lib/cameraHelper';
+import { scanPhysicalLR } from '../lib/ocrEngine';
 
 interface AllInOneEntrySheetProps {
   divisionMode: BusinessMode;
@@ -271,6 +275,7 @@ const AllInOneEntrySheetInner: React.FC<AllInOneEntrySheetProps> = ({
   const divisionMeta = BUSINESS_MODE_META[divisionMode];
   const isFtl = divisionMode === 'FTL';
   const topFormRef = useRef<HTMLDivElement | null>(null);
+  const savedRegisterRef = useRef<HTMLDivElement | null>(null);
   const scanFileInputRef = useRef<HTMLInputElement | null>(null);
 
   // Linked edit IDs (Strictly CN/Docket + Lorry Hire + Staff — NO Tax Invoice inside Sheet A)
@@ -278,6 +283,7 @@ const AllInOneEntrySheetInner: React.FC<AllInOneEntrySheetProps> = ({
   const [editingDocketId, setEditingDocketId] = useState<string | null>(null);
   const [editingHireId, setEditingHireId] = useState<string | null>(null);
   const [editingStaffId, setEditingStaffId] = useState<string | null>(null);
+  const [scanStudioOpen, setScanStudioOpen] = useState(false);
 
   // Find CN/LR Instant Search
   const [findCnQuery, setFindCnQuery] = useState('');
@@ -2356,11 +2362,21 @@ const AllInOneEntrySheetInner: React.FC<AllInOneEntrySheetProps> = ({
 
           <button
             type="button"
+            onClick={() =>
+              savedRegisterRef.current?.scrollIntoView({ behavior: 'smooth', block: 'start' })
+            }
+            className="inline-flex items-center gap-1 px-2.5 py-1.5 rounded-lg bg-white/15 hover:bg-white/25 text-white text-xs font-bold cursor-pointer"
+          >
+            <ClipboardList className="w-3.5 h-3.5 text-amber-300" />
+            <span>Saved List / Rectify</span>
+          </button>
+          <button
+            type="button"
             onClick={resetFormToBlank}
             className="inline-flex items-center gap-1 px-2.5 py-1.5 rounded-lg bg-white/15 hover:bg-white/25 text-white text-xs font-bold cursor-pointer"
           >
             <RotateCcw className="w-3.5 h-3.5" />
-            <span>New Sheet</span>
+            <span>Clear / Skip</span>
           </button>
           <button
             type="button"
@@ -3818,6 +3834,24 @@ const AllInOneEntrySheetInner: React.FC<AllInOneEntrySheetProps> = ({
                 <FileSpreadsheet className="w-3.5 h-3.5" />
                 Low-MB PDF
               </button>
+              <button
+                type="button"
+                onClick={() =>
+                  savedRegisterRef.current?.scrollIntoView({ behavior: 'smooth', block: 'start' })
+                }
+                className="inline-flex items-center gap-1 px-2.5 py-1.5 rounded-lg bg-amber-100 hover:bg-amber-200 text-amber-950 text-[11px] font-bold cursor-pointer"
+              >
+                <Edit3 className="w-3.5 h-3.5" />
+                Saved List / Rectify
+              </button>
+              <button
+                type="button"
+                onClick={resetFormToBlank}
+                className="inline-flex items-center gap-1 px-2.5 py-1.5 rounded-lg border border-slate-300 bg-white hover:bg-red-50 text-slate-700 hover:text-red-700 text-[11px] font-bold cursor-pointer"
+              >
+                <RotateCcw className="w-3.5 h-3.5" />
+                Clear / Skip
+              </button>
               <input
                 ref={scanFileInputRef}
                 type="file"
@@ -3827,11 +3861,20 @@ const AllInOneEntrySheetInner: React.FC<AllInOneEntrySheetProps> = ({
               />
               <button
                 type="button"
-                onClick={() => scanFileInputRef.current?.click()}
+                onClick={() => setScanStudioOpen(true)}
                 className="inline-flex items-center gap-1 px-2.5 py-1.5 rounded-lg bg-purple-600 hover:bg-purple-700 text-white text-[11px] font-bold cursor-pointer"
               >
+                <ScanLine className="w-3.5 h-3.5" />
+                {scannedLrDataUrl ? 'Scan Studio (Attached ✓)' : 'Interactive Scan Studio'}
+              </button>
+              <button
+                type="button"
+                onClick={() => scanFileInputRef.current?.click()}
+                className="inline-flex items-center gap-1 px-2 py-1.5 rounded-lg border border-purple-300 bg-purple-50 hover:bg-purple-100 text-purple-900 text-[11px] font-bold cursor-pointer"
+                title="Upload Scan Image File"
+              >
                 <Camera className="w-3.5 h-3.5" />
-                {scannedLrDataUrl ? 'LR Scan Attached ✓' : 'Scan LR / POD'}
+                Upload Scan
               </button>
             </div>
             <div className="flex flex-wrap items-center gap-1.5">
@@ -4854,7 +4897,7 @@ const AllInOneEntrySheetInner: React.FC<AllInOneEntrySheetProps> = ({
       </div>
 
       {/* LIVE VIEW ENTRY SHEET / REGISTER TABLE */}
-      <div className="bg-white rounded-xl border border-slate-300 shadow-sm overflow-hidden">
+      <div ref={savedRegisterRef} className="bg-white rounded-xl border border-slate-300 shadow-sm overflow-hidden">
         <div className="bg-slate-900 text-white px-4 py-2.5 flex flex-wrap items-center justify-between gap-2">
           <div className="flex items-center gap-2 text-xs font-extrabold">
             <Wallet className="w-4 h-4 text-emerald-400" />
@@ -5239,6 +5282,32 @@ const AllInOneEntrySheetInner: React.FC<AllInOneEntrySheetProps> = ({
           </div>
         </div>
       )}
+      <CameraPodQrScannerModal
+        open={scanStudioOpen}
+        mode="both"
+        title="Interactive Scan Studio — Bilty / LR Camera, E-Way QR & Upload"
+        onClose={() => setScanStudioOpen(false)}
+        onCapturePodImage={(dataUrl, fileName) => {
+          setScannedLrDataUrl(dataUrl);
+          setStatusToast('Captured & compressed LR/POD scan inside Interactive Scan Studio.');
+          const file = dataUrlToFile(dataUrl, fileName || `lr-studio-${Date.now()}.jpg`);
+          if (file) {
+            void scanPhysicalLR(file).then((ocr) => {
+              if (ocr.ewbNo && !ewayBillNo.trim()) setEwayBillNo(ocr.ewbNo);
+              if (ocr.taxInvNo && !taxInvNo.trim()) setTaxInvNo(ocr.taxInvNo);
+              if (ocr.truckNo && !truckNo.trim()) setTruckNo(ocr.truckNo);
+              if (ocr.goodsDesc && !particulars.trim()) setParticulars(ocr.goodsDesc);
+            }).catch(() => {});
+          }
+        }}
+        onQrDecoded={(parsed) => {
+          if (parsed.ewbNo) setEwayBillNo(parsed.ewbNo);
+          if (parsed.ewbDate) setEwayBillDate(parsed.ewbDate);
+          if (parsed.validUpto) setEwayBillValidUpto(parsed.validUpto);
+          if (parsed.vehicleNo && !truckNo.trim()) setTruckNo(parsed.vehicleNo);
+          setStatusToast(`QR Auto-Filled: ${parsed.summary}`);
+        }}
+      />
     </div>
   );
 };

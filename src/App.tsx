@@ -514,6 +514,7 @@ export default function App() {
   const [masterInitialTab, setMasterInitialTab] = useState<MasterTabId>('parties');
   const [masterFocusNonce, setMasterFocusNonce] = useState(0);
   const [billingInitialSubTab, setBillingInitialSubTab] = useState<'invoice' | 'quotation' | '194c'>('invoice');
+  const [billingInitialDocKind, setBillingInitialDocKind] = useState<'Tax Invoice' | 'Credit Note' | 'Debit Note'>('Tax Invoice');
   const [billingFocusNonce, setBillingFocusNonce] = useState(0);
   const [reportInitialTab, setReportInitialTab] = useState<ReportTab>('invoiceRegister');
   const [reportFocusNonce, setReportFocusNonce] = useState(0);
@@ -4199,6 +4200,8 @@ export default function App() {
                 consignments={visibleConsignments}
                 lorryHires={visibleLorryHires}
                 transactions={visibleTransactions}
+                bankReceipts={bankReceipts}
+                staffCommissions={staffCommissions}
                 company={companySettings}
                 initialTab={masterInitialTab}
                 onOpenPodScanner={() => openOrSwitchTab('podScanner')}
@@ -4234,7 +4237,7 @@ export default function App() {
 
             {activeTab === 'billing' && (
               <BillingQuotesModule
-                key={`billing_${billingInitialSubTab}_${billingFocusNonce}`}
+                key={`billing_${billingInitialSubTab}_${billingInitialDocKind}_${billingFocusNonce}`}
                 ownerUid={workspaceUid}
                 activeStaffCode={activeStaffCode}
                 activeStaffName={activeStaffName}
@@ -4245,6 +4248,7 @@ export default function App() {
                 quotationsAccess={getSheetAccess('quotations')}
                 declarationsAccess={getSheetAccess('declarations')}
                 initialSubTab={billingInitialSubTab}
+                initialDocKind={billingInitialDocKind}
                 invoices={visibleInvoices}
                 quotations={visibleQuotations}
                 declarations={visibleDeclarations}
@@ -4310,6 +4314,12 @@ export default function App() {
                 driveAccessToken={driveAccessToken}
                 readOnly={getSheetAccess('bankImport') === 'view'}
                 onOpenPodScanner={() => openOrSwitchTab('podScanner')}
+                onCreateCreditDebitNote={(kind) => {
+                  setBillingInitialSubTab('invoice');
+                  setBillingInitialDocKind(kind);
+                  setBillingFocusNonce((n) => n + 1);
+                  openOrSwitchTab('billing');
+                }}
                 onOpenPreview={(pdf) => handlePreviewPdf(pdf, 'Reports_Ledgers')}
               />
             )}
@@ -4393,6 +4403,7 @@ export default function App() {
                 company={companySettings}
                 lorryHires={visibleLorryHires}
                 consignments={visibleConsignments}
+                invoices={visibleInvoices}
                 hasDriveToken={Boolean(driveAccessToken)}
                 driveAccessToken={driveAccessToken}
                 connectedDriveEmail={connectedEmail}
